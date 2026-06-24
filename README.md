@@ -7,6 +7,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 - 开发计划：`dev.md`
 - 编码规范：`rule.md`
 - Rust workspace
+- egui/eframe 桌面入口：`apps/desktop`
 - 通用模型和全局工具：`crates/db-common`
 - 应用服务骨架：`crates/app-core`
 - 数据库适配器占位 crate
@@ -28,7 +29,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 - 密码保存策略：`PasswordUpdate::Keep`、`Clear`、`Replace`
 - 默认不保存密码，只有 `ConnectionSecurity.save_password = true` 时才写入安全存储。
 
-桌面入口当前会初始化连接管理服务，但还没有实现 UI。
+桌面入口使用 egui/eframe，当前会初始化连接管理服务，并包含结果集展示原型。
 
 ## 第二阶段能力
 
@@ -55,6 +56,25 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 - 没有实现前端对象树 UI。
 - 每次元数据请求会短连接数据库，查询会话和连接池放到后续阶段。
 - Redis key 浏览默认每次扫描 500 个 key。
+
+## 第三阶段能力
+
+已实现 SQL 查询和结果集展示的基础能力：
+
+- 查询执行服务：`app_core::query::QueryService`
+- MySQL、PostgreSQL、SQLite、DuckDB 查询执行适配器
+- egui 结果集表格原型：
+  - 分页和虚拟滚动
+  - 列宽调整
+  - 复制单元格、复制行、复制带表头结果
+  - NULL、二进制、日期时间字段格式化展示
+  - 按列排序
+  - CSV、JSON、Excel 兼容格式导出到剪贴板
+
+当前限制：
+
+- 查询编辑器和真实查询结果 UI 接入还在后续阶段。
+- 导出当前先复制到剪贴板，文件保存对话框后续补齐。
 
 可选环境变量：
 
