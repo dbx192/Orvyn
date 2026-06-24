@@ -1,10 +1,6 @@
 use db_common::{AppError, ErrorKind, Result};
 use std::sync::Arc;
-use tokio::{
-    runtime::Handle,
-    sync::{Semaphore, SemaphorePermit},
-    task::JoinHandle,
-};
+use tokio::{runtime::Handle, sync::Semaphore, task::JoinHandle};
 
 #[derive(Clone)]
 pub struct BlockingPool {
@@ -31,12 +27,10 @@ impl BlockingPool {
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        let permit = self.acquire_permit().await?;
+        let _permit = self.acquire_permit().await?;
+        let runtime_handle = self.runtime_handle.clone();
 
-        let handle: JoinHandle<Result<R>> = self.runtime_handle.spawn_blocking(move || {
-            let _permit = permit;
-            f()
-        });
+        let handle: JoinHandle<Result<R>> = runtime_handle.spawn_blocking(move || f());
 
         handle.await.map_err(|e| {
             if e.is_cancelled() {
@@ -53,12 +47,10 @@ impl BlockingPool {
         F: FnOnce() -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        let permit = self.acquire_permit().await?;
+        let _permit = self.acquire_permit().await?;
+        let runtime_handle = self.runtime_handle.clone();
 
-        let handle: JoinHandle<Result<R>> = self.runtime_handle.spawn_blocking(move || {
-            let _permit = permit;
-            f()
-        });
+        let handle: JoinHandle<Result<R>> = runtime_handle.spawn_blocking(move || f());
 
         let timeout = std::time::Duration::from_millis(timeout_ms);
         tokio::time::timeout(timeout, handle)
@@ -74,10 +66,11 @@ impl BlockingPool {
             })?
     }
 
-    async fn acquire_permit(&self) -> Result<SemaphorePermit<'_>> {
+    async fn acquire_permit(&self) -> Result<()> {
         self.semaphore
             .acquire()
             .await
+            .map(|_| ())
             .map_err(|_| AppError::new(ErrorKind::Internal, "blocking pool semaphore closed"))
     }
 

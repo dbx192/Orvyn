@@ -1,8 +1,6 @@
 mod ui;
 
-use app_core::{
-    connection::ConnectionManager, query::QueryService, storage::FileConnectionProfileStore,
-};
+use app_core::{connection::ConnectionManager, query::QueryService, storage::FileConnectionProfileStore};
 use eframe::NativeOptions;
 use secure_store::EncryptedFileStore;
 use std::{path::PathBuf, sync::Arc};

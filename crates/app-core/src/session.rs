@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, instrument};
 
+#[derive(Clone)]
 pub struct SessionManager {
     connections: ConnectionManager,
     testers: Arc<BTreeMap<DataSourceKind, Arc<dyn ConnectionTester>>>,
