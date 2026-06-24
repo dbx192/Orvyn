@@ -5,8 +5,8 @@
 
 use crate::connection::ConnectionManager;
 use db_common::{
-    unsupported_kind, AppError, ConnectionId, DataSourceKind, DatabaseObject, DatabaseObjectKind,
-    ErrorKind, MetadataNode, MetadataNodeKind, MetadataPath, RedisKeyInfo, RedisMetadataReader,
+    unsupported_kind, AppError, ConnectionId, DataSourceKind, DatabaseObject, ErrorKind,
+    MetadataNode, MetadataNodeKind, MetadataPath, RedisKeyInfo, RedisMetadataReader,
     RelationalMetadataReader, Result, TableColumn, TableIndex,
 };
 use std::{collections::BTreeMap, sync::Arc};

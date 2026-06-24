@@ -8,5 +8,5 @@ version.workspace = true
 [dependencies]
 async-trait.workspace = true
 db-common.workspace = true
-mysql_async.workspace = true
+sqlx.workspace = true
 urlencoding.workspace = true

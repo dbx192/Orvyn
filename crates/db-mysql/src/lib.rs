@@ -6,7 +6,7 @@ use db_common::{
     DataSourceKind, DatabaseObject, DatabaseObjectKind, ErrorKind, RelationalMetadataReader,
     Result, TableColumn, TableIndex,
 };
-use mysql_async::{prelude::Queryable, Opts, Pool};
+use sqlx::{mysql::MySqlPoolOptions, MySqlPool, Row};
 use std::time::Instant;
 
 pub const ADAPTER_NAME: &str = "mysql";
@@ -31,30 +31,12 @@ impl ConnectionTester for MySqlConnectionTester {
         profile.validate()?;
 
         let started_at = Instant::now();
-        let url = mysql_url(profile, password)?;
-        let opts = Opts::from_url(&url).map_err(|error| {
-            AppError::new(ErrorKind::Connection, "invalid MySQL connection options")
-                .with_detail(error.to_string())
-        })?;
-        let pool = Pool::new(opts);
-        let mut conn = pool.get_conn().await.map_err(|error| {
-            AppError::new(ErrorKind::Connection, "failed to connect to MySQL")
-                .with_detail(redact_connection_url(&error.to_string()))
-        })?;
-
-        let version = conn
-            .query_first::<String, _>("SELECT VERSION()")
+        let pool = mysql_pool(profile, password).await?;
+        let version: Option<String> = sqlx::query_scalar("SELECT VERSION()")
+            .fetch_optional(&pool)
             .await
-            .map_err(|error| {
-                AppError::new(ErrorKind::Query, "failed to test MySQL connection")
-                    .with_detail(error.to_string())
-            })?;
-
-        drop(conn);
-        pool.disconnect().await.map_err(|error| {
-            AppError::new(ErrorKind::Connection, "failed to close MySQL connection")
-                .with_detail(error.to_string())
-        })?;
+            .map_err(mysql_query_error)?;
+        pool.close().await;
 
         let mut report =
             ConnectionTestReport::success(DataSourceKind::MySql, started_at.elapsed().as_millis());
@@ -78,13 +60,16 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         profile: &ConnectionProfile,
         password: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        let pool = mysql_pool(profile, password)?;
-        let mut conn = mysql_conn(&pool).await?;
-        let rows: Vec<String> = conn.query("SHOW DATABASES").await.map_err(query_error)?;
-        close_pool(pool, conn);
+        let pool = mysql_pool(profile, password).await?;
+        let rows = sqlx::query("SHOW DATABASES")
+            .fetch_all(&pool)
+            .await
+            .map_err(mysql_query_error)?;
+        pool.close().await;
 
         Ok(rows
             .into_iter()
+            .map(|row| row.get::<String, _>(0))
             .filter(|name| !matches!(name.as_str(), "information_schema" | "performance_schema"))
             .map(|name| DatabaseObject {
                 kind: DatabaseObjectKind::Database,
@@ -161,32 +146,35 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL columns",
             )
         })?;
-        let pool = mysql_pool(profile, password)?;
-        let mut conn = mysql_conn(&pool).await?;
-        let rows: Vec<(String, String, String, Option<String>, String, Option<String>)> = conn
-            .exec(
-                "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, COLUMN_COMMENT \
-                 FROM information_schema.COLUMNS \
-                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
-                 ORDER BY ORDINAL_POSITION",
-                (database, table),
-            )
-            .await
-            .map_err(query_error)?;
-        close_pool(pool, conn);
+        let pool = mysql_pool(profile, password).await?;
+        let rows = sqlx::query(
+            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, COLUMN_COMMENT \
+             FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+             ORDER BY ORDINAL_POSITION",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&pool)
+        .await
+        .map_err(mysql_query_error)?;
+        pool.close().await;
 
         Ok(rows
             .into_iter()
-            .map(
-                |(name, database_type, nullable, default_value, column_key, comment)| TableColumn {
-                    name,
-                    database_type,
-                    nullable: nullable.eq_ignore_ascii_case("YES"),
-                    default_value,
-                    primary_key: column_key == "PRI",
+            .map(|row| {
+                let comment: Option<String> = row.get("COLUMN_COMMENT");
+                TableColumn {
+                    name: row.get("COLUMN_NAME"),
+                    database_type: row.get("COLUMN_TYPE"),
+                    nullable: row
+                        .get::<String, _>("IS_NULLABLE")
+                        .eq_ignore_ascii_case("YES"),
+                    default_value: row.get("COLUMN_DEFAULT"),
+                    primary_key: row.get::<String, _>("COLUMN_KEY") == "PRI",
                     comment: comment.filter(|value| !value.is_empty()),
-                },
-            )
+                }
+            })
             .collect())
     }
 
@@ -204,19 +192,19 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL indexes",
             )
         })?;
-        let pool = mysql_pool(profile, password)?;
-        let mut conn = mysql_conn(&pool).await?;
-        let rows: Vec<(String, String, u8)> = conn
-            .exec(
-                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
-                 FROM information_schema.STATISTICS \
-                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
-                 ORDER BY INDEX_NAME, SEQ_IN_INDEX",
-                (database, table),
-            )
-            .await
-            .map_err(query_error)?;
-        close_pool(pool, conn);
+        let pool = mysql_pool(profile, password).await?;
+        let rows = sqlx::query(
+            "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
+             FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+             ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&pool)
+        .await
+        .map_err(mysql_query_error)?;
+        pool.close().await;
 
         Ok(group_mysql_indexes(rows))
     }
@@ -248,29 +236,22 @@ fn mysql_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<Stri
     Ok(format!("mysql://{auth}{host}:{port}{database}"))
 }
 
-fn mysql_pool(profile: &ConnectionProfile, password: Option<&str>) -> Result<Pool> {
+async fn mysql_pool(profile: &ConnectionProfile, password: Option<&str>) -> Result<MySqlPool> {
     profile.validate()?;
     let url = mysql_url(profile, password)?;
-    let opts = Opts::from_url(&url).map_err(|error| {
-        AppError::new(ErrorKind::Connection, "invalid MySQL connection options")
-            .with_detail(error.to_string())
-    })?;
-    Ok(Pool::new(opts))
+    MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .map_err(mysql_connection_error)
 }
 
-async fn mysql_conn(pool: &Pool) -> Result<mysql_async::Conn> {
-    pool.get_conn().await.map_err(|error| {
-        AppError::new(ErrorKind::Connection, "failed to connect to MySQL")
-            .with_detail(redact_connection_url(&error.to_string()))
-    })
+fn mysql_connection_error(error: sqlx::Error) -> AppError {
+    AppError::new(ErrorKind::Connection, "failed to connect to MySQL")
+        .with_detail(redact_connection_url(&error.to_string()))
 }
 
-fn close_pool(pool: Pool, conn: mysql_async::Conn) {
-    drop(conn);
-    drop(pool);
-}
-
-fn query_error(error: mysql_async::Error) -> AppError {
+fn mysql_query_error(error: sqlx::Error) -> AppError {
     AppError::new(ErrorKind::Query, "failed to query MySQL metadata")
         .with_detail(redact_connection_url(&error.to_string()))
 }
@@ -288,49 +269,52 @@ async fn list_mysql_objects(
             "database is required for MySQL objects",
         )
     })?;
-    let pool = mysql_pool(profile, password)?;
-    let mut conn = mysql_conn(&pool).await?;
-    let rows: Vec<String> = conn
-        .exec(
-            "SELECT TABLE_NAME FROM information_schema.TABLES \
-             WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = ? \
-             ORDER BY TABLE_NAME",
-            (database, table_type),
-        )
-        .await
-        .map_err(query_error)?;
-    close_pool(pool, conn);
+    let pool = mysql_pool(profile, password).await?;
+    let rows = sqlx::query(
+        "SELECT TABLE_NAME FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = ? \
+         ORDER BY TABLE_NAME",
+    )
+    .bind(database)
+    .bind(table_type)
+    .fetch_all(&pool)
+    .await
+    .map_err(mysql_query_error)?;
+    pool.close().await;
 
     Ok(rows
         .into_iter()
-        .map(|name| DatabaseObject {
-            kind,
-            name,
-            schema: Some(database.to_string()),
-            parent: Some(database.to_string()),
+        .map(|row| {
+            let name: String = row.get("TABLE_NAME");
+            DatabaseObject {
+                kind,
+                name,
+                schema: Some(database.to_string()),
+                parent: Some(database.to_string()),
+            }
         })
         .collect())
 }
 
-fn group_mysql_indexes(rows: Vec<(String, String, u8)>) -> Vec<TableIndex> {
+fn group_mysql_indexes(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<TableIndex> {
     let mut indexes: Vec<TableIndex> = Vec::new();
 
-    for (name, column, non_unique) in rows {
+    for row in rows {
+        let name: String = row.get("INDEX_NAME");
+        let column: String = row.get("COLUMN_NAME");
+        let non_unique: i8 = row.get("NON_UNIQUE");
+
         if let Some(index) = indexes.iter_mut().find(|index| index.name == name) {
             index.columns.push(column);
             continue;
         }
 
         indexes.push(TableIndex {
+            primary: name == "PRIMARY",
             name,
             columns: vec![column],
             unique: non_unique == 0,
-            primary: false,
         });
-    }
-
-    for index in &mut indexes {
-        index.primary = index.name == "PRIMARY";
     }
 
     indexes
