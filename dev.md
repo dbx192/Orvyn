@@ -793,6 +793,16 @@ Dialect:
 - 可展开数据库对象树。
 - 可查看表字段和基础结构。
 
+当前实现状态：
+
+- 已实现后端对象树服务 `MetadataService`。
+- 已实现统一对象树节点模型 `MetadataNode`、`MetadataPath`。
+- 已实现 MySQL、PostgreSQL、SQLite、DuckDB 的数据库、schema、表、视图、字段、索引元数据读取。
+- 已实现 Redis DB 列表和 SCAN key 浏览。
+- 已实现 Redis key 类型和 TTL 基础信息读取。
+- 对象树 UI 尚未实现。
+- 当前元数据请求使用短连接，连接池和查询会话留到后续阶段。
+
 ### 里程碑 3：SQL 查询编辑器
 
 目标：

@@ -31,6 +31,7 @@ pub use result_set::{CellValue, Column, LogicalType, QueryResult, Row};
 pub use sql::{looks_like_unqualified_mutation, statement_summary, trim_sql};
 pub use time::{elapsed_ms, now_utc};
 pub use traits::{
-    ConnectionTester, DatabaseObject, DatabaseObjectKind, RedisConnector, RedisDatabase,
-    RedisKeyInfo, RedisValue, RelationalConnector, TableColumn, TableIndex,
+    ConnectionTester, DatabaseObject, DatabaseObjectKind, MetadataNode, MetadataNodeKind,
+    MetadataPath, RedisConnector, RedisDatabase, RedisKeyInfo, RedisKeyScan, RedisMetadataReader,
+    RedisValue, RelationalConnector, RelationalMetadataReader, TableColumn, TableIndex,
 };

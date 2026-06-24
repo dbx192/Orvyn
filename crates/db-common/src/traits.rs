@@ -1,6 +1,6 @@
 use crate::{
-    CellValue, ConnectionProfile, ConnectionTestReport, DataSourceKind, PageRequest, QueryResult,
-    Result,
+    CellValue, ConnectionId, ConnectionProfile, ConnectionTestReport, DataSourceKind, PageRequest,
+    QueryResult, Result,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,155 @@ pub struct TableIndex {
     pub primary: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MetadataNodeKind {
+    Connection,
+    Database,
+    Schema,
+    TablesFolder,
+    ViewsFolder,
+    ColumnsFolder,
+    IndexesFolder,
+    Table,
+    View,
+    Column,
+    Index,
+    RedisDatabase,
+    RedisKeysFolder,
+    RedisKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MetadataPath {
+    pub connection_id: ConnectionId,
+    pub kind: MetadataNodeKind,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub object: Option<String>,
+    pub extra: Option<String>,
+}
+
+impl MetadataPath {
+    pub fn connection(connection_id: ConnectionId) -> Self {
+        Self {
+            connection_id,
+            kind: MetadataNodeKind::Connection,
+            database: None,
+            schema: None,
+            object: None,
+            extra: None,
+        }
+    }
+
+    pub fn child(mut self, kind: MetadataNodeKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn with_database(mut self, database: impl Into<String>) -> Self {
+        self.database = Some(database.into());
+        self
+    }
+
+    pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
+        self.schema = Some(schema.into());
+        self
+    }
+
+    pub fn with_object(mut self, object: impl Into<String>) -> Self {
+        self.object = Some(object.into());
+        self
+    }
+
+    pub fn with_extra(mut self, extra: impl Into<String>) -> Self {
+        self.extra = Some(extra.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataNode {
+    pub path: MetadataPath,
+    pub label: String,
+    pub kind: MetadataNodeKind,
+    pub leaf: bool,
+    pub detail: Option<String>,
+}
+
+impl MetadataNode {
+    pub fn new(path: MetadataPath, label: impl Into<String>, kind: MetadataNodeKind) -> Self {
+        Self {
+            path,
+            label: label.into(),
+            kind,
+            leaf: false,
+            detail: None,
+        }
+    }
+
+    pub fn leaf(mut self, leaf: bool) -> Self {
+        self.leaf = leaf;
+        self
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+}
+
+#[async_trait]
+pub trait RelationalMetadataReader: Send + Sync {
+    fn kind(&self) -> DataSourceKind;
+
+    async fn list_databases(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>>;
+
+    async fn list_schemas(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>>;
+
+    async fn list_tables(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>>;
+
+    async fn list_views(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>>;
+
+    async fn list_columns(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableColumn>>;
+
+    async fn list_indexes(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableIndex>>;
+}
+
 #[async_trait]
 pub trait RelationalConnector: Send + Sync {
     async fn test_connection(&self, profile: &ConnectionProfile) -> Result<()>;
@@ -88,6 +237,12 @@ pub struct RedisKeyInfo {
     pub type_name: String,
     pub ttl_seconds: Option<i64>,
     pub size_hint: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisKeyScan {
+    pub next_cursor: u64,
+    pub keys: Vec<RedisKeyInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,4 +283,25 @@ pub trait RedisConnector: Send + Sync {
     async fn delete_key(&self, database: u8, key: &str) -> Result<()>;
 
     async fn execute_command(&self, database: u8, command: &str) -> Result<RedisValue>;
+}
+
+#[async_trait]
+pub trait RedisMetadataReader: Send + Sync {
+    fn kind(&self) -> DataSourceKind;
+
+    async fn list_databases(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<Vec<RedisDatabase>>;
+
+    async fn scan_keys(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: u8,
+        pattern: Option<&str>,
+        cursor: u64,
+        limit: u32,
+    ) -> Result<RedisKeyScan>;
 }

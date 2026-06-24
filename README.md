@@ -30,6 +30,32 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 
 桌面入口当前会初始化连接管理服务，但还没有实现 UI。
 
+## 第二阶段能力
+
+已实现对象树和元数据后端基础能力：
+
+- 对象树服务：`app_core::metadata::MetadataService`
+- 统一对象树节点：`MetadataNode`、`MetadataPath`、`MetadataNodeKind`
+- 关系型数据库元数据读取：
+  - 数据库
+  - schema
+  - 表
+  - 视图
+  - 字段
+  - 索引
+- Redis 元数据读取：
+  - DB 编号列表
+  - DB key 数量
+  - 使用 `SCAN` 浏览 key
+  - key 类型和 TTL
+- 对象树采用懒加载接口：`MetadataService::children`
+
+当前限制：
+
+- 没有实现前端对象树 UI。
+- 每次元数据请求会短连接数据库，查询会话和连接池放到后续阶段。
+- Redis key 浏览默认每次扫描 500 个 key。
+
 可选环境变量：
 
 ```bash

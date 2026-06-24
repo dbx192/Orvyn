@@ -188,6 +188,24 @@ impl ConnectionManager {
 
         self.secure_store.get_secret(credential_ref).await
     }
+
+    pub async fn profile_with_password(
+        &self,
+        id: ConnectionId,
+        runtime_password: Option<&str>,
+    ) -> Result<(ConnectionProfile, Option<String>)> {
+        let profile = self
+            .store
+            .get(id)
+            .await?
+            .ok_or_else(|| AppError::new(ErrorKind::Validation, "connection profile not found"))?;
+        let password = match runtime_password {
+            Some(password) => Some(password.to_string()),
+            None => self.load_password(&profile).await?,
+        };
+
+        Ok((profile, password))
+    }
 }
 
 /// In-memory helper kept for tests and early UI prototypes.
