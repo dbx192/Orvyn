@@ -527,7 +527,9 @@ fn duckdb_query_result(conn: &duckdb::Connection, statement: &str) -> Result<Que
     let column_count = stmt.column_count();
     let columns = (0..column_count)
         .map(|index| Column {
-            name: stmt.column_name(index).unwrap_or_default().to_string(),
+            name: stmt
+                .column_name(index)
+                .map_or_else(|_| String::new(), ToString::to_string),
             database_type: String::new(),
             logical_type: LogicalType::Unknown,
             nullable: true,
@@ -564,20 +566,44 @@ fn duckdb_cell_value(row: &duckdb::Row<'_>, index: usize) -> duckdb::Result<Cell
     let value = row.get_ref(index)?;
     Ok(match value {
         duckdb::types::ValueRef::Null => CellValue::Null,
+        duckdb::types::ValueRef::Boolean(value) => CellValue::Bool(value),
         duckdb::types::ValueRef::TinyInt(value) => CellValue::Int(i64::from(value)),
         duckdb::types::ValueRef::SmallInt(value) => CellValue::Int(i64::from(value)),
         duckdb::types::ValueRef::Int(value) => CellValue::Int(i64::from(value)),
         duckdb::types::ValueRef::BigInt(value) => CellValue::Int(value),
+        duckdb::types::ValueRef::HugeInt(value) => CellValue::Decimal(value.to_string()),
         duckdb::types::ValueRef::UTinyInt(value) => CellValue::UInt(u64::from(value)),
         duckdb::types::ValueRef::USmallInt(value) => CellValue::UInt(u64::from(value)),
         duckdb::types::ValueRef::UInt(value) => CellValue::UInt(u64::from(value)),
         duckdb::types::ValueRef::UBigInt(value) => CellValue::UInt(value),
         duckdb::types::ValueRef::Float(value) => CellValue::Float(f64::from(value)),
         duckdb::types::ValueRef::Double(value) => CellValue::Float(value),
+        duckdb::types::ValueRef::Decimal(value) => CellValue::Decimal(value.to_string()),
         duckdb::types::ValueRef::Text(value) => {
             CellValue::Text(String::from_utf8_lossy(value).to_string())
         }
         duckdb::types::ValueRef::Blob(value) => CellValue::Bytes(value.to_vec()),
-        _ => CellValue::Text(value.to_string()),
+        duckdb::types::ValueRef::Enum(_, _) => {
+            CellValue::Text(value.as_str().unwrap_or_default().to_string())
+        }
+        duckdb::types::ValueRef::Timestamp(unit, value) => {
+            CellValue::Text(format!("{unit:?}({value})"))
+        }
+        duckdb::types::ValueRef::Date32(value) => CellValue::Text(value.to_string()),
+        duckdb::types::ValueRef::Time64(unit, value) => {
+            CellValue::Text(format!("{unit:?}({value})"))
+        }
+        duckdb::types::ValueRef::Interval {
+            months,
+            days,
+            nanos,
+        } => CellValue::Text(format!("{months} months {days} days {nanos} ns")),
+        duckdb::types::ValueRef::List(_, _)
+        | duckdb::types::ValueRef::Struct(_, _)
+        | duckdb::types::ValueRef::Array(_, _)
+        | duckdb::types::ValueRef::Map(_, _)
+        | duckdb::types::ValueRef::Union(_, _) => {
+            CellValue::Text(format!("{:?}", value.to_owned()))
+        }
     })
 }

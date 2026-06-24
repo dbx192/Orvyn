@@ -7,14 +7,14 @@ pub fn trim_sql(sql: &str) -> &str {
 pub fn split_statements(sql: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();
-    let mut chars = sql.chars().peekable();
+    let mut chars = sql.char_indices().peekable();
     let mut single_quoted = false;
     let mut double_quoted = false;
     let mut line_comment = false;
     let mut block_comment = false;
 
-    while let Some(ch) = chars.next() {
-        let next = chars.peek().copied();
+    while let Some((index, ch)) = chars.next() {
+        let next = chars.peek().map(|(_, ch)| *ch);
 
         if line_comment {
             current.push(ch);
@@ -80,6 +80,14 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             ('"', _) => {
                 current.push(ch);
                 double_quoted = true;
+            }
+            ('$', _) => {
+                if let Some(delimiter) = dollar_quote_delimiter(sql, index) {
+                    current.push(ch);
+                    consume_dollar_quoted_into(sql, &mut chars, &delimiter, &mut current);
+                } else {
+                    current.push(ch);
+                }
             }
             (';', _) => {
                 let statement = trim_sql(&current);
@@ -178,6 +186,14 @@ pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<String> {
                 current.push(ch);
                 double_quoted = true;
             }
+            ('$', _) => {
+                if let Some(delimiter) = dollar_quote_delimiter(sql, index) {
+                    current.push(ch);
+                    consume_dollar_quoted_into(sql, &mut chars, &delimiter, &mut current);
+                } else {
+                    current.push(ch);
+                }
+            }
             (';', _) => {
                 if current_start <= offset && offset <= index {
                     return non_empty_statement(&current);
@@ -267,6 +283,13 @@ pub fn highlight_sql(sql: &str) -> Vec<SqlHighlightToken> {
                 let end = consume_bracket_identifier(sql, &mut chars);
                 tokens.push(highlight_token(start, end, SqlTokenKind::QuotedIdentifier));
             }
+            ('$', _) if dollar_quote_delimiter(sql, start).is_some() => {
+                let Some(delimiter) = dollar_quote_delimiter(sql, start) else {
+                    continue;
+                };
+                let end = consume_dollar_quoted_range(sql, &mut chars, &delimiter);
+                tokens.push(highlight_token(start, end, SqlTokenKind::StringLiteral));
+            }
             (':', Some(next)) if is_identifier_start(next) => {
                 let end = consume_identifier(sql, &mut chars);
                 tokens.push(highlight_token(start, end, SqlTokenKind::Parameter));
@@ -296,7 +319,7 @@ pub fn highlight_sql(sql: &str) -> Vec<SqlHighlightToken> {
                 tokens.push(highlight_token(start, end, SqlTokenKind::Punctuation));
             }
             _ => {
-                let end = consume_operator(sql, &mut chars, start, ch);
+                let end = consume_operator(&mut chars, start, ch);
                 tokens.push(highlight_token(start, end, SqlTokenKind::Operator));
             }
         }
@@ -337,6 +360,72 @@ fn consume_block_comment(
         if ch == '*' && chars.peek().map(|(_, ch)| *ch) == Some('/') {
             chars.next();
             return index + 2;
+        }
+    }
+    sql.len()
+}
+
+fn dollar_quote_delimiter(sql: &str, start: usize) -> Option<String> {
+    let rest = sql.get(start..)?;
+    if !rest.starts_with('$') {
+        return None;
+    }
+
+    let mut end = start + 1;
+    for ch in rest[1..].chars() {
+        if ch == '$' {
+            return Some(sql[start..end + ch.len_utf8()].to_string());
+        }
+        if !(ch == '_' || ch.is_ascii_alphanumeric()) {
+            return None;
+        }
+        end += ch.len_utf8();
+    }
+    None
+}
+
+fn consume_dollar_quoted_into(
+    sql: &str,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    delimiter: &str,
+    current: &mut String,
+) {
+    for _ in 1..delimiter.chars().count() {
+        if let Some((_, ch)) = chars.next() {
+            current.push(ch);
+        }
+    }
+
+    while let Some((index, ch)) = chars.next() {
+        if sql[index..].starts_with(delimiter) {
+            current.push(ch);
+            for _ in 1..delimiter.chars().count() {
+                if let Some((_, delimiter_ch)) = chars.next() {
+                    current.push(delimiter_ch);
+                }
+            }
+            return;
+        }
+        current.push(ch);
+    }
+}
+
+fn consume_dollar_quoted_range(
+    sql: &str,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    delimiter: &str,
+) -> usize {
+    for _ in 1..delimiter.chars().count() {
+        chars.next();
+    }
+
+    while let Some((index, _)) = chars.next() {
+        if sql[index..].starts_with(delimiter) {
+            let end = index + delimiter.len();
+            for _ in 1..delimiter.chars().count() {
+                chars.next();
+            }
+            return end;
         }
     }
     sql.len()
@@ -420,7 +509,6 @@ fn consume_number(sql: &str, chars: &mut std::iter::Peekable<std::str::CharIndic
 }
 
 fn consume_operator(
-    sql: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
     start: usize,
     first: char,
@@ -562,10 +650,27 @@ mod tests {
     }
 
     #[test]
+    fn splits_statements_without_splitting_dollar_quoted_strings() {
+        assert_eq!(
+            split_statements("select $$a;b$$; select $tag$c;d$tag$; select 3"),
+            vec!["select $$a;b$$", "select $tag$c;d$tag$", "select 3"]
+        );
+    }
+
+    #[test]
     fn finds_statement_at_offset() {
         let sql = "select 1;\nselect 2;";
         assert_eq!(statement_at_offset(sql, 0).as_deref(), Some("select 1"));
         assert_eq!(statement_at_offset(sql, 12).as_deref(), Some("select 2"));
+    }
+
+    #[test]
+    fn finds_statement_at_offset_inside_dollar_quoted_string() {
+        let sql = "select $$a;b$$;\nselect 2;";
+        assert_eq!(
+            statement_at_offset(sql, 10).as_deref(),
+            Some("select $$a;b$$")
+        );
     }
 
     #[test]
@@ -586,7 +691,18 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|token| token.kind == SqlTokenKind::Comment
-                && &sql[token.range.start..token.range.end] == "-- tail"));
+            && &sql[token.range.start..token.range.end] == "-- tail"));
+    }
+
+    #[test]
+    fn highlights_dollar_quoted_string_as_one_token() {
+        let sql = "select $tag$a;b$tag$";
+        let tokens = highlight_sql(sql);
+
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == SqlTokenKind::StringLiteral
+                && &sql[token.range.start..token.range.end] == "$tag$a;b$tag$"));
     }
 
     #[test]

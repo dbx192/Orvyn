@@ -7,6 +7,9 @@ version.workspace = true
 
 [dependencies]
 app-core = { path = "../../crates/app-core" }
+chrono.workspace = true
 db-common.workspace = true
+eframe.workspace = true
+import-export = { path = "../../crates/import-export" }
 secure-store = { path = "../../crates/secure-store" }
 tracing.workspace = true
