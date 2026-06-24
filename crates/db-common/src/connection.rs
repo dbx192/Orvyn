@@ -55,19 +55,14 @@ impl CredentialRef {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SslMode {
     Disable,
+    #[default]
     Prefer,
     Require,
     VerifyCa,
     VerifyFull,
-}
-
-impl Default for SslMode {
-    fn default() -> Self {
-        Self::Prefer
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,19 +238,14 @@ impl ConnectionProfileBuilder {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionStatus {
+    #[default]
     NotConnected,
     Connecting,
     Connected,
     Failed,
     Disconnected,
-}
-
-impl Default for ConnectionStatus {
-    fn default() -> Self {
-        Self::NotConnected
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

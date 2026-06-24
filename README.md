@@ -7,7 +7,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 - 开发计划：`dev.md`
 - 编码规范：`rule.md`
 - Rust workspace
-- egui/eframe 桌面入口：`apps/desktop`
+- egui/eframe 桌面入口和 UI 模块：`apps/desktop`
 - 通用模型和全局工具：`crates/db-common`
 - 应用服务骨架：`crates/app-core`
 - 数据库适配器占位 crate
@@ -29,7 +29,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 - 密码保存策略：`PasswordUpdate::Keep`、`Clear`、`Replace`
 - 默认不保存密码，只有 `ConnectionSecurity.save_password = true` 时才写入安全存储。
 
-桌面入口使用 egui/eframe，当前会初始化连接管理服务，并包含结果集展示原型。
+桌面入口使用 egui/eframe，当前会初始化连接管理服务，并包含结果集展示和表数据编辑原型。
 
 ## 第二阶段能力
 
@@ -75,6 +75,34 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 
 - 查询编辑器和真实查询结果 UI 接入还在后续阶段。
 - 导出当前先复制到剪贴板，文件保存对话框后续补齐。
+
+## 第四阶段能力
+
+已建立桌面前端模块架构：
+
+- `apps/desktop/src/main.rs`：启动、配置目录、服务注入
+- `apps/desktop/src/ui/app.rs`：egui 应用壳和视图切换
+- `apps/desktop/src/ui/result_grid.rs`：查询结果集展示
+- `apps/desktop/src/ui/table_editor.rs`：表数据查看和编辑
+- `apps/desktop/src/ui/format.rs`：单元格展示、复制、比较格式化
+
+已实现表数据查看和编辑原型：
+
+- 打开表数据视图
+- 分页浏览
+- 新增行
+- 编辑单元格
+- 删除行
+- 提交生成 SQL 预览
+- 回滚未提交变更
+- 根据主键生成 UPDATE/DELETE
+- 无主键表默认只读，可显式开启风险模式
+- 简单过滤和排序
+
+当前限制：
+
+- 表数据视图当前使用示例数据。
+- 提交动作先生成 SQL 预览，真实事务执行和刷新表数据后续接入 `QueryService`。
 
 可选环境变量：
 

@@ -344,7 +344,7 @@ fn consume_until_line_end(
     sql: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
 ) -> usize {
-    while let Some((index, ch)) = chars.next() {
+    for (index, ch) in chars.by_ref() {
         if ch == '\n' {
             return index;
         }
@@ -452,7 +452,7 @@ fn consume_bracket_identifier(
     sql: &str,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
 ) -> usize {
-    while let Some((index, ch)) = chars.next() {
+    for (index, ch) in chars.by_ref() {
         if ch == ']' {
             return index + ch.len_utf8();
         }
