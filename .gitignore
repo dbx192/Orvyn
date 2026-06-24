@@ -1,0 +1,13 @@
+/target/
+**/*.rs.bk
+*.log
+*.tmp
+*.sqlite
+*.sqlite3
+*.duckdb
+*.db
+.env
+.env.*
+!.env.example
+/exports/
+/imports/tmp/

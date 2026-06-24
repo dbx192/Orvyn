@@ -1,0 +1,12 @@
+[package]
+name = "app-core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+db-common.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true

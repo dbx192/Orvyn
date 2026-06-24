@@ -1,0 +1,10 @@
+[package]
+name = "import-export"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+db-common.workspace = true
+serde.workspace = true

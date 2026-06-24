@@ -1,0 +1,11 @@
+[package]
+name = "desktop"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+app-core = { path = "../../crates/app-core" }
+db-common.workspace = true
+tracing.workspace = true
