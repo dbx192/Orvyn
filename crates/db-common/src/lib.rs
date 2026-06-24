@@ -13,6 +13,7 @@ pub mod pool;
 pub mod query;
 pub mod redaction;
 pub mod result_set;
+pub mod session;
 pub mod sql;
 pub mod time;
 pub mod traits;
@@ -25,7 +26,7 @@ pub use connection::{
 };
 pub use dialect::{Dialect, Identifier};
 pub use error::{AppError, ErrorKind, Result};
-pub use id::{ConnectionId, ObjectId, QueryId, TaskId};
+pub use id::{ConnectionId, ObjectId, QueryId, SessionId, TaskId};
 pub use paging::{PageRequest, PageSize};
 pub use pool::{ConnectionPoolConfig, ConnectionPoolStats};
 pub use query::{
@@ -40,6 +41,9 @@ pub use sql::{
     statement_at_offset, statement_summary, trim_sql,
 };
 pub use time::{elapsed_ms, now_utc};
+pub use session::{
+    SessionInfo, SessionState, TaskInfo, TaskKind, TaskProgress, TaskStatus,
+};
 pub use traits::{
     ConnectionTester, DatabaseObject, DatabaseObjectKind, MetadataNode, MetadataNodeKind,
     MetadataPath, RedisConnector, RedisDatabase, RedisKeyInfo, RedisKeyScan, RedisMetadataReader,

@@ -167,6 +167,13 @@ impl ConnectionManagerUi {
         ui
     }
 
+    pub fn new_connection(&mut self) {
+        self.selected = None;
+        self.form = ConnectionForm::new();
+        self.test_report = None;
+        self.error = None;
+    }
+
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
         self.drain_events();
         let mut message = None;

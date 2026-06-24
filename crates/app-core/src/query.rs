@@ -4,12 +4,13 @@
 //! execution selection, cancellation, history, favorites, and pool lifecycle.
 
 use crate::connection::ConnectionManager;
+use crate::task::TaskManager;
 use db_common::{
     highlight_sql, split_statements, statement_at_offset, statement_summary, unsupported_kind,
     AppError, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind,
     FavoriteQuery, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
     QueryHistoryEntry, QueryId, QueryTab, RelationalQueryExecutor, Result, SqlHighlightToken,
-    TextRange,
+    TaskId, TaskInfo, TaskKind, TextRange,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -26,6 +27,7 @@ pub struct QueryService {
     connections: ConnectionManager,
     executors: Arc<BTreeMap<DataSourceKind, Arc<dyn RelationalQueryExecutor>>>,
     pool_config: ConnectionPoolConfig,
+    task_manager: TaskManager,
     state: Arc<Mutex<QueryServiceState>>,
 }
 
@@ -34,6 +36,7 @@ impl QueryService {
         connections: ConnectionManager,
         executors: Vec<Arc<dyn RelationalQueryExecutor>>,
         pool_config: ConnectionPoolConfig,
+        task_manager: TaskManager,
     ) -> Self {
         Self {
             connections,
@@ -44,6 +47,7 @@ impl QueryService {
                     .collect(),
             ),
             pool_config,
+            task_manager,
             state: Arc::new(Mutex::new(QueryServiceState::default())),
         }
     }
@@ -58,7 +62,17 @@ impl QueryService {
                 Arc::new(db_duckdb::DuckDbQueryExecutor::new()),
             ],
             ConnectionPoolConfig::default(),
+            TaskManager::default(),
         )
+    }
+
+    pub fn with_task_manager(
+        connections: ConnectionManager,
+        executors: Vec<Arc<dyn RelationalQueryExecutor>>,
+        pool_config: ConnectionPoolConfig,
+        task_manager: TaskManager,
+    ) -> Self {
+        Self::new(connections, executors, pool_config, task_manager)
     }
 
     pub async fn open_tab(

@@ -4,6 +4,7 @@
 //! database sessions yet; each request delegates to the matching adapter.
 
 use crate::connection::ConnectionManager;
+use crate::task::TaskManager;
 use db_common::{
     unsupported_kind, AppError, ConnectionId, DataSourceKind, DatabaseObject, ErrorKind,
     MetadataNode, MetadataNodeKind, MetadataPath, RedisKeyInfo, RedisMetadataReader,
@@ -17,6 +18,7 @@ pub struct MetadataService {
     connections: ConnectionManager,
     relational_readers: Arc<BTreeMap<DataSourceKind, Arc<dyn RelationalMetadataReader>>>,
     redis_readers: Arc<BTreeMap<DataSourceKind, Arc<dyn RedisMetadataReader>>>,
+    task_manager: TaskManager,
 }
 
 impl MetadataService {
@@ -24,6 +26,7 @@ impl MetadataService {
         connections: ConnectionManager,
         relational_readers: Vec<Arc<dyn RelationalMetadataReader>>,
         redis_readers: Vec<Arc<dyn RedisMetadataReader>>,
+        task_manager: TaskManager,
     ) -> Self {
         Self {
             connections,
@@ -39,6 +42,7 @@ impl MetadataService {
                     .map(|reader| (reader.kind(), reader))
                     .collect(),
             ),
+            task_manager,
         }
     }
 
@@ -52,7 +56,17 @@ impl MetadataService {
                 Arc::new(db_duckdb::DuckDbMetadataReader),
             ],
             vec![Arc::new(db_redis::RedisMetadataReaderImpl)],
+            TaskManager::default(),
         )
+    }
+
+    pub fn with_task_manager(
+        connections: ConnectionManager,
+        relational_readers: Vec<Arc<dyn RelationalMetadataReader>>,
+        redis_readers: Vec<Arc<dyn RedisMetadataReader>>,
+        task_manager: TaskManager,
+    ) -> Self {
+        Self::new(connections, relational_readers, redis_readers, task_manager)
     }
 
     pub async fn root_nodes(&self) -> Result<Vec<MetadataNode>> {

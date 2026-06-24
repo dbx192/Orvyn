@@ -1,4 +1,5 @@
 use crate::ui::{
+    connection_manager::ConnectionManagerUi,
     result_grid::ResultSetGrid,
     samples::{sample_result_set, sample_table_columns},
     state::{AppState, TaskStatus, UiError, WorkspaceTabKind},
@@ -10,10 +11,11 @@ use eframe::egui::{
     Align, Button, CentralPanel, Context, Layout, RichText, ScrollArea, SidePanel, TopBottomPanel,
     Ui, Window,
 };
+use tokio::runtime::Handle;
 
 pub struct DesktopApp {
     app_name: String,
-    _connection_manager: ConnectionManager,
+    connection_manager_ui: ConnectionManagerUi,
     _query_service: QueryService,
     state: AppState,
     result_grid: ResultSetGrid,
@@ -25,10 +27,11 @@ impl DesktopApp {
         app_name: String,
         connection_manager: ConnectionManager,
         query_service: QueryService,
+        runtime: Handle,
     ) -> Self {
         Self {
             app_name,
-            _connection_manager: connection_manager,
+            connection_manager_ui: ConnectionManagerUi::new(connection_manager, runtime),
             _query_service: query_service,
             state: AppState::with_sample_workspace(),
             result_grid: ResultSetGrid::new(sample_result_set()),
@@ -66,8 +69,8 @@ impl DesktopApp {
                 ui.separator();
 
                 if ui.button("New Connection").clicked() {
-                    self.state
-                        .set_status("New connection flow is not wired yet");
+                    self.connection_manager_ui.new_connection();
+                    self.state.set_status("New connection editor opened");
                 }
                 if ui.button("New Query").clicked() {
                     let tab = crate::ui::state::WorkspaceTab::new("Query", WorkspaceTabKind::Query);
@@ -98,27 +101,9 @@ impl DesktopApp {
             .default_width(260.0)
             .width_range(200.0..=420.0)
             .show(ctx, |ui| {
-                ui.heading("Connections");
-                ui.add_space(6.0);
-
-                ScrollArea::vertical().show(ui, |ui| {
-                    for node in &self.state.connection_tree {
-                        eframe::egui::CollapsingHeader::new(format!(
-                            "{} ({:?})",
-                            node.label, node.kind
-                        ))
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for child in &node.children {
-                                let response = ui.selectable_label(false, child);
-                                if response.double_clicked() {
-                                    self.state
-                                        .set_status(format!("Open table requested: {child}"));
-                                }
-                            }
-                        });
-                    }
-                });
+                if let Some(message) = self.connection_manager_ui.ui(ui) {
+                    self.state.set_status(message);
+                }
             });
     }
 

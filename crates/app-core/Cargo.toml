@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 db-common.workspace = true
 db-duckdb = { path = "../db-duckdb" }
 db-mysql = { path = "../db-mysql" }

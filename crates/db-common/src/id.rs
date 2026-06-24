@@ -42,3 +42,4 @@ define_id!(ConnectionId);
 define_id!(QueryId);
 define_id!(TaskId);
 define_id!(ObjectId);
+define_id!(SessionId);
