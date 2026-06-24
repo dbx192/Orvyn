@@ -9,6 +9,8 @@ pub mod dialect;
 pub mod error;
 pub mod id;
 pub mod paging;
+pub mod pool;
+pub mod query;
 pub mod redaction;
 pub mod result_set;
 pub mod sql;
@@ -25,12 +27,21 @@ pub use dialect::{Dialect, Identifier};
 pub use error::{AppError, ErrorKind, Result};
 pub use id::{ConnectionId, ObjectId, QueryId, TaskId};
 pub use paging::{PageRequest, PageSize};
+pub use pool::{ConnectionPoolConfig, ConnectionPoolStats};
+pub use query::{
+    FavoriteQuery, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
+    QueryHistoryEntry, QueryTab, TextRange, DEFAULT_QUERY_TIMEOUT_MS,
+};
 pub use redaction::{mask_secret, redact_connection_url, SecretString};
 pub use result_set::{CellValue, Column, LogicalType, QueryResult, Row};
-pub use sql::{looks_like_unqualified_mutation, statement_summary, trim_sql};
+pub use sql::{
+    is_result_set_statement, looks_like_unqualified_mutation, split_statements,
+    statement_at_offset, statement_summary, trim_sql,
+};
 pub use time::{elapsed_ms, now_utc};
 pub use traits::{
     ConnectionTester, DatabaseObject, DatabaseObjectKind, MetadataNode, MetadataNodeKind,
     MetadataPath, RedisConnector, RedisDatabase, RedisKeyInfo, RedisKeyScan, RedisMetadataReader,
-    RedisValue, RelationalConnector, RelationalMetadataReader, TableColumn, TableIndex,
+    RedisValue, RelationalConnector, RelationalMetadataReader, RelationalQueryExecutor,
+    TableColumn, TableIndex,
 };

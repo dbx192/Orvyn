@@ -5,6 +5,7 @@
 
 pub mod connection;
 pub mod metadata;
+pub mod query;
 pub mod storage;
 
 pub const fn app_name() -> &'static str {

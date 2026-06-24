@@ -1,4 +1,6 @@
-use app_core::{connection::ConnectionManager, storage::FileConnectionProfileStore};
+use app_core::{
+    connection::ConnectionManager, query::QueryService, storage::FileConnectionProfileStore,
+};
 use secure_store::EncryptedFileStore;
 use std::{path::PathBuf, sync::Arc};
 
@@ -6,7 +8,8 @@ fn main() {
     tracing::info!("desktop application bootstrap");
 
     let app_name = app_core::app_name();
-    let _connection_manager = bootstrap_connection_manager(default_config_dir());
+    let connection_manager = bootstrap_connection_manager(default_config_dir());
+    let _query_service = QueryService::with_default_executors(connection_manager.clone());
     println!("{app_name} desktop skeleton");
 }
 

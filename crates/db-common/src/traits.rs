@@ -1,6 +1,6 @@
 use crate::{
-    CellValue, ConnectionId, ConnectionProfile, ConnectionTestReport, DataSourceKind, PageRequest,
-    QueryResult, Result,
+    CellValue, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, ConnectionProfile,
+    ConnectionTestReport, DataSourceKind, PageRequest, QueryResult, Result,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -202,6 +202,23 @@ pub trait RelationalMetadataReader: Send + Sync {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableIndex>>;
+}
+
+#[async_trait]
+pub trait RelationalQueryExecutor: Send + Sync {
+    fn kind(&self) -> DataSourceKind;
+
+    async fn execute(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        statements: &[String],
+        pool_config: ConnectionPoolConfig,
+    ) -> Result<Vec<QueryResult>>;
+
+    async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>>;
+
+    async fn close_pool(&self, connection_id: ConnectionId) -> Result<()>;
 }
 
 #[async_trait]

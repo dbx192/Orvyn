@@ -2,12 +2,15 @@
 
 use async_trait::async_trait;
 use db_common::{
-    redact_connection_url, AppError, ConnectionProfile, ConnectionTestReport, ConnectionTester,
-    DataSourceKind, DatabaseObject, DatabaseObjectKind, ErrorKind, RelationalMetadataReader,
-    Result, TableColumn, TableIndex,
+    is_result_set_statement, redact_connection_url, AppError, CellValue, Column, ConnectionId,
+    ConnectionPoolConfig, ConnectionPoolStats, ConnectionProfile, ConnectionTestReport,
+    ConnectionTester, DataSourceKind, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType,
+    QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
+    TableIndex,
 };
-use sqlx::{mysql::MySqlPoolOptions, MySqlPool, Row};
-use std::time::Instant;
+use sqlx::{mysql::MySqlPoolOptions, Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use tokio::sync::Mutex;
 
 pub const ADAPTER_NAME: &str = "mysql";
 
@@ -16,6 +19,32 @@ pub struct MySqlConnectionTester;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MySqlMetadataReader;
+
+#[derive(Debug, Clone, Default)]
+pub struct MySqlQueryExecutor {
+    pools: Arc<Mutex<BTreeMap<ConnectionId, MySqlPool>>>,
+}
+
+impl MySqlQueryExecutor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn pool_for(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        config: ConnectionPoolConfig,
+    ) -> Result<MySqlPool> {
+        if let Some(pool) = self.pools.lock().await.get(&profile.id).cloned() {
+            return Ok(pool);
+        }
+
+        let pool = mysql_pool(profile, password, config).await?;
+        self.pools.lock().await.insert(profile.id, pool.clone());
+        Ok(pool)
+    }
+}
 
 #[async_trait]
 impl ConnectionTester for MySqlConnectionTester {
@@ -31,7 +60,7 @@ impl ConnectionTester for MySqlConnectionTester {
         profile.validate()?;
 
         let started_at = Instant::now();
-        let pool = mysql_pool(profile, password).await?;
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
         let version: Option<String> = sqlx::query_scalar("SELECT VERSION()")
             .fetch_optional(&pool)
             .await
@@ -60,7 +89,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         profile: &ConnectionProfile,
         password: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        let pool = mysql_pool(profile, password).await?;
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
         let rows = sqlx::query("SHOW DATABASES")
             .fetch_all(&pool)
             .await
@@ -146,7 +175,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL columns",
             )
         })?;
-        let pool = mysql_pool(profile, password).await?;
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
         let rows = sqlx::query(
             "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, COLUMN_COMMENT \
              FROM information_schema.COLUMNS \
@@ -192,7 +221,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL indexes",
             )
         })?;
-        let pool = mysql_pool(profile, password).await?;
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
         let rows = sqlx::query(
             "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
              FROM information_schema.STATISTICS \
@@ -207,6 +236,71 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         pool.close().await;
 
         Ok(group_mysql_indexes(rows))
+    }
+}
+
+#[async_trait]
+impl RelationalQueryExecutor for MySqlQueryExecutor {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::MySql
+    }
+
+    async fn execute(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        statements: &[String],
+        pool_config: ConnectionPoolConfig,
+    ) -> Result<Vec<QueryResult>> {
+        let pool = self.pool_for(profile, password, pool_config).await?;
+        let mut results = Vec::with_capacity(statements.len());
+
+        for statement in statements {
+            let started_at = Instant::now();
+            let statement = statement.as_str();
+
+            if is_result_set_statement(statement) {
+                let rows = sqlx::query(statement)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(mysql_query_error)?;
+                results.push(
+                    mysql_rows_to_query_result(statement, rows).with_elapsed(started_at.elapsed()),
+                );
+                continue;
+            }
+
+            let done = sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .map_err(mysql_query_error)?;
+            let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
+            result.affected_rows = done.rows_affected();
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+
+    async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
+        let Some(pool) = self.pools.lock().await.get(&connection_id).cloned() else {
+            return Ok(None);
+        };
+
+        Ok(Some(ConnectionPoolStats {
+            connection_id,
+            size: pool.size(),
+            idle: pool.num_idle() as u32,
+            max_connections: pool.options().get_max_connections(),
+        }))
+    }
+
+    async fn close_pool(&self, connection_id: ConnectionId) -> Result<()> {
+        let pool = self.pools.lock().await.remove(&connection_id);
+        if let Some(pool) = pool {
+            pool.close().await;
+        }
+        Ok(())
     }
 }
 
@@ -236,11 +330,19 @@ fn mysql_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<Stri
     Ok(format!("mysql://{auth}{host}:{port}{database}"))
 }
 
-async fn mysql_pool(profile: &ConnectionProfile, password: Option<&str>) -> Result<MySqlPool> {
+async fn mysql_pool(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+    config: ConnectionPoolConfig,
+) -> Result<MySqlPool> {
     profile.validate()?;
     let url = mysql_url(profile, password)?;
     MySqlPoolOptions::new()
-        .max_connections(1)
+        .min_connections(config.min_connections)
+        .max_connections(config.max_connections.max(1))
+        .acquire_timeout(config.acquire_timeout())
+        .idle_timeout(config.idle_timeout())
+        .max_lifetime(config.max_lifetime())
         .connect(&url)
         .await
         .map_err(mysql_connection_error)
@@ -269,7 +371,7 @@ async fn list_mysql_objects(
             "database is required for MySQL objects",
         )
     })?;
-    let pool = mysql_pool(profile, password).await?;
+    let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
     let rows = sqlx::query(
         "SELECT TABLE_NAME FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = ? \
@@ -294,6 +396,79 @@ async fn list_mysql_objects(
             }
         })
         .collect())
+}
+
+fn mysql_rows_to_query_result(statement: &str, rows: Vec<sqlx::mysql::MySqlRow>) -> QueryResult {
+    let columns = rows
+        .first()
+        .map(|row| {
+            row.columns()
+                .iter()
+                .map(|column| Column {
+                    name: column.name().to_string(),
+                    database_type: column.type_info().name().to_string(),
+                    logical_type: mysql_logical_type(column.type_info().name()),
+                    nullable: true,
+                    primary_key: false,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            let values = (0..row.len())
+                .map(|index| mysql_cell_value(&row, index))
+                .collect();
+            Row::new(values)
+        })
+        .collect();
+
+    QueryResult {
+        statement: statement.to_string(),
+        columns,
+        rows,
+        affected_rows: 0,
+        execution_time_ms: 0,
+        notices: Vec::new(),
+        metadata: BTreeMap::new(),
+    }
+}
+
+fn mysql_cell_value(row: &sqlx::mysql::MySqlRow, index: usize) -> CellValue {
+    if let Ok(value) = row.try_get::<Option<String>, _>(index) {
+        return value.map(CellValue::Text).unwrap_or(CellValue::Null);
+    }
+    if let Ok(value) = row.try_get::<Option<i64>, _>(index) {
+        return value.map(CellValue::Int).unwrap_or(CellValue::Null);
+    }
+    if let Ok(value) = row.try_get::<Option<u64>, _>(index) {
+        return value.map(CellValue::UInt).unwrap_or(CellValue::Null);
+    }
+    if let Ok(value) = row.try_get::<Option<f64>, _>(index) {
+        return value.map(CellValue::Float).unwrap_or(CellValue::Null);
+    }
+    if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {
+        return value.map(CellValue::Bytes).unwrap_or(CellValue::Null);
+    }
+
+    CellValue::Null
+}
+
+fn mysql_logical_type(type_name: &str) -> LogicalType {
+    match type_name.to_ascii_lowercase().as_str() {
+        "bool" | "boolean" | "tinyint(1)" => LogicalType::Bool,
+        "tinyint" | "smallint" | "int" | "integer" | "mediumint" | "bigint" => LogicalType::Int,
+        "float" | "double" | "real" => LogicalType::Float,
+        "decimal" | "numeric" => LogicalType::Decimal,
+        "date" => LogicalType::Date,
+        "time" => LogicalType::Time,
+        "datetime" | "timestamp" => LogicalType::DateTime,
+        "json" => LogicalType::Json,
+        "blob" | "binary" | "varbinary" => LogicalType::Bytes,
+        _ => LogicalType::Text,
+    }
 }
 
 fn group_mysql_indexes(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<TableIndex> {

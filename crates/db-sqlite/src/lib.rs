@@ -2,11 +2,17 @@
 
 use async_trait::async_trait;
 use db_common::{
-    AppError, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
-    DatabaseObject, DatabaseObjectKind, ErrorKind, RelationalMetadataReader, Result, TableColumn,
-    TableIndex,
+    is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
+    ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
+    DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
+    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableIndex,
 };
-use std::{path::PathBuf, time::Instant};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, Condvar, Mutex},
+    time::Instant,
+};
 
 pub const ADAPTER_NAME: &str = "sqlite";
 
@@ -15,6 +21,151 @@ pub struct SqliteConnectionTester;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SqliteMetadataReader;
+
+#[derive(Debug, Clone, Default)]
+pub struct SqliteQueryExecutor {
+    pools: Arc<tokio::sync::Mutex<BTreeMap<ConnectionId, Arc<BlockingSqlitePool>>>>,
+}
+
+impl SqliteQueryExecutor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn pool_for(
+        &self,
+        profile: &ConnectionProfile,
+        config: ConnectionPoolConfig,
+    ) -> Result<Arc<BlockingSqlitePool>> {
+        if let Some(pool) = self.pools.lock().await.get(&profile.id).cloned() {
+            return Ok(pool);
+        }
+
+        let pool = Arc::new(BlockingSqlitePool::new(profile, config)?);
+        self.pools.lock().await.insert(profile.id, pool.clone());
+        Ok(pool)
+    }
+}
+
+#[derive(Debug)]
+struct BlockingSqlitePool {
+    connection_id: ConnectionId,
+    path: PathBuf,
+    config: ConnectionPoolConfig,
+    state: Mutex<BlockingPoolState>,
+    available: Condvar,
+}
+
+#[derive(Debug)]
+struct BlockingPoolState {
+    idle: Vec<rusqlite::Connection>,
+    size: u32,
+}
+
+impl BlockingSqlitePool {
+    fn new(profile: &ConnectionProfile, config: ConnectionPoolConfig) -> Result<Self> {
+        Ok(Self {
+            connection_id: profile.id,
+            path: PathBuf::from(profile.required_file_path()?),
+            config,
+            state: Mutex::new(BlockingPoolState {
+                idle: Vec::new(),
+                size: 0,
+            }),
+            available: Condvar::new(),
+        })
+    }
+
+    fn acquire(self: &Arc<Self>) -> Result<PooledSqliteConnection> {
+        let deadline = Instant::now() + self.config.acquire_timeout();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AppError::internal("SQLite pool lock poisoned"))?;
+
+        loop {
+            if let Some(conn) = state.idle.pop() {
+                return Ok(PooledSqliteConnection {
+                    pool: self.clone(),
+                    conn: Some(conn),
+                });
+            }
+
+            if state.size < self.config.max_connections.max(1) {
+                state.size += 1;
+                drop(state);
+                let conn = sqlite_connection(self.path.clone())?;
+                return Ok(PooledSqliteConnection {
+                    pool: self.clone(),
+                    conn: Some(conn),
+                });
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(AppError::new(
+                    ErrorKind::Timeout,
+                    "timed out acquiring SQLite connection",
+                ));
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let (guard, timeout) = self
+                .available
+                .wait_timeout(state, remaining)
+                .map_err(|_| AppError::internal("SQLite pool lock poisoned"))?;
+            state = guard;
+
+            if timeout.timed_out() {
+                return Err(AppError::new(
+                    ErrorKind::Timeout,
+                    "timed out acquiring SQLite connection",
+                ));
+            }
+        }
+    }
+
+    fn release(&self, conn: rusqlite::Connection) {
+        if let Ok(mut state) = self.state.lock() {
+            state.idle.push(conn);
+            self.available.notify_one();
+        }
+    }
+
+    fn stats(&self) -> Result<ConnectionPoolStats> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| AppError::internal("SQLite pool lock poisoned"))?;
+        Ok(ConnectionPoolStats {
+            connection_id: self.connection_id,
+            size: state.size,
+            idle: state.idle.len() as u32,
+            max_connections: self.config.max_connections.max(1),
+        })
+    }
+}
+
+struct PooledSqliteConnection {
+    pool: Arc<BlockingSqlitePool>,
+    conn: Option<rusqlite::Connection>,
+}
+
+impl PooledSqliteConnection {
+    fn connection(&self) -> &rusqlite::Connection {
+        self.conn
+            .as_ref()
+            .expect("SQLite pooled connection missing")
+    }
+}
+
+impl Drop for PooledSqliteConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.release(conn);
+        }
+    }
+}
 
 #[async_trait]
 impl ConnectionTester for SqliteConnectionTester {
@@ -133,6 +284,64 @@ impl RelationalMetadataReader for SqliteMetadataReader {
                 AppError::new(ErrorKind::Internal, "SQLite indexes task failed")
                     .with_detail(error.to_string())
             })?
+    }
+}
+
+#[async_trait]
+impl RelationalQueryExecutor for SqliteQueryExecutor {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::Sqlite
+    }
+
+    async fn execute(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        statements: &[String],
+        pool_config: ConnectionPoolConfig,
+    ) -> Result<Vec<QueryResult>> {
+        let pool = self.pool_for(profile, pool_config).await?;
+        let statements = statements.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let pooled = pool.acquire()?;
+            let conn = pooled.connection();
+            let mut results = Vec::with_capacity(statements.len());
+
+            for statement in statements {
+                let started_at = Instant::now();
+                if is_result_set_statement(&statement) {
+                    results.push(
+                        sqlite_query_result(conn, &statement)?.with_elapsed(started_at.elapsed()),
+                    );
+                    continue;
+                }
+
+                let affected_rows = conn.execute(&statement, []).map_err(sqlite_query_error)?;
+                let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
+                result.affected_rows = affected_rows as u64;
+                results.push(result);
+            }
+
+            Ok(results)
+        })
+        .await
+        .map_err(|error| {
+            AppError::new(ErrorKind::Internal, "SQLite query task failed")
+                .with_detail(error.to_string())
+        })?
+    }
+
+    async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
+        let Some(pool) = self.pools.lock().await.get(&connection_id).cloned() else {
+            return Ok(None);
+        };
+        pool.stats().map(Some)
+    }
+
+    async fn close_pool(&self, connection_id: ConnectionId) -> Result<()> {
+        self.pools.lock().await.remove(&connection_id);
+        Ok(())
     }
 }
 
@@ -290,4 +499,55 @@ fn sqlite_query_error(error: rusqlite::Error) -> AppError {
 
 fn quote_sqlite_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn sqlite_query_result(conn: &rusqlite::Connection, statement: &str) -> Result<QueryResult> {
+    let mut stmt = conn.prepare(statement).map_err(sqlite_query_error)?;
+    let column_count = stmt.column_count();
+    let columns = (0..column_count)
+        .map(|index| Column {
+            name: stmt.column_name(index).unwrap_or_default().to_string(),
+            database_type: String::new(),
+            logical_type: LogicalType::Unknown,
+            nullable: true,
+            primary_key: false,
+        })
+        .collect();
+
+    let rows = stmt
+        .query_map([], |row| {
+            let values = (0..column_count)
+                .map(|index| sqlite_cell_value(row, index))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(Row::new(values))
+        })
+        .map_err(sqlite_query_error)?;
+
+    let mut result_rows = Vec::new();
+    for row in rows {
+        result_rows.push(row.map_err(sqlite_query_error)?);
+    }
+
+    Ok(QueryResult {
+        statement: statement.to_string(),
+        columns,
+        rows: result_rows,
+        affected_rows: 0,
+        execution_time_ms: 0,
+        notices: Vec::new(),
+        metadata: BTreeMap::new(),
+    })
+}
+
+fn sqlite_cell_value(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<CellValue> {
+    let value = row.get_ref(index)?;
+    Ok(match value {
+        rusqlite::types::ValueRef::Null => CellValue::Null,
+        rusqlite::types::ValueRef::Integer(value) => CellValue::Int(value),
+        rusqlite::types::ValueRef::Real(value) => CellValue::Float(value),
+        rusqlite::types::ValueRef::Text(value) => {
+            CellValue::Text(String::from_utf8_lossy(value).to_string())
+        }
+        rusqlite::types::ValueRef::Blob(value) => CellValue::Bytes(value.to_vec()),
+    })
 }

@@ -720,6 +720,7 @@ dependencies = [
  "async-trait",
  "db-common",
  "sqlx",
+ "tokio",
  "urlencoding",
 ]
 
