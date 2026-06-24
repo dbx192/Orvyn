@@ -6,7 +6,15 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 db-common.workspace = true
+db-duckdb = { path = "../db-duckdb" }
+db-mysql = { path = "../db-mysql" }
+db-postgres = { path = "../db-postgres" }
+db-redis = { path = "../db-redis" }
+db-sqlite = { path = "../db-sqlite" }
+secure-store = { path = "../secure-store" }
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

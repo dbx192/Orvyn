@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use db_common::{
-    AppError, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
-    ErrorKind, Result,
+    redact_connection_url, AppError, ConnectionProfile, ConnectionTestReport, ConnectionTester,
+    DataSourceKind, ErrorKind, Result,
 };
 use std::time::Instant;
 
@@ -26,16 +26,17 @@ impl ConnectionTester for RedisConnectionTester {
         profile.validate()?;
 
         let started_at = Instant::now();
-        let client = redis::Client::open(redis_url(profile, password)?).map_err(|error| {
+        let url = redis_url(profile, password)?;
+        let client = redis::Client::open(url.as_str()).map_err(|error| {
             AppError::new(ErrorKind::Connection, "invalid Redis connection options")
-                .with_detail(error.to_string())
+                .with_detail(redact_connection_url(&error.to_string()))
         })?;
         let mut conn = client
             .get_multiplexed_async_connection()
             .await
             .map_err(|error| {
                 AppError::new(ErrorKind::Connection, "failed to connect to Redis")
-                    .with_detail(error.to_string())
+                    .with_detail(redact_connection_url(&error.to_string()))
             })?;
         let pong: String = redis::cmd("PING")
             .query_async(&mut conn)
@@ -63,6 +64,10 @@ fn redis_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<Stri
         .as_deref()
         .filter(|value| !value.is_empty())
         .unwrap_or("0");
+    let database_index = database.parse::<u8>().map_err(|error| {
+        AppError::new(ErrorKind::Validation, "Redis database must be between 0 and 255")
+            .with_detail(error.to_string())
+    })?;
     let username = profile.username.as_deref().unwrap_or_default();
 
     let auth = match (username.is_empty(), password.filter(|value| !value.is_empty())) {
@@ -78,5 +83,5 @@ fn redis_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<Stri
         (true, None) => String::new(),
     };
 
-    Ok(format!("redis://{auth}{host}:{port}/{database}"))
+    Ok(format!("redis://{auth}{host}:{port}/{database_index}"))
 }

@@ -6,6 +6,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 duckdb.workspace = true
 db-common.workspace = true
 tokio.workspace = true

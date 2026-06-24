@@ -4,6 +4,7 @@
 //! query sessions, task execution, and import/export workflows.
 
 pub mod connection;
+pub mod storage;
 
 pub const fn app_name() -> &'static str {
     "Rust DB Client"

@@ -43,6 +43,13 @@ impl ConnectionTester for DuckDbConnectionTester {
 }
 
 fn duckdb_version(path: PathBuf) -> Result<String> {
+    if !path.exists() {
+        return Err(AppError::new(
+            ErrorKind::Validation,
+            "DuckDB database file does not exist",
+        ));
+    }
+
     let conn = duckdb::Connection::open(path).map_err(|error| {
         AppError::new(ErrorKind::Connection, "failed to open DuckDB database")
             .with_detail(error.to_string())

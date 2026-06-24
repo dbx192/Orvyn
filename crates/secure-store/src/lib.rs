@@ -10,6 +10,7 @@ use db_common::{AppError, CredentialRef, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, path::PathBuf};
+use tokio::task;
 use uuid::Uuid;
 
 #[async_trait]
@@ -51,27 +52,24 @@ impl EncryptedFileStore {
         ChaCha20Poly1305::new(Key::from_slice(&self.key))
     }
 
-    fn read_file(&self) -> Result<SecretFile> {
-        if !self.path.exists() {
-            return Ok(SecretFile::default());
-        }
-
-        let bytes = fs::read(&self.path)?;
-        if bytes.is_empty() {
-            return Ok(SecretFile::default());
-        }
-
-        Ok(serde_json::from_slice(&bytes)?)
+    async fn read_file(&self) -> Result<SecretFile> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || read_secret_file(path))
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Internal, "secret read task failed")
+                    .with_detail(error.to_string())
+            })?
     }
 
-    fn write_file(&self, file: &SecretFile) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let bytes = serde_json::to_vec_pretty(file)?;
-        fs::write(&self.path, bytes)?;
-        Ok(())
+    async fn write_file(&self, file: SecretFile) -> Result<()> {
+        let path = self.path.clone();
+        task::spawn_blocking(move || write_secret_file(path, &file))
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Internal, "secret write task failed")
+                    .with_detail(error.to_string())
+            })?
     }
 
     fn encrypt(&self, secret: &str) -> Result<EncryptedSecret> {
@@ -92,10 +90,16 @@ impl EncryptedFileStore {
     fn decrypt(&self, encrypted: &EncryptedSecret) -> Result<String> {
         let nonce = STANDARD
             .decode(&encrypted.nonce)
-            .map_err(|error| AppError::new(ErrorKind::Credential, "invalid secret nonce").with_detail(error.to_string()))?;
+            .map_err(|error| {
+                AppError::new(ErrorKind::Credential, "invalid secret nonce")
+                    .with_detail(error.to_string())
+            })?;
         let ciphertext = STANDARD
             .decode(&encrypted.ciphertext)
-            .map_err(|error| AppError::new(ErrorKind::Credential, "invalid secret ciphertext").with_detail(error.to_string()))?;
+            .map_err(|error| {
+                AppError::new(ErrorKind::Credential, "invalid secret ciphertext")
+                    .with_detail(error.to_string())
+            })?;
 
         if nonce.len() != 12 {
             return Err(AppError::new(
@@ -119,7 +123,7 @@ impl EncryptedFileStore {
 #[async_trait]
 impl SecureStore for EncryptedFileStore {
     async fn put_secret(&self, label: &str, secret: &str) -> Result<CredentialRef> {
-        let mut file = self.read_file()?;
+        let mut file = self.read_file().await?;
         let key = Uuid::new_v4().to_string();
         file.secrets.insert(
             key.clone(),
@@ -128,7 +132,7 @@ impl SecureStore for EncryptedFileStore {
                 encrypted: self.encrypt(secret)?,
             },
         );
-        self.write_file(&file)?;
+        self.write_file(file).await?;
 
         Ok(CredentialRef::new(PROVIDER, key))
     }
@@ -138,7 +142,7 @@ impl SecureStore for EncryptedFileStore {
             return Ok(None);
         }
 
-        let file = self.read_file()?;
+        let file = self.read_file().await?;
         let Some(record) = file.secrets.get(&credential_ref.key) else {
             return Ok(None);
         };
@@ -151,10 +155,33 @@ impl SecureStore for EncryptedFileStore {
             return Ok(());
         }
 
-        let mut file = self.read_file()?;
+        let mut file = self.read_file().await?;
         file.secrets.remove(&credential_ref.key);
-        self.write_file(&file)
+        self.write_file(file).await
     }
+}
+
+fn read_secret_file(path: PathBuf) -> Result<SecretFile> {
+    if !path.exists() {
+        return Ok(SecretFile::default());
+    }
+
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() {
+        return Ok(SecretFile::default());
+    }
+
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn write_secret_file(path: PathBuf, file: &SecretFile) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let bytes = serde_json::to_vec_pretty(file)?;
+    fs::write(path, bytes)?;
+    Ok(())
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

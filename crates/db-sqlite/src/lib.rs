@@ -43,6 +43,13 @@ impl ConnectionTester for SqliteConnectionTester {
 }
 
 fn sqlite_version(path: PathBuf) -> Result<String> {
+    if !path.exists() {
+        return Err(AppError::new(
+            ErrorKind::Validation,
+            "SQLite database file does not exist",
+        ));
+    }
+
     let conn = rusqlite::Connection::open(path).map_err(|error| {
         AppError::new(ErrorKind::Connection, "failed to open SQLite database")
             .with_detail(error.to_string())

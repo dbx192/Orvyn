@@ -20,6 +20,7 @@ pub use bytes::{base64_preview, human_bytes};
 pub use connection::{
     ConnectionProfile, ConnectionProfileBuilder, ConnectionSecurity, ConnectionStatus,
     ConnectionTestReport, CredentialRef, DataSourceKind, PasswordUpdate, SslMode,
+    unsupported_kind,
 };
 pub use dialect::{Dialect, Identifier};
 pub use error::{AppError, ErrorKind, Result};

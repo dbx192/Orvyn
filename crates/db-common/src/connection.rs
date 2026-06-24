@@ -1,8 +1,8 @@
 use crate::{validation, AppError, ConnectionId, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DataSourceKind {
     MySql,
     PostgreSql,
@@ -121,6 +121,13 @@ impl ConnectionProfile {
 
         validation::ensure_not_blank("host", self.host.as_deref().unwrap_or_default())?;
         validation::ensure_port(self.port.unwrap_or_default())?;
+
+        if matches!(self.kind, DataSourceKind::MySql | DataSourceKind::PostgreSql) {
+            validation::ensure_not_blank(
+                "username",
+                self.username.as_deref().unwrap_or_default(),
+            )?;
+        }
 
         Ok(())
     }
@@ -277,11 +284,21 @@ impl ConnectionTestReport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PasswordUpdate {
     Keep,
     Clear,
     Replace(String),
+}
+
+impl fmt::Debug for PasswordUpdate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Keep => formatter.write_str("Keep"),
+            Self::Clear => formatter.write_str("Clear"),
+            Self::Replace(_) => formatter.write_str("Replace(********)"),
+        }
+    }
 }
 
 pub fn unsupported_kind(kind: DataSourceKind) -> AppError {
@@ -309,5 +326,22 @@ mod tests {
     fn rejects_file_connection_without_path() {
         let profile = ConnectionProfile::builder(DataSourceKind::Sqlite, "local").build();
         assert!(profile.is_err());
+    }
+
+    #[test]
+    fn rejects_postgres_without_username() {
+        let profile = ConnectionProfile::builder(DataSourceKind::PostgreSql, "local")
+            .host("localhost")
+            .build();
+
+        assert!(profile.is_err());
+    }
+
+    #[test]
+    fn redacts_password_update_debug() {
+        assert_eq!(
+            format!("{:?}", PasswordUpdate::Replace("secret".to_string())),
+            "Replace(********)"
+        );
     }
 }

@@ -12,6 +12,31 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 - 数据库适配器占位 crate
 - 安全存储和导入导出占位 crate
 
+## 第一阶段能力
+
+已实现连接管理后端基础能力：
+
+- 连接配置 CRUD 服务：`app_core::connection::ConnectionManager`
+- 连接配置文件持久化：`app_core::storage::FileConnectionProfileStore`
+- 本地加密凭据存储：`secure_store::EncryptedFileStore`
+- 五类数据源连接测试适配器：
+  - `db_mysql::MySqlConnectionTester`
+  - `db_postgres::PostgresConnectionTester`
+  - `db_sqlite::SqliteConnectionTester`
+  - `db_duckdb::DuckDbConnectionTester`
+  - `db_redis::RedisConnectionTester`
+- 密码保存策略：`PasswordUpdate::Keep`、`Clear`、`Replace`
+- 默认不保存密码，只有 `ConnectionSecurity.save_password = true` 时才写入安全存储。
+
+桌面入口当前会初始化连接管理服务，但还没有实现 UI。
+
+可选环境变量：
+
+```bash
+RUST_DB_CLIENT_CONFIG_DIR=.rust-db-client
+RUST_DB_CLIENT_MASTER_KEY=change-this-master-key
+```
+
 ## 常用命令
 
 ```bash

@@ -771,6 +771,15 @@ Dialect:
 - 左侧连接列表。
 - 连接测试结果。
 
+当前实现状态：
+
+- 已实现连接管理后端服务 `ConnectionManager`。
+- 已实现连接配置文件持久化 `FileConnectionProfileStore`。
+- 已实现本地加密凭据存储 `EncryptedFileStore`。
+- 已实现 MySQL、PostgreSQL、SQLite、DuckDB、Redis 的连接测试适配器。
+- 已实现密码保存策略，默认不保存密码。
+- UI 的新建连接窗口和左侧连接列表尚未实现。
+
 ### 里程碑 2：对象树和元数据
 
 目标：

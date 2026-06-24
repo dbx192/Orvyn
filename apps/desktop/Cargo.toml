@@ -8,4 +8,5 @@ version.workspace = true
 [dependencies]
 app-core = { path = "../../crates/app-core" }
 db-common.workspace = true
+secure-store = { path = "../../crates/secure-store" }
 tracing.workspace = true

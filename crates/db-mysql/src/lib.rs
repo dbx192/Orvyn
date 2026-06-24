@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use db_common::{
-    AppError, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
-    ErrorKind, Result,
+    redact_connection_url, AppError, ConnectionProfile, ConnectionTestReport, ConnectionTester,
+    DataSourceKind, ErrorKind, Result,
 };
 use mysql_async::{prelude::Queryable, Opts, Pool};
 use std::time::Instant;
@@ -27,14 +27,15 @@ impl ConnectionTester for MySqlConnectionTester {
         profile.validate()?;
 
         let started_at = Instant::now();
-        let opts = Opts::from_url(&mysql_url(profile, password)?).map_err(|error| {
+        let url = mysql_url(profile, password)?;
+        let opts = Opts::from_url(&url).map_err(|error| {
             AppError::new(ErrorKind::Connection, "invalid MySQL connection options")
                 .with_detail(error.to_string())
         })?;
         let pool = Pool::new(opts);
         let mut conn = pool.get_conn().await.map_err(|error| {
             AppError::new(ErrorKind::Connection, "failed to connect to MySQL")
-                .with_detail(error.to_string())
+                .with_detail(redact_connection_url(&error.to_string()))
         })?;
 
         let version = conn
@@ -45,6 +46,7 @@ impl ConnectionTester for MySqlConnectionTester {
                     .with_detail(error.to_string())
             })?;
 
+        drop(conn);
         pool.disconnect().await.map_err(|error| {
             AppError::new(ErrorKind::Connection, "failed to close MySQL connection")
                 .with_detail(error.to_string())
