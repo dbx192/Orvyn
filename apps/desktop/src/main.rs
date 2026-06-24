@@ -6,15 +6,20 @@ use app_core::{
 use eframe::NativeOptions;
 use secure_store::EncryptedFileStore;
 use std::{path::PathBuf, sync::Arc};
+use tokio::runtime::Runtime;
 use ui::app::DesktopApp;
 
 fn main() -> eframe::Result<()> {
     tracing::info!("desktop application bootstrap");
 
     let app_name = app_core::app_name();
+    let runtime = Arc::new(
+        Runtime::new().expect("failed to create background async runtime for desktop app"),
+    );
     let connection_manager = bootstrap_connection_manager(default_config_dir());
     let query_service = QueryService::with_default_executors(connection_manager.clone());
     let native_options = NativeOptions::default();
+    let runtime_handle = runtime.handle().clone();
 
     eframe::run_native(
         app_name,
@@ -24,6 +29,7 @@ fn main() -> eframe::Result<()> {
                 app_name.to_string(),
                 connection_manager,
                 query_service,
+                runtime_handle.clone(),
             ))
         }),
     )
