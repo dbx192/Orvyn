@@ -7,3 +7,5 @@ version.workspace = true
 
 [dependencies]
 db-common.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true

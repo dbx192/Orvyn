@@ -1,4 +1,4 @@
-use crate::{validation, ConnectionId, Result};
+use crate::{validation, AppError, ConnectionId, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -27,6 +27,16 @@ impl DataSourceKind {
 
     pub const fn is_relational(self) -> bool {
         !matches!(self, Self::Redis)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MySql => "mysql",
+            Self::PostgreSql => "postgresql",
+            Self::Sqlite => "sqlite",
+            Self::DuckDb => "duckdb",
+            Self::Redis => "redis",
+        }
     }
 }
 
@@ -114,6 +124,30 @@ impl ConnectionProfile {
 
         Ok(())
     }
+
+    pub fn required_host(&self) -> Result<&str> {
+        self.host
+            .as_deref()
+            .filter(|host| !host.trim().is_empty())
+            .ok_or_else(|| AppError::validation("host cannot be blank"))
+    }
+
+    pub fn required_port(&self) -> Result<u16> {
+        self.port
+            .filter(|port| *port > 0)
+            .ok_or_else(|| AppError::validation("port must be between 1 and 65535"))
+    }
+
+    pub fn required_file_path(&self) -> Result<&str> {
+        self.file_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| AppError::validation("file_path cannot be blank"))
+    }
+
+    pub fn connection_label(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +215,16 @@ impl ConnectionProfileBuilder {
         self
     }
 
+    pub fn save_password(mut self, save_password: bool) -> Self {
+        self.profile.security.save_password = save_password;
+        self
+    }
+
+    pub fn ssl_mode(mut self, ssl_mode: SslMode) -> Self {
+        self.profile.security.ssl_mode = ssl_mode;
+        self
+    }
+
     pub fn extra_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.profile.extra_params.insert(key.into(), value.into());
         self
@@ -190,6 +234,61 @@ impl ConnectionProfileBuilder {
         self.profile.validate()?;
         Ok(self.profile)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectionStatus {
+    NotConnected,
+    Connecting,
+    Connected,
+    Failed,
+    Disconnected,
+}
+
+impl Default for ConnectionStatus {
+    fn default() -> Self {
+        Self::NotConnected
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionTestReport {
+    pub kind: DataSourceKind,
+    pub success: bool,
+    pub elapsed_ms: u128,
+    pub server_version: Option<String>,
+    pub message: String,
+}
+
+impl ConnectionTestReport {
+    pub fn success(kind: DataSourceKind, elapsed_ms: u128) -> Self {
+        Self {
+            kind,
+            success: true,
+            elapsed_ms,
+            server_version: None,
+            message: "connection test succeeded".to_string(),
+        }
+    }
+
+    pub fn with_server_version(mut self, server_version: impl Into<String>) -> Self {
+        self.server_version = Some(server_version.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PasswordUpdate {
+    Keep,
+    Clear,
+    Replace(String),
+}
+
+pub fn unsupported_kind(kind: DataSourceKind) -> AppError {
+    AppError::new(
+        ErrorKind::Unsupported,
+        format!("{} is not supported by this operation", kind.as_str()),
+    )
 }
 
 #[cfg(test)]

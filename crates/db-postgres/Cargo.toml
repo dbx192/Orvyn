@@ -8,3 +8,5 @@ version.workspace = true
 [dependencies]
 async-trait.workspace = true
 db-common.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true

@@ -1,6 +1,20 @@
-use crate::{CellValue, ConnectionProfile, PageRequest, QueryResult, Result};
+use crate::{
+    CellValue, ConnectionProfile, ConnectionTestReport, DataSourceKind, PageRequest, QueryResult,
+    Result,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+#[async_trait]
+pub trait ConnectionTester: Send + Sync {
+    fn kind(&self) -> DataSourceKind;
+
+    async fn test_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<ConnectionTestReport>;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DatabaseObjectKind {

@@ -18,8 +18,8 @@ pub mod validation;
 
 pub use bytes::{base64_preview, human_bytes};
 pub use connection::{
-    ConnectionProfile, ConnectionProfileBuilder, ConnectionSecurity, CredentialRef,
-    DataSourceKind, SslMode,
+    ConnectionProfile, ConnectionProfileBuilder, ConnectionSecurity, ConnectionStatus,
+    ConnectionTestReport, CredentialRef, DataSourceKind, PasswordUpdate, SslMode,
 };
 pub use dialect::{Dialect, Identifier};
 pub use error::{AppError, ErrorKind, Result};
@@ -30,6 +30,6 @@ pub use result_set::{CellValue, Column, LogicalType, QueryResult, Row};
 pub use sql::{looks_like_unqualified_mutation, statement_summary, trim_sql};
 pub use time::{elapsed_ms, now_utc};
 pub use traits::{
-    DatabaseObject, DatabaseObjectKind, RedisConnector, RedisDatabase, RedisKeyInfo,
-    RedisValue, RelationalConnector, TableColumn, TableIndex,
+    ConnectionTester, DatabaseObject, DatabaseObjectKind, RedisConnector, RedisDatabase,
+    RedisKeyInfo, RedisValue, RelationalConnector, TableColumn, TableIndex,
 };
