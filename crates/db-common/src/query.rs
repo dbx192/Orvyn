@@ -25,6 +25,28 @@ impl TextRange {
     }
 }
 
+/// Semantic class for a SQL editor highlight span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SqlTokenKind {
+    Keyword,
+    Identifier,
+    QuotedIdentifier,
+    StringLiteral,
+    Number,
+    Operator,
+    Comment,
+    Parameter,
+    Punctuation,
+    Function,
+}
+
+/// Byte range and class for a SQL editor highlight span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlHighlightToken {
+    pub range: TextRange,
+    pub kind: SqlTokenKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryTab {
     pub id: QueryId,

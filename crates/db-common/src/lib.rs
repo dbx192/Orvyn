@@ -30,12 +30,13 @@ pub use paging::{PageRequest, PageSize};
 pub use pool::{ConnectionPoolConfig, ConnectionPoolStats};
 pub use query::{
     FavoriteQuery, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
-    QueryHistoryEntry, QueryTab, TextRange, DEFAULT_QUERY_TIMEOUT_MS,
+    QueryHistoryEntry, QueryTab, SqlHighlightToken, SqlTokenKind, TextRange,
+    DEFAULT_QUERY_TIMEOUT_MS,
 };
 pub use redaction::{mask_secret, redact_connection_url, SecretString};
 pub use result_set::{CellValue, Column, LogicalType, QueryResult, Row};
 pub use sql::{
-    is_result_set_statement, looks_like_unqualified_mutation, split_statements,
+    highlight_sql, is_result_set_statement, looks_like_unqualified_mutation, split_statements,
     statement_at_offset, statement_summary, trim_sql,
 };
 pub use time::{elapsed_ms, now_utc};

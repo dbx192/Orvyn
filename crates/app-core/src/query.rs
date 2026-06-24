@@ -5,10 +5,11 @@
 
 use crate::connection::ConnectionManager;
 use db_common::{
-    split_statements, statement_at_offset, statement_summary, unsupported_kind, AppError,
-    ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind,
+    highlight_sql, split_statements, statement_at_offset, statement_summary, unsupported_kind,
+    AppError, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind,
     FavoriteQuery, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
-    QueryHistoryEntry, QueryId, QueryTab, RelationalQueryExecutor, Result, TextRange,
+    QueryHistoryEntry, QueryId, QueryTab, RelationalQueryExecutor, Result, SqlHighlightToken,
+    TextRange,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -99,6 +100,24 @@ impl QueryService {
         Ok(tab.clone())
     }
 
+    pub async fn current_statement(&self, tab_id: QueryId) -> Result<Option<String>> {
+        let state = self.state.lock().await;
+        let tab = state
+            .tabs
+            .get(&tab_id)
+            .ok_or_else(|| AppError::validation("query tab not found"))?;
+        Ok(statement_at_offset(&tab.sql, tab.cursor_offset))
+    }
+
+    pub async fn highlight_tab_sql(&self, tab_id: QueryId) -> Result<Vec<SqlHighlightToken>> {
+        let state = self.state.lock().await;
+        let tab = state
+            .tabs
+            .get(&tab_id)
+            .ok_or_else(|| AppError::validation("query tab not found"))?;
+        Ok(highlight_sql(&tab.sql))
+    }
+
     pub async fn close_tab(&self, tab_id: QueryId) -> Result<()> {
         let mut state = self.state.lock().await;
         state.tabs.remove(&tab_id);
@@ -110,6 +129,38 @@ impl QueryService {
 
     pub async fn tabs(&self) -> Vec<QueryTab> {
         self.state.lock().await.tabs.values().cloned().collect()
+    }
+
+    pub async fn open_history_entry(&self, history_id: QueryId) -> Result<QueryTab> {
+        let entry = {
+            let state = self.state.lock().await;
+            state
+                .history
+                .iter()
+                .find(|entry| entry.id == history_id)
+                .cloned()
+                .ok_or_else(|| AppError::validation("query history entry not found"))?
+        };
+        let tab = self
+            .open_tab(entry.connection_id, Some(entry.summary.clone()))
+            .await?;
+        self.update_tab_sql(tab.id, entry.sql, 0, None).await
+    }
+
+    pub async fn open_favorite(&self, favorite_id: QueryId) -> Result<QueryTab> {
+        let favorite = {
+            let state = self.state.lock().await;
+            state
+                .favorites
+                .get(&favorite_id)
+                .cloned()
+                .ok_or_else(|| AppError::validation("favorite query not found"))?
+        };
+        let connection_id = favorite
+            .connection_id
+            .ok_or_else(|| AppError::validation("favorite query has no connection"))?;
+        let tab = self.open_tab(connection_id, Some(favorite.title)).await?;
+        self.update_tab_sql(tab.id, favorite.sql, 0, None).await
     }
 
     #[instrument(skip(self, request, runtime_password), fields(tab_id = %request.tab_id))]
@@ -185,6 +236,63 @@ impl QueryService {
         }
     }
 
+    pub async fn execute_tab(
+        &self,
+        tab_id: QueryId,
+        mode: QueryExecutionMode,
+        timeout_ms: u64,
+        runtime_password: Option<&str>,
+    ) -> Result<QueryExecutionReport> {
+        let tab = self
+            .state
+            .lock()
+            .await
+            .tabs
+            .get(&tab_id)
+            .cloned()
+            .ok_or_else(|| AppError::validation("query tab not found"))?;
+        let request = QueryExecutionRequest {
+            tab_id: tab.id,
+            connection_id: tab.connection_id,
+            sql: tab.sql,
+            mode,
+            cursor_offset: tab.cursor_offset,
+            selection: tab.selection,
+            timeout_ms,
+        };
+        self.execute(request, runtime_password).await
+    }
+
+    pub async fn execute_current_statement(
+        &self,
+        tab_id: QueryId,
+        timeout_ms: u64,
+        runtime_password: Option<&str>,
+    ) -> Result<QueryExecutionReport> {
+        self.execute_tab(
+            tab_id,
+            QueryExecutionMode::CurrentStatement,
+            timeout_ms,
+            runtime_password,
+        )
+        .await
+    }
+
+    pub async fn execute_selection(
+        &self,
+        tab_id: QueryId,
+        timeout_ms: u64,
+        runtime_password: Option<&str>,
+    ) -> Result<QueryExecutionReport> {
+        self.execute_tab(
+            tab_id,
+            QueryExecutionMode::Selection,
+            timeout_ms,
+            runtime_password,
+        )
+        .await
+    }
+
     pub async fn stop_execution(&self, tab_id: QueryId) -> Result<()> {
         let handle = self.state.lock().await.running.remove(&tab_id);
         if let Some(handle) = handle {
@@ -220,6 +328,25 @@ impl QueryService {
             .favorites
             .insert(favorite.id, favorite.clone());
         Ok(favorite)
+    }
+
+    pub async fn update_favorite(
+        &self,
+        id: QueryId,
+        connection_id: Option<ConnectionId>,
+        title: String,
+        sql: String,
+    ) -> Result<FavoriteQuery> {
+        let mut state = self.state.lock().await;
+        let favorite = state
+            .favorites
+            .get_mut(&id)
+            .ok_or_else(|| AppError::validation("favorite query not found"))?;
+        favorite.connection_id = connection_id;
+        favorite.title = title;
+        favorite.sql = sql;
+        favorite.updated_at = db_common::now_utc();
+        Ok(favorite.clone())
     }
 
     pub async fn remove_favorite(&self, id: QueryId) -> Result<()> {
