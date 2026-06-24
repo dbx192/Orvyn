@@ -76,14 +76,18 @@ fn json_cell_value(value: &CellValue) -> serde_json::Value {
         CellValue::Int(value) => serde_json::json!(value),
         CellValue::UInt(value) => serde_json::json!(value),
         CellValue::Float(value) => serde_json::json!(value),
-        CellValue::Decimal(value) | CellValue::Text(value) => serde_json::Value::String(value.clone()),
+        CellValue::Decimal(value) | CellValue::Text(value) => {
+            serde_json::Value::String(value.clone())
+        }
         CellValue::Bytes(value) => serde_json::json!({
             "type": "bytes",
             "length": value.len(),
             "base64_preview": base64_preview(value, 24),
         }),
         CellValue::Date(value) => serde_json::Value::String(value.format("%Y-%m-%d").to_string()),
-        CellValue::Time(value) => serde_json::Value::String(value.format("%H:%M:%S%.3f").to_string()),
+        CellValue::Time(value) => {
+            serde_json::Value::String(value.format("%H:%M:%S%.3f").to_string())
+        }
         CellValue::DateTime(value) => {
             serde_json::Value::String(value.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
         }
@@ -114,7 +118,11 @@ fn export_cell_value(value: &CellValue) -> String {
 }
 
 fn escape_delimited(value: &str, delimiter: char) -> String {
-    if value.contains(delimiter) || value.contains('"') || value.contains('\n') || value.contains('\r') {
+    if value.contains(delimiter)
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r')
+    {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value.to_string()

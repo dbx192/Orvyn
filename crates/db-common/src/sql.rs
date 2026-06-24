@@ -691,7 +691,7 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|token| token.kind == SqlTokenKind::Comment
-            && &sql[token.range.start..token.range.end] == "-- tail"));
+                && &sql[token.range.start..token.range.end] == "-- tail"));
     }
 
     #[test]
