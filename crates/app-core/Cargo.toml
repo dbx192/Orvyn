@@ -14,7 +14,5 @@ db-postgres = { path = "../db-postgres" }
 db-redis = { path = "../db-redis" }
 db-sqlite = { path = "../db-sqlite" }
 secure-store = { path = "../secure-store" }
-serde.workspace = true
-serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

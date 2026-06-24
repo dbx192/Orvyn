@@ -29,7 +29,9 @@ pub fn is_safe_identifier_part(value: &str) -> bool {
 
 pub fn ensure_positive_limit(field: &str, value: u32) -> Result<()> {
     if value == 0 {
-        return Err(AppError::validation(format!("{field} must be greater than 0")));
+        return Err(AppError::validation(format!(
+            "{field} must be greater than 0"
+        )));
     }
 
     Ok(())

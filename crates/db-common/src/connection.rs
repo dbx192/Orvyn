@@ -122,11 +122,11 @@ impl ConnectionProfile {
         validation::ensure_not_blank("host", self.host.as_deref().unwrap_or_default())?;
         validation::ensure_port(self.port.unwrap_or_default())?;
 
-        if matches!(self.kind, DataSourceKind::MySql | DataSourceKind::PostgreSql) {
-            validation::ensure_not_blank(
-                "username",
-                self.username.as_deref().unwrap_or_default(),
-            )?;
+        if matches!(
+            self.kind,
+            DataSourceKind::MySql | DataSourceKind::PostgreSql
+        ) {
+            validation::ensure_not_blank("username", self.username.as_deref().unwrap_or_default())?;
         }
 
         Ok(())

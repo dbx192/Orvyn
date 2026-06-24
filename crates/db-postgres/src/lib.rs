@@ -35,13 +35,21 @@ impl ConnectionTester for PostgresConnectionTester {
         config.host(profile.required_host()?);
         config.port(profile.required_port()?);
 
-        if let Some(username) = profile.username.as_deref().filter(|value| !value.is_empty()) {
+        if let Some(username) = profile
+            .username
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
             config.user(username);
         }
         if let Some(password) = password.filter(|value| !value.is_empty()) {
             config.password(password);
         }
-        if let Some(database) = profile.database.as_deref().filter(|value| !value.is_empty()) {
+        if let Some(database) = profile
+            .database
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
             config.dbname(database);
         }
 
@@ -137,8 +145,14 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         _database: Option<&str>,
         schema: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        list_postgres_objects(profile, password, schema, "BASE TABLE", DatabaseObjectKind::Table)
-            .await
+        list_postgres_objects(
+            profile,
+            password,
+            schema,
+            "BASE TABLE",
+            DatabaseObjectKind::Table,
+        )
+        .await
     }
 
     async fn list_views(
@@ -240,13 +254,21 @@ async fn postgres_client(
     config.host(profile.required_host()?);
     config.port(profile.required_port()?);
 
-    if let Some(username) = profile.username.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(username) = profile
+        .username
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         config.user(username);
     }
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         config.password(password);
     }
-    if let Some(database) = profile.database.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(database) = profile
+        .database
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         config.dbname(database);
     }
 

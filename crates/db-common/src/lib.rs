@@ -3,8 +3,8 @@
 //! This crate intentionally contains only cross-cutting types and stateless
 //! helpers. Concrete database drivers belong in their own adapter crates.
 
-pub mod connection;
 pub mod bytes;
+pub mod connection;
 pub mod dialect;
 pub mod error;
 pub mod id;
@@ -18,9 +18,8 @@ pub mod validation;
 
 pub use bytes::{base64_preview, human_bytes};
 pub use connection::{
-    ConnectionProfile, ConnectionProfileBuilder, ConnectionSecurity, ConnectionStatus,
-    ConnectionTestReport, CredentialRef, DataSourceKind, PasswordUpdate, SslMode,
-    unsupported_kind,
+    unsupported_kind, ConnectionProfile, ConnectionProfileBuilder, ConnectionSecurity,
+    ConnectionStatus, ConnectionTestReport, CredentialRef, DataSourceKind, PasswordUpdate, SslMode,
 };
 pub use dialect::{Dialect, Identifier};
 pub use error::{AppError, ErrorKind, Result};

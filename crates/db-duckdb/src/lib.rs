@@ -38,11 +38,10 @@ impl ConnectionTester for DuckDbConnectionTester {
                     .with_detail(error.to_string())
             })??;
 
-        Ok(ConnectionTestReport::success(
-            DataSourceKind::DuckDb,
-            started_at.elapsed().as_millis(),
+        Ok(
+            ConnectionTestReport::success(DataSourceKind::DuckDb, started_at.elapsed().as_millis())
+                .with_server_version(version),
         )
-        .with_server_version(version))
     }
 }
 

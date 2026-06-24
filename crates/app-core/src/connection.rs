@@ -61,9 +61,7 @@ impl ConnectionManager {
         password: PasswordUpdate,
     ) -> Result<ConnectionProfile> {
         profile.validate()?;
-        profile.password_ref = self
-            .apply_password_update(None, &profile, password)
-            .await?;
+        profile.password_ref = self.apply_password_update(None, &profile, password).await?;
         self.store.upsert(profile.clone()).await?;
         info!(connection_id = %profile.id, "connection profile created");
         Ok(profile)
@@ -76,11 +74,10 @@ impl ConnectionManager {
         password: PasswordUpdate,
     ) -> Result<ConnectionProfile> {
         profile.validate()?;
-        let previous = self
-            .store
-            .get(profile.id)
-            .await?
-            .ok_or_else(|| AppError::new(ErrorKind::Validation, "connection profile not found"))?;
+        let previous =
+            self.store.get(profile.id).await?.ok_or_else(|| {
+                AppError::new(ErrorKind::Validation, "connection profile not found")
+            })?;
         profile.password_ref = self
             .apply_password_update(previous.password_ref.as_ref(), &profile, password)
             .await?;
@@ -115,11 +112,10 @@ impl ConnectionManager {
         id: ConnectionId,
         runtime_password: Option<&str>,
     ) -> Result<ConnectionTestReport> {
-        let profile = self
-            .store
-            .get(id)
-            .await?
-            .ok_or_else(|| AppError::new(ErrorKind::Validation, "connection profile not found"))?;
+        let profile =
+            self.store.get(id).await?.ok_or_else(|| {
+                AppError::new(ErrorKind::Validation, "connection profile not found")
+            })?;
         self.test_profile(&profile, runtime_password).await
     }
 
@@ -194,11 +190,10 @@ impl ConnectionManager {
         id: ConnectionId,
         runtime_password: Option<&str>,
     ) -> Result<(ConnectionProfile, Option<String>)> {
-        let profile = self
-            .store
-            .get(id)
-            .await?
-            .ok_or_else(|| AppError::new(ErrorKind::Validation, "connection profile not found"))?;
+        let profile =
+            self.store.get(id).await?.ok_or_else(|| {
+                AppError::new(ErrorKind::Validation, "connection profile not found")
+            })?;
         let password = match runtime_password {
             Some(password) => Some(password.to_string()),
             None => self.load_password(&profile).await?,

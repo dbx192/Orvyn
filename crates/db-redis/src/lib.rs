@@ -114,8 +114,10 @@ impl RedisMetadataReader for RedisMetadataReaderImpl {
             command.arg("MATCH").arg(pattern);
         }
 
-        let (next_cursor, keys): (u64, Vec<String>) =
-            command.query_async(&mut conn).await.map_err(redis_query_error)?;
+        let (next_cursor, keys): (u64, Vec<String>) = command
+            .query_async(&mut conn)
+            .await
+            .map_err(redis_query_error)?;
         let mut infos = Vec::with_capacity(keys.len());
 
         for key in keys {
@@ -153,12 +155,18 @@ fn redis_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<Stri
         .filter(|value| !value.is_empty())
         .unwrap_or("0");
     let database_index = database.parse::<u8>().map_err(|error| {
-        AppError::new(ErrorKind::Validation, "Redis database must be between 0 and 255")
-            .with_detail(error.to_string())
+        AppError::new(
+            ErrorKind::Validation,
+            "Redis database must be between 0 and 255",
+        )
+        .with_detail(error.to_string())
     })?;
     let username = profile.username.as_deref().unwrap_or_default();
 
-    let auth = match (username.is_empty(), password.filter(|value| !value.is_empty())) {
+    let auth = match (
+        username.is_empty(),
+        password.filter(|value| !value.is_empty()),
+    ) {
         (true, Some(password)) => format!(":{}@", urlencoding::encode(password)),
         (false, Some(password)) => {
             format!(
@@ -192,9 +200,7 @@ fn redis_query_error(error: redis::RedisError) -> AppError {
         .with_detail(redact_connection_url(&error.to_string()))
 }
 
-async fn redis_database_count(
-    conn: &mut redis::aio::MultiplexedConnection,
-) -> Result<u8> {
+async fn redis_database_count(conn: &mut redis::aio::MultiplexedConnection) -> Result<u8> {
     let values: Vec<String> = redis::cmd("CONFIG")
         .arg("GET")
         .arg("databases")
@@ -206,9 +212,10 @@ async fn redis_database_count(
         return Ok(16);
     };
 
-    count
-        .parse::<u8>()
-        .map_err(|error| AppError::new(ErrorKind::Query, "invalid Redis databases value").with_detail(error.to_string()))
+    count.parse::<u8>().map_err(|error| {
+        AppError::new(ErrorKind::Query, "invalid Redis databases value")
+            .with_detail(error.to_string())
+    })
 }
 
 async fn redis_db_key_count(
@@ -222,10 +229,7 @@ async fn redis_db_key_count(
         .map_err(redis_query_error)
 }
 
-async fn select_database(
-    conn: &mut redis::aio::MultiplexedConnection,
-    database: u8,
-) -> Result<()> {
+async fn select_database(conn: &mut redis::aio::MultiplexedConnection, database: u8) -> Result<()> {
     let _: String = redis::cmd("SELECT")
         .arg(database)
         .query_async(conn)

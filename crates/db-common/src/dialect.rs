@@ -27,7 +27,9 @@ pub trait Dialect: Send + Sync {
 
     fn validate_identifier(&self, value: &str) -> Result<Identifier> {
         if value.contains('\0') {
-            return Err(AppError::validation("identifier contains invalid null byte"));
+            return Err(AppError::validation(
+                "identifier contains invalid null byte",
+            ));
         }
 
         Identifier::new(value)

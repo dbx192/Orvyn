@@ -88,18 +88,14 @@ impl EncryptedFileStore {
     }
 
     fn decrypt(&self, encrypted: &EncryptedSecret) -> Result<String> {
-        let nonce = STANDARD
-            .decode(&encrypted.nonce)
-            .map_err(|error| {
-                AppError::new(ErrorKind::Credential, "invalid secret nonce")
-                    .with_detail(error.to_string())
-            })?;
-        let ciphertext = STANDARD
-            .decode(&encrypted.ciphertext)
-            .map_err(|error| {
-                AppError::new(ErrorKind::Credential, "invalid secret ciphertext")
-                    .with_detail(error.to_string())
-            })?;
+        let nonce = STANDARD.decode(&encrypted.nonce).map_err(|error| {
+            AppError::new(ErrorKind::Credential, "invalid secret nonce")
+                .with_detail(error.to_string())
+        })?;
+        let ciphertext = STANDARD.decode(&encrypted.ciphertext).map_err(|error| {
+            AppError::new(ErrorKind::Credential, "invalid secret ciphertext")
+                .with_detail(error.to_string())
+        })?;
 
         if nonce.len() != 12 {
             return Err(AppError::new(
@@ -211,7 +207,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("secure-store-{}.json", Uuid::new_v4()));
         let store = EncryptedFileStore::new(path.clone(), "test-master-key");
 
-        let credential_ref = store.put_secret("local", "secret").await.expect("put secret");
+        let credential_ref = store
+            .put_secret("local", "secret")
+            .await
+            .expect("put secret");
         let secret = store
             .get_secret(&credential_ref)
             .await

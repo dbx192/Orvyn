@@ -83,7 +83,8 @@ impl MetadataService {
 
         match profile.kind {
             DataSourceKind::Redis => {
-                self.redis_children(&profile, password.as_deref(), path).await
+                self.redis_children(&profile, password.as_deref(), path)
+                    .await
             }
             kind if kind.is_relational() => {
                 self.relational_children(&profile, password.as_deref(), path)
@@ -129,6 +130,40 @@ impl MetadataService {
             .await
     }
 
+    pub async fn scan_redis_keys(
+        &self,
+        connection_id: ConnectionId,
+        database: u8,
+        pattern: Option<&str>,
+        cursor: u64,
+        limit: u32,
+        runtime_password: Option<&str>,
+    ) -> Result<(u64, Vec<MetadataNode>)> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.redis_reader(profile.kind)?;
+        let scan = reader
+            .scan_keys(
+                &profile,
+                password.as_deref(),
+                database,
+                pattern,
+                cursor,
+                limit,
+            )
+            .await?;
+        let path = MetadataPath::connection(connection_id)
+            .child(MetadataNodeKind::RedisKeysFolder)
+            .with_database(database.to_string());
+
+        Ok((
+            scan.next_cursor,
+            redis_key_nodes(connection_id, &path, scan.keys),
+        ))
+    }
+
     async fn relational_children(
         &self,
         profile: &db_common::ConnectionProfile,
@@ -161,7 +196,12 @@ impl MetadataService {
                         path.schema.as_deref(),
                     )
                     .await?;
-                Ok(object_nodes(profile.id, path, tables, MetadataNodeKind::Table))
+                Ok(object_nodes(
+                    profile.id,
+                    path,
+                    tables,
+                    MetadataNodeKind::Table,
+                ))
             }
             MetadataNodeKind::ViewsFolder => {
                 let views = reader
@@ -172,7 +212,12 @@ impl MetadataService {
                         path.schema.as_deref(),
                     )
                     .await?;
-                Ok(object_nodes(profile.id, path, views, MetadataNodeKind::View))
+                Ok(object_nodes(
+                    profile.id,
+                    path,
+                    views,
+                    MetadataNodeKind::View,
+                ))
             }
             MetadataNodeKind::Table => Ok(vec![
                 folder_node(profile.id, path, MetadataNodeKind::ColumnsFolder, "Columns"),
@@ -261,7 +306,10 @@ impl MetadataService {
         }
     }
 
-    fn relational_reader(&self, kind: DataSourceKind) -> Result<&Arc<dyn RelationalMetadataReader>> {
+    fn relational_reader(
+        &self,
+        kind: DataSourceKind,
+    ) -> Result<&Arc<dyn RelationalMetadataReader>> {
         self.relational_readers
             .get(&kind)
             .ok_or_else(|| unsupported_kind(kind))
@@ -407,7 +455,11 @@ fn folder_node(
     kind: MetadataNodeKind,
     label: &str,
 ) -> MetadataNode {
-    MetadataNode::new(inherit_parent(connection_id, parent).child(kind), label, kind)
+    MetadataNode::new(
+        inherit_parent(connection_id, parent).child(kind),
+        label,
+        kind,
+    )
 }
 
 fn inherit_parent(connection_id: ConnectionId, parent: &MetadataPath) -> MetadataPath {
@@ -445,11 +497,8 @@ mod tests {
     #[tokio::test]
     async fn root_nodes_include_saved_connections() {
         let store = Arc::new(MemoryConnectionProfileStore::default());
-        let manager = ConnectionManager::new(
-            store,
-            Arc::new(MemorySecureStore::default()),
-            Vec::new(),
-        );
+        let manager =
+            ConnectionManager::new(store, Arc::new(MemorySecureStore::default()), Vec::new());
         let profile = ConnectionProfile::builder(DataSourceKind::Redis, "local redis")
             .host("localhost")
             .build()

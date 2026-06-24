@@ -3,7 +3,10 @@ pub fn trim_sql(sql: &str) -> &str {
 }
 
 pub fn statement_summary(sql: &str, max_chars: usize) -> String {
-    let normalized = trim_sql(sql).split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = trim_sql(sql)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
 
     if normalized.chars().count() <= max_chars {
         return normalized;
@@ -30,13 +33,20 @@ mod tests {
 
     #[test]
     fn detects_unqualified_mutation() {
-        assert!(looks_like_unqualified_mutation("update users set name = 'a'"));
+        assert!(looks_like_unqualified_mutation(
+            "update users set name = 'a'"
+        ));
         assert!(looks_like_unqualified_mutation("delete from users"));
-        assert!(!looks_like_unqualified_mutation("delete from users where id = 1"));
+        assert!(!looks_like_unqualified_mutation(
+            "delete from users where id = 1"
+        ));
     }
 
     #[test]
     fn summarizes_statement() {
-        assert_eq!(statement_summary(" select  *  from users ; ", 30), "select * from users");
+        assert_eq!(
+            statement_summary(" select  *  from users ; ", 30),
+            "select * from users"
+        );
     }
 }

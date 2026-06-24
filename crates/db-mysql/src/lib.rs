@@ -56,10 +56,8 @@ impl ConnectionTester for MySqlConnectionTester {
                 .with_detail(error.to_string())
         })?;
 
-        let mut report = ConnectionTestReport::success(
-            DataSourceKind::MySql,
-            started_at.elapsed().as_millis(),
-        );
+        let mut report =
+            ConnectionTestReport::success(DataSourceKind::MySql, started_at.elapsed().as_millis());
 
         if let Some(version) = version {
             report = report.with_server_version(version);
@@ -122,8 +120,14 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         database: Option<&str>,
         _schema: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        list_mysql_objects(profile, password, database, "BASE TABLE", DatabaseObjectKind::Table)
-            .await
+        list_mysql_objects(
+            profile,
+            password,
+            database,
+            "BASE TABLE",
+            DatabaseObjectKind::Table,
+        )
+        .await
     }
 
     async fn list_views(
@@ -133,7 +137,14 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         database: Option<&str>,
         _schema: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        list_mysql_objects(profile, password, database, "VIEW", DatabaseObjectKind::View).await
+        list_mysql_objects(
+            profile,
+            password,
+            database,
+            "VIEW",
+            DatabaseObjectKind::View,
+        )
+        .await
     }
 
     async fn list_columns(
@@ -145,7 +156,10 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         table: &str,
     ) -> Result<Vec<TableColumn>> {
         let database = database.or(profile.database.as_deref()).ok_or_else(|| {
-            AppError::new(ErrorKind::Validation, "database is required for MySQL columns")
+            AppError::new(
+                ErrorKind::Validation,
+                "database is required for MySQL columns",
+            )
         })?;
         let pool = mysql_pool(profile, password)?;
         let mut conn = mysql_conn(&pool).await?;
@@ -163,16 +177,16 @@ impl RelationalMetadataReader for MySqlMetadataReader {
 
         Ok(rows
             .into_iter()
-            .map(|(name, database_type, nullable, default_value, column_key, comment)| {
-                TableColumn {
+            .map(
+                |(name, database_type, nullable, default_value, column_key, comment)| TableColumn {
                     name,
                     database_type,
                     nullable: nullable.eq_ignore_ascii_case("YES"),
                     default_value,
                     primary_key: column_key == "PRI",
                     comment: comment.filter(|value| !value.is_empty()),
-                }
-            })
+                },
+            )
             .collect())
     }
 
@@ -185,13 +199,16 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         table: &str,
     ) -> Result<Vec<TableIndex>> {
         let database = database.or(profile.database.as_deref()).ok_or_else(|| {
-            AppError::new(ErrorKind::Validation, "database is required for MySQL indexes")
+            AppError::new(
+                ErrorKind::Validation,
+                "database is required for MySQL indexes",
+            )
         })?;
         let pool = mysql_pool(profile, password)?;
         let mut conn = mysql_conn(&pool).await?;
-        let rows: Vec<(String, String, u8, String)> = conn
+        let rows: Vec<(String, String, u8)> = conn
             .exec(
-                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, INDEX_NAME = 'PRIMARY' AS IS_PRIMARY \
+                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
                  FROM information_schema.STATISTICS \
                  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
                  ORDER BY INDEX_NAME, SEQ_IN_INDEX",
@@ -266,7 +283,10 @@ async fn list_mysql_objects(
     kind: DatabaseObjectKind,
 ) -> Result<Vec<DatabaseObject>> {
     let database = database.or(profile.database.as_deref()).ok_or_else(|| {
-        AppError::new(ErrorKind::Validation, "database is required for MySQL objects")
+        AppError::new(
+            ErrorKind::Validation,
+            "database is required for MySQL objects",
+        )
     })?;
     let pool = mysql_pool(profile, password)?;
     let mut conn = mysql_conn(&pool).await?;
@@ -292,10 +312,10 @@ async fn list_mysql_objects(
         .collect())
 }
 
-fn group_mysql_indexes(rows: Vec<(String, String, u8, String)>) -> Vec<TableIndex> {
+fn group_mysql_indexes(rows: Vec<(String, String, u8)>) -> Vec<TableIndex> {
     let mut indexes: Vec<TableIndex> = Vec::new();
 
-    for (name, column, non_unique, is_primary) in rows {
+    for (name, column, non_unique) in rows {
         if let Some(index) = indexes.iter_mut().find(|index| index.name == name) {
             index.columns.push(column);
             continue;
@@ -305,8 +325,12 @@ fn group_mysql_indexes(rows: Vec<(String, String, u8, String)>) -> Vec<TableInde
             name,
             columns: vec![column],
             unique: non_unique == 0,
-            primary: is_primary == "1",
+            primary: false,
         });
+    }
+
+    for index in &mut indexes {
+        index.primary = index.name == "PRIMARY";
     }
 
     indexes
