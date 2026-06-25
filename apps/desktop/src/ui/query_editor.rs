@@ -132,6 +132,31 @@ impl QueryEditor {
         report.results.first()
     }
 
+    pub fn is_executing(&self) -> bool {
+        self.active_tab
+            .as_ref()
+            .and_then(|id| self.tabs.get(id))
+            .map(|t| t.execution_running)
+            .unwrap_or(false)
+    }
+
+    pub fn format_current_sql(&mut self) -> Option<String> {
+        if let Some(tab_id) = self.active_tab {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                if tab.sql.is_empty() {
+                    return None;
+                }
+                let formatted = crate::ui::sql_formatter::format_sql(&tab.sql);
+                if formatted != tab.sql {
+                    tab.sql = formatted.clone();
+                    tab.dirty = true;
+                    return Some(formatted);
+                }
+            }
+        }
+        None
+    }
+
     pub fn new_query_with_connection(&mut self, connection_id: ConnectionId) {
         let tab = QueryEditorTab::new(connection_id);
         self.active_tab = Some(tab.id);

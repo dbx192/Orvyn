@@ -4,7 +4,9 @@ use crate::ui::{
     query_editor::QueryEditor,
     result_grid::ResultSetGrid,
     samples::{sample_result_set, sample_table_columns},
-    state::{AppState, TaskStatus, UiError},
+    shortcuts::{matches_shortcut, AppShortcut, Shortcut},
+    sql_formatter::format_sql,
+    state::{AppState, AppTheme, TaskStatus, UiError},
     table_editor::TableEditor,
 };
 use app_core::{
@@ -13,7 +15,8 @@ use app_core::{
 };
 use db_common::dialect::BacktickDialect;
 use eframe::egui::{
-    Align, Button, CentralPanel, Color32, Context, Layout, RichText, SidePanel, TopBottomPanel, Window,
+    Align, Button, CentralPanel, Color32, Context, Frame, Key, Layout, Modifiers, RichText,
+    SidePanel, TopBottomPanel, Window,
 };
 use tokio::runtime::Handle;
 
@@ -26,6 +29,7 @@ pub struct DesktopApp {
     result_grid: ResultSetGrid,
     table_editor: TableEditor,
     last_tree_status: String,
+    error_window_open: bool,
 }
 
 impl DesktopApp {
@@ -58,12 +62,115 @@ impl DesktopApp {
                 Box::new(BacktickDialect),
             ),
             last_tree_status: String::new(),
+            error_window_open: false,
         }
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &Context) {
+        let input = ctx.input(|i| i.clone());
+
+        // Ctrl/Cmd+N: New query
+        if matches_shortcut(&input, &AppShortcut::NewQuery.with_platform_modifier()) {
+            self.query_editor.new_query();
+            self.state.set_status("New query (Ctrl+N)");
+        }
+
+        // Ctrl/Cmd+Enter: Execute current SQL
+        if matches_shortcut(&input, &AppShortcut::ExecuteCurrent.with_platform_modifier()) {
+            if !self.query_editor.is_executing() {
+                self.query_editor.execute_current_statement();
+                self.state.set_status("Executing current statement (Ctrl+Enter)");
+            }
+        }
+
+        // Ctrl/Cmd+Shift+Enter: Execute selected SQL
+        let shift_enter = Shortcut {
+            modifiers: platform_modifiers(),
+            key: Key::Enter,
+        };
+        if input.modifiers.shift && matches_shortcut(&input, &shift_enter) {
+            if !self.query_editor.is_executing() {
+                self.query_editor.execute_selection();
+                self.state.set_status("Executing selection (Ctrl+Shift+Enter)");
+            }
+        }
+
+        // Ctrl/Cmd+S: Save/Submit
+        if matches_shortcut(&input, &AppShortcut::Save.with_platform_modifier()) {
+            self.state.set_status("Save/Submit (Ctrl+S)");
+        }
+
+        // Ctrl/Cmd+R: Refresh
+        if matches_shortcut(&input, &AppShortcut::Refresh.with_platform_modifier()) {
+            self.state.set_status("Refresh (Ctrl+R)");
+        }
+
+        // Ctrl/Cmd+F: Search (in result grid or text)
+        if matches_shortcut(&input, &AppShortcut::Search.with_platform_modifier()) {
+            self.state.set_status("Search (Ctrl+F)");
+        }
+
+        // Ctrl/Cmd+L: Focus object search
+        if matches_shortcut(&input, &AppShortcut::FocusObjectSearch.with_platform_modifier()) {
+            self.state.set_search_focused(true);
+            self.state.set_status("Focus object search (Ctrl+L)");
+        }
+
+        // Esc: Close popup or cancel
+        if matches_shortcut(&input, &AppShortcut::ClosePopup.with_platform_modifier()) {
+            if self.error_window_open {
+                self.error_window_open = false;
+                self.state.errors.clear();
+            } else {
+                self.state.set_status("Esc - cancel/close");
+            }
+        }
+
+        // Ctrl/Cmd+T: Toggle theme
+        if matches_shortcut(&input, &AppShortcut::ToggleTheme.with_platform_modifier()) {
+            self.state.toggle_theme();
+            let theme_name = match self.state.theme {
+                AppTheme::Light => "Light",
+                AppTheme::Dark => "Dark",
+            };
+            self.state.set_status(format!("Theme: {} (Ctrl+T)", theme_name));
+        }
+
+        // Ctrl/Cmd+Shift+F: Format SQL
+        let shift_f = Shortcut {
+            modifiers: platform_modifiers(),
+            key: Key::F,
+        };
+        if input.modifiers.shift && matches_shortcut(&input, &shift_f) {
+            if let Some(_) = self.query_editor.format_current_sql() {
+                self.state.set_status("SQL formatted (Ctrl+Shift+F)");
+            }
+        }
+    }
+}
+
+fn platform_modifiers() -> Modifiers {
+    #[cfg(target_os = "macos")]
+    {
+        Modifiers::COMMAND
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Modifiers::CTRL
     }
 }
 
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Handle keyboard shortcuts first
+        self.handle_shortcuts(ctx);
+
+        // Apply theme
+        ctx.set_visuals(match self.state.theme {
+            AppTheme::Light => eframe::egui::Visuals::light(),
+            AppTheme::Dark => eframe::egui::Visuals::dark(),
+        });
+
         self.top_toolbar(ctx);
         self.left_tree(ctx);
         self.central_panel(ctx);
@@ -90,8 +197,6 @@ impl DesktopApp {
     fn sync_result_grid(&mut self) {
         let latest = self.query_editor.latest_result().cloned();
         if let Some(new_result) = latest {
-            // Update the result grid if the latest result is different
-            // from what it currently shows.
             if self.result_grid.result() != &new_result {
                 self.result_grid.set_result(new_result);
             }
@@ -115,14 +220,39 @@ impl DesktopApp {
                 if ui.button("Refresh").clicked() {
                     self.state.set_status("Refresh requested");
                 }
+
+                // Theme toggle button
+                let theme_icon = match self.state.theme {
+                    AppTheme::Light => "🌙",
+                    AppTheme::Dark => "☀️",
+                };
+                if ui.button(theme_icon).on_hover_text("Toggle Theme (Ctrl+T)").clicked() {
+                    self.state.toggle_theme();
+                }
+
+                // Show error button for demo
                 if ui.button("Show Error").clicked() {
                     self.state.push_error(UiError::new(
-                        "Example error",
-                        "Errors from app-core tasks will appear here.",
+                        "Connection Error",
+                        "Failed to connect to database server.",
+                    ).with_detail(
+                        "Error details:\n\
+                         - Host: localhost:3306\n\
+                         - Error code: 1045\n\
+                         - Access denied for user 'root'@'localhost'\n\
+                         - This may indicate incorrect password or insufficient privileges\n\
+                         \n\
+                         Stack trace:\n\
+                         at Connection.connect() line 45\n\
+                         at SessionManager.connect() line 78\n\
+                         at DesktopApp.handle_connect() line 123"
                     ));
+                    self.error_window_open = true;
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.shortcut_label(ui);
+                    ui.separator();
                     ui.label(RichText::new(&self.state.status).strong());
                 });
             });
@@ -143,7 +273,6 @@ impl DesktopApp {
                     }
                 }
                 self.handle_tree_actions(actions);
-                // Always show last tree status hint at the bottom of the panel.
                 if !self.last_tree_status.is_empty() {
                     ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                         ui.label(
@@ -236,38 +365,132 @@ impl DesktopApp {
                     ));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(format!("Errors: {}", self.state.errors.len()));
+                    let error_count = self.state.errors.len();
+                    if error_count > 0 {
+                        if ui.button(format!("⚠ Errors: {}", error_count)).clicked() {
+                            self.error_window_open = true;
+                        }
+                    } else {
+                        ui.label(format!("Errors: {}", error_count));
+                    }
                 });
             });
         });
     }
 
     fn error_window(&mut self, ctx: &Context) {
-        if self.state.errors.is_empty() {
+        if self.state.errors.is_empty() && !self.error_window_open {
             return;
         }
 
-        let mut open = true;
-        Window::new("Errors")
+        let mut open = self.error_window_open;
+        Window::new("Error Details")
             .open(&mut open)
-            .collapsible(false)
+            .collapsible(true)
             .resizable(true)
+            .default_width(500.0)
             .show(ctx, |ui| {
-                for error in &self.state.errors {
-                    ui.label(RichText::new(&error.title).strong());
-                    ui.label(&error.message);
-                    if let Some(detail) = &error.detail {
-                        ui.label(detail);
+                use eframe::egui::ScrollArea;
+                ScrollArea::vertical().show(ui, |ui| {
+                    for error in &mut self.state.errors {
+                        ui.add_space(4.0);
+
+                        // Error header with expandable detail
+                        Frame::group(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("●").color(Color32::RED).strong());
+                                ui.label(RichText::new(&error.title).strong());
+                            });
+
+                            ui.separator();
+
+                            // Error message
+                            ui.label(RichText::new(&error.message).color(Color32::WHITE));
+
+                            // Expandable detail section
+                            if let Some(detail) = &error.detail {
+                                ui.add_space(8.0);
+
+                                // Toggle button for detail
+                                let toggle_text = if error.expanded { "▼ Hide Details" } else { "▶ Show Details" };
+                                if ui.button(toggle_text).clicked() {
+                                    error.expanded = !error.expanded;
+                                }
+
+                                // Show detail content if expanded
+                                if error.expanded {
+                                    ui.add_space(4.0);
+                                    Frame::default()
+                                        .fill(Color32::from_rgb(40, 40, 40))
+                                        .show(ui, |ui| {
+                                            ScrollArea::horizontal().show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new(detail)
+                                                        .monospace()
+                                                        .small()
+                                                        .color(Color32::GRAY),
+                                                );
+                                            });
+                                        });
+                                }
+                            }
+                        });
+
+                        ui.separator();
                     }
-                    ui.separator();
-                }
-                if ui.add(Button::new("Clear")).clicked() {
-                    self.state.errors.clear();
-                }
+
+                    // Action buttons
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!self.state.errors.is_empty(), Button::new("Clear All")).clicked() {
+                            self.state.errors.clear();
+                            self.error_window_open = false;
+                        }
+
+                        if ui.button("Copy All").clicked() {
+                            let error_text: String = self.state.errors.iter()
+                                .map(|e| {
+                                    let detail = e.detail.as_deref().unwrap_or("");
+                                    format!("{}: {}\n{}", e.title, e.message, detail)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n\n");
+                            ui.output_mut(|o| o.copied_text = error_text);
+                            self.state.set_status("Errors copied to clipboard");
+                        }
+                    });
+                });
             });
 
-        if !open {
-            self.state.errors.clear();
+        self.error_window_open = open;
+        if !open && self.state.errors.is_empty() {
+            self.error_window_open = false;
+        }
+    }
+
+    fn shortcut_label(&self, ui: &mut eframe::egui::Ui) {
+        #[cfg(target_os = "macos")]
+        let modifier = "⌘";
+        #[cfg(not(target_os = "macos"))]
+        let modifier = "Ctrl";
+
+        let shortcuts = [
+            (format!("{}N", modifier), "New"),
+            (format!("{}Enter", modifier), "Run"),
+            (format!("{}⇧↵", modifier), "RunSel"),
+            (format!("{}S", modifier), "Save"),
+            (format!("{}R", modifier), "Refresh"),
+            (format!("{}F", modifier), "Search"),
+            (format!("{}L", modifier), "Focus"),
+            ("Esc", "Close"),
+            (format!("{}T", modifier), "Theme"),
+        ];
+
+        for (key, label) in shortcuts {
+            ui.label(
+                RichText::new(format!("{} {}", key, label))
+                    .small()
+                    .color(Color32::GRAY),
+            );
         }
     }
 }

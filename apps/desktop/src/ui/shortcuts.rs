@@ -1,14 +1,14 @@
-use eframe::egui::{InputState, Modifiers};
+use eframe::egui::{InputState, Modifiers, Key};
 
 /// Represents a keyboard shortcut with optional modifiers and a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shortcut {
     pub modifiers: Modifiers,
-    pub key: egui::Key,
+    pub key: Key,
 }
 
 impl Shortcut {
-    pub const fn new(key: egui::Key) -> Self {
+    pub const fn new(key: Key) -> Self {
         Self {
             modifiers: Modifiers::NONE,
             key,
@@ -53,6 +53,30 @@ impl Shortcut {
     }
 }
 
+/// Returns platform-appropriate modifier (Ctrl on Windows/Linux, Cmd on macOS).
+fn platform_modifier() -> Modifiers {
+    #[cfg(target_os = "macos")]
+    {
+        Modifiers::COMMAND
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Modifiers::CTRL
+    }
+}
+
+/// Returns "Ctrl" on Windows/Linux, "Cmd" on macOS for display.
+fn platform_modifier_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Cmd"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Ctrl"
+    }
+}
+
 /// Application-wide keyboard shortcuts.
 #[derive(Debug, Clone)]
 pub enum AppShortcut {
@@ -70,55 +94,31 @@ pub enum AppShortcut {
 
 impl AppShortcut {
     /// Returns the shortcut combination for this action.
-    /// Uses Ctrl on Windows/Linux, Cmd on macOS.
     pub fn shortcut(&self) -> Shortcut {
         match self {
-            AppShortcut::NewQuery => Shortcut::new(egui::Key::N),
-            AppShortcut::ExecuteCurrent => Shortcut::new(egui::Key::Enter),
-            AppShortcut::ExecuteSelection => Shortcut::new(egui::Key::Enter),
-            AppShortcut::Save => Shortcut::new(egui::Key::S),
-            AppShortcut::Refresh => Shortcut::new(egui::Key::R),
-            AppShortcut::Search => Shortcut::new(egui::Key::F),
-            AppShortcut::FocusObjectSearch => Shortcut::new(egui::Key::L),
-            AppShortcut::ClosePopup => Shortcut::new(egui::Key::Escape),
-            AppShortcut::ToggleTheme => Shortcut::new(egui::Key::T),
-            AppShortcut::FormatSql => Shortcut::new(egui::Key::F),
+            AppShortcut::NewQuery => Shortcut::new(Key::N),
+            AppShortcut::ExecuteCurrent => Shortcut::new(Key::Enter),
+            AppShortcut::ExecuteSelection => Shortcut::new(Key::Enter),
+            AppShortcut::Save => Shortcut::new(Key::S),
+            AppShortcut::Refresh => Shortcut::new(Key::R),
+            AppShortcut::Search => Shortcut::new(Key::F),
+            AppShortcut::FocusObjectSearch => Shortcut::new(Key::L),
+            AppShortcut::ClosePopup => Shortcut::new(Key::Escape),
+            AppShortcut::ToggleTheme => Shortcut::new(Key::T),
+            AppShortcut::FormatSql => Shortcut::new(Key::F),
         }
     }
 
     /// Returns the shortcut with platform-appropriate modifier (Ctrl/Cmd).
-    pub fn with_platform_modifier(self) -> Shortcut {
-        #[cfg(target_os = "macos")]
-        {
-            use egui::ModifierNames;
-            let cmd_mod = Modifiers {
-                command: true,
-                ..Modifiers::NONE
-            };
-            let mut s = self.shortcut();
-            s.modifiers = cmd_mod;
-            s
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            use egui::ModifierNames;
-            let ctrl_mod = Modifiers {
-                ctrl: true,
-                ..Modifiers::NONE
-            };
-            let mut s = self.shortcut();
-            s.modifiers = ctrl_mod;
-            s
-        }
+    pub fn with_platform_modifier(&self) -> Shortcut {
+        let mut s = self.shortcut();
+        s.modifiers = platform_modifier();
+        s
     }
 
     /// Returns the display string for this shortcut (e.g., "Ctrl+N", "Cmd+Enter").
     pub fn display_string(&self) -> String {
-        #[cfg(target_os = "macos")]
-        let modifier = "Cmd";
-        #[cfg(not(target_os = "macos"))]
-        let modifier = "Ctrl";
-
+        let modifier = platform_modifier_name();
         match self {
             AppShortcut::NewQuery => format!("{}+N", modifier),
             AppShortcut::ExecuteCurrent => format!("{}+Enter", modifier),
