@@ -11,3 +11,5 @@
 !.env.example
 /exports/
 /imports/tmp/
+check_log.txt
+todo.md

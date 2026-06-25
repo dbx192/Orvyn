@@ -2,7 +2,7 @@ mod ui;
 
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
-    session::SessionManager, storage::FileConnectionProfileStore,
+    redis_service::RedisService, session::SessionManager, storage::FileConnectionProfileStore,
 };
 use eframe::NativeOptions;
 use secure_store::EncryptedFileStore;
@@ -21,6 +21,7 @@ fn main() -> eframe::Result<()> {
     let session_manager = SessionManager::with_default_testers(connection_manager.clone());
     let metadata_service = MetadataService::with_default_readers(connection_manager.clone());
     let query_service = QueryService::with_default_executors(connection_manager.clone());
+    let redis_service = RedisService::new(connection_manager.clone());
     let native_options = NativeOptions::default();
     let runtime_handle = runtime.handle().clone();
 
@@ -34,6 +35,7 @@ fn main() -> eframe::Result<()> {
                 metadata_service,
                 session_manager,
                 query_service,
+                redis_service,
                 runtime_handle.clone(),
             ))
         }),

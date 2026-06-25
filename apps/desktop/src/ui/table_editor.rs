@@ -4,7 +4,7 @@ use db_common::{AppError, CellValue, ConnectionId, Dialect, Identifier, QueryId,
 use eframe::egui::{
     Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2, Window,
 };
-use std::{collections::BTreeMap, fmt::Write};
+use std::{collections::BTreeMap, fmt::Write, sync::{Arc, Mutex}};
 use tokio::runtime::Handle;
 
 const DEFAULT_PAGE_SIZE: usize = 100;
@@ -59,6 +59,18 @@ impl ChangeSummary {
     }
 }
 
+/// Tracks the state of an async commit operation.
+enum CommitState {
+    /// No commit in progress.
+    Idle,
+    /// Commit task is running; the Arc<Mutex<...>> will receive the result.
+    Committing(Arc<Mutex<Option<Result<db_common::QueryExecutionReport>>>>),
+    /// Previous commit succeeded; will be reset on next poll.
+    Success,
+    /// Previous commit failed with a reason.
+    Failed(String),
+}
+
 pub struct TableEditor {
     schema: Option<String>,
     table: String,
@@ -80,6 +92,7 @@ pub struct TableEditor {
     runtime: Option<Handle>,
     show_commit_dialog: bool,
     show_close_warning: bool,
+    commit_state: CommitState,
     commit_error: Option<String>,
     error_row_index: Option<usize>,
     last_commit_result: Option<(usize, Vec<usize>)>,
@@ -119,6 +132,7 @@ impl TableEditor {
             runtime: None,
             show_commit_dialog: false,
             show_close_warning: false,
+            commit_state: CommitState::Idle,
             commit_error: None,
             error_row_index: None,
             last_commit_result: None,
@@ -143,7 +157,7 @@ impl TableEditor {
     }
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
-        let mut message = None;
+        let mut message = self.poll_commit();
 
         if self.show_commit_dialog {
             self.commit_dialog(ui, &mut message);
@@ -153,7 +167,7 @@ impl TableEditor {
             self.close_warning_dialog(ui);
         }
 
-        if let Some(error) = &self.commit_error {
+        if let Some(error) = self.commit_error.clone() {
             ui.colored_label(Color32::RED, error);
             if ui.button("Clear Error").clicked() {
                 self.commit_error = None;
@@ -212,6 +226,85 @@ impl TableEditor {
         }
     }
 
+    /// Poll the async commit task. Returns a status message if the commit completed this frame.
+    fn poll_commit(&mut self) -> Option<String> {
+        match &self.commit_state {
+            CommitState::Idle | CommitState::Success | CommitState::Failed(_) => {
+                // If previous commit was successful, acknowledge and return the success message.
+                if matches!(&self.commit_state, CommitState::Success) {
+                    self.commit_state = CommitState::Idle;
+                    return Some("Table changes committed successfully".to_string());
+                }
+                None
+            }
+            CommitState::Committing(cell) => {
+                if let Ok(mut guard) = cell.lock() {
+                    if let Some(result) = guard.take() {
+                        match result {
+                            Ok(report) => {
+                                let affected = report.affected_rows;
+                                self.commit_state = CommitState::Idle;
+                                self.clear_changes();
+                                self.last_commit_result = Some((affected as usize, Vec::new()));
+                                Some(format!("Commit successful — {} row(s) affected", affected))
+                            }
+                            Err(e) => {
+                                let msg = format!("Commit failed: {}", e.message);
+                                self.commit_state = CommitState::Failed(msg.clone());
+                                self.commit_error = Some(msg.clone());
+                                Some(msg)
+                            }
+                        }
+                    } else {
+                        // Still waiting for the async task to complete.
+                        None
+                    }
+                } else {
+                    // Mutex poisoned — shouldn't happen in practice.
+                    self.commit_state = CommitState::Failed("Internal error: commit result lock poisoned".to_string());
+                    Some("Internal error during commit".to_string())
+                }
+            }
+        }
+    }
+
+    /// Replace the current dataset with freshly loaded data from the backend.
+    pub fn load_data(
+        &mut self,
+        schema: Option<String>,
+        table: String,
+        columns: Vec<TableColumn>,
+        result: QueryResult,
+    ) {
+        self.column_widths = columns
+            .iter()
+            .map(|col| ((col.name.len() as f32 * 8.0) + 72.0).clamp(MIN_COLUMN_WIDTH, 180.0))
+            .collect();
+        self.schema = schema;
+        self.table = table;
+        self.columns = columns;
+        self.result = result;
+        self.page = 0;
+        self.filter_text.clear();
+        self.sort = None;
+        self.clear_changes();
+        self.commit_state = CommitState::Idle;
+        self.last_commit_result = None;
+    }
+
+    /// Return the fully qualified table name.
+    pub fn table_name(&self) -> String {
+        match self.schema.as_deref().filter(|s| !s.is_empty()) {
+            Some(schema) => format!("{}.{}", schema, self.table),
+            None => self.table.clone(),
+        }
+    }
+
+    /// Returns true when a commit is in flight and UI actions that mutate data should be disabled.
+    fn is_committing(&self) -> bool {
+        matches!(&self.commit_state, CommitState::Committing(_))
+    }
+
     fn toolbar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
         ui.horizontal_wrapped(|ui| {
             ui.label(format!(
@@ -249,20 +342,22 @@ impl TableEditor {
             }
 
             ui.separator();
-            if ui.button("New Row").clicked() {
+            if ui
+                .add_enabled(!self.is_committing(), Button::new("New Row"))
+                .clicked() {
                 self.new_rows.push(NewRow {
                     values: vec![String::new(); self.columns.len()],
                 });
                 *message = Some("New row staged".to_string());
             }
             if ui
-                .add_enabled(self.has_changes(), Button::new("Commit"))
+                .add_enabled(self.has_changes() && !self.is_committing(), Button::new("Commit"))
                 .clicked()
             {
                 self.show_commit_dialog = true;
             }
             if ui
-                .add_enabled(self.has_changes(), Button::new("Rollback"))
+                .add_enabled(self.has_changes() && !self.is_committing(), Button::new("Rollback"))
                 .clicked()
             {
                 self.clear_changes();
@@ -272,6 +367,9 @@ impl TableEditor {
 
             ui.separator();
             ui.checkbox(&mut self.allow_risk_without_pk, "Risk mode");
+            if self.is_committing() {
+                ui.colored_label(Color32::YELLOW, "Committing...");
+            }
             ui.label(format!("{} pending changes", self.pending_change_count()));
         });
 
@@ -426,7 +524,11 @@ impl TableEditor {
         let service = self.query_service.clone().unwrap();
         let connection_id = self.connection_id.unwrap();
         let runtime = self.runtime.clone().unwrap();
-        let editor_clone = self.clone();
+        let insert_count = self.new_rows.len();
+
+        let result_cell: Arc<Mutex<Option<Result<db_common::QueryExecutionReport>>>> =
+            Arc::new(Mutex::new(None));
+        let result_for_task = result_cell.clone();
 
         runtime.spawn(async move {
             let result = service.execute(
@@ -444,36 +546,34 @@ impl TableEditor {
 
             match result {
                 Ok(report) => {
-                    let affected_rows = report.affected_rows;
                     let mut success = true;
                     let mut error_msg = String::new();
 
-                    for (idx, result) in report.results.iter().enumerate() {
-                        if result.affected_rows == 0 && idx < editor_clone.new_rows.len() {
+                    for (idx, stmt_result) in report.results.iter().enumerate() {
+                        let is_insert = idx < insert_count;
+                        if stmt_result.affected_rows == 0 {
                             success = false;
-                            write!(&mut error_msg, "INSERT {} affected 0 rows (conflict?); ", idx + 1).unwrap();
-                        } else if result.affected_rows == 0 && idx >= editor_clone.new_rows.len() {
+                            let label = if is_insert { "INSERT" } else { "Statement" };
+                            write!(&mut error_msg, "{} {} affected 0 rows (conflict?); ", label, idx + 1).unwrap();
+                        } else if stmt_result.affected_rows > 1 && !is_insert {
                             success = false;
-                            write!(&mut error_msg, "Statement {} affected 0 rows (conflict?); ", idx + 1).unwrap();
-                        } else if result.affected_rows > 1 {
-                            success = false;
-                            write!(&mut error_msg, "Statement {} affected {} rows (danger, rolled back); ", idx + 1, result.affected_rows).unwrap();
+                            write!(&mut error_msg, "Statement {} affected {} rows (danger); ", idx + 1, stmt_result.affected_rows).unwrap();
                         }
                     }
 
                     if success {
-                        *message = Some(format!("Commit successful, {} rows affected", affected_rows));
+                        *result_for_task.lock().unwrap() = Some(Ok(report));
                     } else {
-                        *message = Some(error_msg);
+                        *result_for_task.lock().unwrap() = Some(Err(db_common::AppError::validation(error_msg)));
                     }
                 }
                 Err(e) => {
-                    *message = Some(format!("Commit failed: {}", e.message));
+                    *result_for_task.lock().unwrap() = Some(Err(e));
                 }
             }
         });
 
-        self.clear_changes();
+        self.commit_state = CommitState::Committing(result_cell);
     }
 
     fn build_change_summary(&self) -> ChangeSummary {

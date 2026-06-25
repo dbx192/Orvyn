@@ -4,21 +4,29 @@ use crate::ui::{
     query_editor::QueryEditor,
     redis_key_browser::RedisKeyBrowser,
     result_grid::ResultSetGrid,
-    samples::{sample_result_set, sample_table_columns},
+    samples::sample_result_set,
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
     sql_formatter::format_sql,
     state::{AppState, AppTheme, TaskStatus, UiError},
     table_editor::TableEditor,
+    table_structure::TableStructureView,
 };
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
+    redis_service::RedisService,
     session::SessionManager,
 };
-use db_common::dialect::BacktickDialect;
+use db_common::{
+    dialect::{BacktickDialect, DoubleQuoteDialect},
+    ConnectionId, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest,
+    QueryId, QueryResult, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+};
+use db_common::DatabaseFunction;
 use eframe::egui::{
     Align, Button, CentralPanel, Color32, Context, Frame, Key, Layout, Modifiers, RichText,
     SidePanel, TopBottomPanel, Window,
 };
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
 
 pub struct DesktopApp {
@@ -28,17 +36,53 @@ pub struct DesktopApp {
     query_editor: QueryEditor,
     state: AppState,
     result_grid: ResultSetGrid,
-    table_editor: TableEditor,
+    table_editor: Option<TableEditor>,
+    table_structure: Option<TableStructureView>,
     redis_browser: RedisKeyBrowser,
     last_tree_status: String,
     error_window_open: bool,
     active_panel: ActivePanel,
+    /// Pending async load for table data (Arc<Mutex> polled each frame).
+    pending_table_load: Option<Arc<Mutex<Option<Result<TableDataPayload, db_common::AppError>>>>>,
+    /// Pending async load for table structure.
+    pending_structure_load: Option<Arc<Mutex<Option<Result<TableStructurePayload, db_common::AppError>>>>>,
+    // Cloned service handles for spawning async loads.
+    connection_manager: ConnectionManager,
+    metadata_service: MetadataService,
+    query_service: QueryService,
+    runtime: Handle,
+}
+
+/// Payload produced by the table-data async loader.
+struct TableDataPayload {
+    connection_id: ConnectionId,
+    database: Option<String>,
+    schema: Option<String>,
+    table: String,
+    columns: Vec<TableColumn>,
+    result: QueryResult,
+    dialect: Box<dyn Dialect>,
+}
+
+/// Payload produced by the table-structure async loader.
+struct TableStructurePayload {
+    connection_id: ConnectionId,
+    database: Option<String>,
+    schema: Option<String>,
+    table: String,
+    columns: Vec<TableColumn>,
+    indexes: Vec<TableIndex>,
+    foreign_keys: Vec<TableForeignKey>,
+    triggers: Vec<TableTrigger>,
+    functions: Vec<DatabaseFunction>,
+    create_sql: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActivePanel {
     QueryEditor,
     TableEditor,
+    TableStructure,
     RedisBrowser,
 }
 
@@ -49,13 +93,18 @@ impl DesktopApp {
         metadata_service: MetadataService,
         session_manager: SessionManager,
         query_service: QueryService,
+        redis_service: RedisService,
         runtime: Handle,
     ) -> Self {
         let result_grid_result = sample_result_set();
-        let sample = result_grid_result.clone();
+        let cm = connection_manager.clone();
+        let ms = metadata_service.clone();
+        let qs = query_service.clone();
+        let rt = runtime.clone();
+        let rt2 = runtime.clone();
         Self {
             app_name,
-            connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), runtime.clone()),
+            connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), rt2),
             object_tree: ObjectTree::new(
                 metadata_service,
                 session_manager,
@@ -64,17 +113,18 @@ impl DesktopApp {
             query_editor: QueryEditor::new(query_service, connection_manager, runtime),
             state: AppState::with_sample_workspace(),
             result_grid: ResultSetGrid::new(result_grid_result),
-            table_editor: TableEditor::new(
-                "main",
-                "customers",
-                sample_table_columns(),
-                sample,
-                Box::new(BacktickDialect),
-            ),
-            redis_browser: RedisKeyBrowser::with_sample_data("Local Redis", 0),
+            table_editor: None,
+            table_structure: None,
+            redis_browser: RedisKeyBrowser::new(redis_service, rt),
             last_tree_status: String::new(),
             error_window_open: false,
-            active_panel: ActivePanel::RedisBrowser,
+            active_panel: ActivePanel::QueryEditor,
+            pending_table_load: None,
+            pending_structure_load: None,
+            connection_manager: cm,
+            metadata_service: ms,
+            query_service: qs,
+            runtime: rt,
         }
     }
 
@@ -174,7 +224,10 @@ fn platform_modifiers() -> Modifiers {
 
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // Handle keyboard shortcuts first
+        // Poll any pending async data loads first
+        self.poll_pending_loads();
+
+        // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
 
         // Apply theme
@@ -197,7 +250,12 @@ impl DesktopApp {
             // Tab bar to switch between panels
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_panel, ActivePanel::QueryEditor, "📝 Query Editor");
-                ui.selectable_value(&mut self.active_panel, ActivePanel::TableEditor, "📋 Table Editor");
+                if self.table_editor.is_some() {
+                    ui.selectable_value(&mut self.active_panel, ActivePanel::TableEditor, "📋 Table Editor");
+                }
+                if self.table_structure.is_some() {
+                    ui.selectable_value(&mut self.active_panel, ActivePanel::TableStructure, "📐 Table Structure");
+                }
                 ui.selectable_value(&mut self.active_panel, ActivePanel::RedisBrowser, "🔑 Redis Browser");
             });
             ui.separator();
@@ -214,16 +272,48 @@ impl DesktopApp {
                         }
                     }
                 }
-                ActivePanel::TableEditor => {
-                    let message = self.table_editor.ui(ui);
-                    if let Some(msg) = message {
-                        if !msg.is_empty() {
-                            self.state.set_status(msg);
+                ActivePanel::TableEditor => match &mut self.table_editor {
+                    Some(editor) => {
+                        let message = editor.ui(ui);
+                        if let Some(msg) = message {
+                            if !msg.is_empty() {
+                                self.state.set_status(msg);
+                            }
                         }
                     }
-                }
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(60.0);
+                            ui.label(RichText::new("📋").size(48.0));
+                            ui.add_space(12.0);
+                            ui.label("No table open. Double-click a table in the object tree to load data.");
+                            ui.add_space(8.0);
+                            if ui.button("Switch to Query Editor").clicked() {
+                                self.active_panel = ActivePanel::QueryEditor;
+                            }
+                        });
+                    }
+                },
+                ActivePanel::TableStructure => match &mut self.table_structure {
+                    Some(view) => {
+                        let message = view.ui(ui);
+                        if let Some(msg) = message {
+                            if !msg.is_empty() {
+                                self.state.set_status(msg);
+                            }
+                        }
+                    }
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(60.0);
+                            ui.label(RichText::new("📐").size(48.0));
+                            ui.add_space(12.0);
+                            ui.label("Loading table structure...");
+                        });
+                    }
+                },
                 ActivePanel::RedisBrowser => {
-                    self.redis_browser.ui(ui);
+                    self.redis_browser.ui(ctx, ui);
                 }
             }
         });
@@ -330,12 +420,12 @@ impl DesktopApp {
                     table,
                 } => {
                     self.state.set_status(format!(
-                        "Open table {}.{}{} ({})",
+                        "Loading table {}.{} ...",
                         schema.as_deref().unwrap_or(""),
-                        database.as_deref().unwrap_or(""),
-                        table,
-                        connection_id
+                        table
                     ));
+                    self.spawn_table_data_load(connection_id, database, schema, table);
+                    self.active_panel = ActivePanel::TableEditor;
                 }
                 ObjectTreeAction::OpenQuery {
                     connection_id,
@@ -354,6 +444,13 @@ impl DesktopApp {
                     database,
                     key,
                 } => {
+                    let database_index = database
+                        .as_deref()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    self.redis_browser
+                        .load_key(connection_id, database_index, key.clone());
+                    self.active_panel = ActivePanel::RedisBrowser;
                     self.state.set_status(format!(
                         "View Redis key {key} (db={:?}, conn={})",
                         database, connection_id
@@ -366,12 +463,12 @@ impl DesktopApp {
                     table,
                 } => {
                     self.state.set_status(format!(
-                        "View structure {}.{}{} ({})",
+                        "Loading structure for {}.{} ...",
                         schema.as_deref().unwrap_or(""),
-                        database.as_deref().unwrap_or(""),
-                        table,
-                        connection_id
+                        table
                     ));
+                    self.spawn_structure_load(connection_id, database, schema, table);
+                    self.active_panel = ActivePanel::TableStructure;
                 }
                 ObjectTreeAction::EditConnection(id) => {
                     self.state
@@ -383,6 +480,242 @@ impl DesktopApp {
                 }
             }
         }
+    }
+
+    /// Poll pending async loads. Called at the top of each frame.
+    fn poll_pending_loads(&mut self) {
+        // ── Table data load ──
+        if let Some(cell) = &self.pending_table_load {
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    self.pending_table_load = None;
+                    match result {
+                        Ok(payload) => {
+                            let row_count = payload.result.rows.len();
+                            let table_name = payload.table.clone();
+                            let conn_id = payload.connection_id;
+                            let editor = TableEditor::with_query_service(
+                                payload.schema.as_deref().unwrap_or(""),
+                                &payload.table,
+                                payload.columns,
+                                payload.result,
+                                payload.dialect,
+                                self.query_service.clone(),
+                                conn_id,
+                                self.runtime.clone(),
+                            );
+                            self.table_editor = Some(editor);
+                            self.state.set_status(format!(
+                                "Loaded table {} ({} rows)",
+                                table_name, row_count
+                            ));
+                        }
+                        Err(e) => {
+                            self.state.set_status(format!("Failed to load table: {}", e.message));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Table structure load ──
+        if let Some(cell) = &self.pending_structure_load {
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    self.pending_structure_load = None;
+                    match result {
+                        Ok(payload) => {
+                            let view = TableStructureView::new(
+                                payload.connection_id,
+                                payload.database,
+                                payload.schema,
+                                payload.table,
+                                payload.columns,
+                                payload.indexes,
+                                payload.foreign_keys,
+                                payload.triggers,
+                                payload.functions,
+                                payload.create_sql,
+                            );
+                            let table_name = view.table_name();
+                            self.table_structure = Some(view);
+                            self.state.set_status(format!("Loaded structure for {}", table_name));
+                        }
+                        Err(e) => {
+                            self.state.set_status(format!("Failed to load structure: {}", e.message));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spawn an async task to load table data (columns + paginated SELECT).
+    fn spawn_table_data_load(
+        &mut self,
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    ) {
+        let metadata_service = self.metadata_service.clone();
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+
+        let cell: Arc<Mutex<Option<Result<TableDataPayload, db_common::AppError>>>> =
+            Arc::new(Mutex::new(None));
+        self.pending_table_load = Some(cell.clone());
+
+        // Clone for the async task — these are used in futures AND in the payload.
+        let db = database.clone();
+        let sch = schema.clone();
+        let tbl = table.clone();
+
+        runtime.spawn(async move {
+            // Resolve the connection profile to determine the dialect.
+            let dialect: Box<dyn Dialect> = match connection_manager.get_profile(connection_id) {
+                Ok(Some(profile)) => match profile.kind {
+                    DataSourceKind::MySql => Box::new(BacktickDialect),
+                    _ => Box::new(DoubleQuoteDialect),
+                },
+                _ => Box::new(DoubleQuoteDialect),
+            };
+
+            // Build a safe SELECT with LIMIT.
+            let qualified = match &sch {
+                Some(s) if !s.is_empty() => {
+                    format!(
+                        "{}.{}",
+                        dialect.quote_identifier(&db_common::Identifier::new(s.as_str()).unwrap()),
+                        dialect.quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
+                    )
+                }
+                _ => dialect.quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
+            };
+            let sql = format!("SELECT * FROM {} LIMIT 500", qualified);
+
+            // Fetch columns and data in parallel.
+            let columns_future = metadata_service.table_columns(
+                connection_id,
+                db.as_deref(),
+                sch.as_deref(),
+                &tbl,
+                None,
+            );
+            let request = QueryExecutionRequest {
+                tab_id: QueryId::new(),
+                connection_id,
+                sql,
+                mode: QueryExecutionMode::All,
+                cursor_offset: 0,
+                selection: None,
+                timeout_ms: 30000,
+            };
+            let query_future = query_service.execute(request, None);
+
+            let (columns_result, query_result) = tokio::join!(columns_future, query_future);
+
+            let result = match (columns_result, query_result) {
+                (Ok(columns), Ok(report)) => {
+                    let data = report.results.into_iter().next().unwrap_or_else(|| QueryResult {
+                        statement: String::new(),
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        affected_rows: 0,
+                        execution_time_ms: 0,
+                        notices: Vec::new(),
+                        metadata: Default::default(),
+                    });
+                    Ok(TableDataPayload {
+                        connection_id,
+                        database: db,
+                        schema: sch,
+                        table: tbl,
+                        columns,
+                        result: data,
+                        dialect,
+                    })
+                }
+                (Err(e), _) => Err(e),
+                (_, Err(e)) => Err(e),
+            };
+
+            *cell.lock().unwrap() = Some(result);
+        });
+    }
+
+    /// Spawn an async task to load full table structure metadata.
+    fn spawn_structure_load(
+        &mut self,
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    ) {
+        let metadata_service = self.metadata_service.clone();
+        let runtime = self.runtime.clone();
+
+        let cell: Arc<Mutex<Option<Result<TableStructurePayload, db_common::AppError>>>> =
+            Arc::new(Mutex::new(None));
+        self.pending_structure_load = Some(cell.clone());
+
+        let db = database.clone();
+        let sch = schema.clone();
+        let tbl = table.clone();
+
+        runtime.spawn(async move {
+            let db_ref = db.as_deref();
+            let sch_ref = sch.as_deref();
+
+            let (
+                columns_result,
+                indexes_result,
+                fks_result,
+                triggers_result,
+                functions_result,
+                sql_result,
+            ) = tokio::join!(
+                metadata_service.table_columns(connection_id, db_ref, sch_ref, &tbl, None),
+                metadata_service.table_indexes(connection_id, db_ref, sch_ref, &tbl, None),
+                metadata_service.table_foreign_keys(connection_id, db_ref, sch_ref, &tbl, None),
+                metadata_service.table_triggers(connection_id, db_ref, sch_ref, &tbl, None),
+                metadata_service.schema_functions(connection_id, db_ref, sch_ref, None),
+                metadata_service.get_create_table_sql(connection_id, db_ref, sch_ref, &tbl, None),
+            );
+
+            let result = match (
+                columns_result,
+                indexes_result,
+                fks_result,
+                triggers_result,
+                functions_result,
+                sql_result,
+            ) {
+                (Ok(columns), Ok(indexes), Ok(foreign_keys), Ok(triggers), Ok(functions), Ok(create_sql)) => {
+                    Ok(TableStructurePayload {
+                        connection_id,
+                        database: db,
+                        schema: sch,
+                        table: tbl,
+                        columns,
+                        indexes,
+                        foreign_keys,
+                        triggers,
+                        functions,
+                        create_sql,
+                    })
+                }
+                (Err(e), ..) => Err(e),
+                (_, Err(e), ..) => Err(e),
+                (_, _, Err(e), ..) => Err(e),
+                (_, _, _, Err(e), ..) => Err(e),
+                (_, _, _, _, Err(e), _) => Err(e),
+                (_, _, _, _, _, Err(e)) => Err(e),
+            };
+
+            *cell.lock().unwrap() = Some(result);
+        });
     }
 
     fn bottom_status(&mut self, ctx: &Context) {

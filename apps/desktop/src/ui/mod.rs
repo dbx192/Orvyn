@@ -10,3 +10,4 @@ pub mod shortcuts;
 pub mod sql_formatter;
 pub mod state;
 pub mod table_editor;
+pub mod table_structure;

@@ -1,13 +1,20 @@
 use crate::connection::ConnectionManager;
 use db_common::{
-    CellValue, ConnectionId, RedisValue, Result,
+    CellValue, ConnectionId, RedisKeyInfo, RedisValue, Result,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[derive(Debug, Clone)]
+pub struct RedisKeyLoad {
+    pub connection_label: String,
+    pub database: u8,
+    pub info: RedisKeyInfo,
+    pub value: RedisValue,
+}
+
 pub struct RedisService {
     connections: ConnectionManager,
-    redis_impl: Arc<db_redis::RedisConnectorWithAuth>,
     connections_cache: Arc<Mutex<std::collections::BTreeMap<ConnectionId, db_redis::redis::aio::MultiplexedConnection>>>,
 }
 
@@ -15,7 +22,6 @@ impl RedisService {
     pub fn new(connections: ConnectionManager) -> Self {
         Self {
             connections,
-            redis_impl: Arc::new(db_redis::RedisConnectorWithAuth),
             connections_cache: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         }
     }
@@ -46,6 +52,39 @@ impl RedisService {
     ) -> Result<RedisValue> {
         let mut conn = self.get_connection(connection_id).await?;
         db_redis::RedisConnectorWithAuth::get_key_value(&mut conn, database, key).await
+    }
+
+    pub async fn get_key_info(
+        &self,
+        connection_id: ConnectionId,
+        database: u8,
+        key: &str,
+    ) -> Result<RedisKeyInfo> {
+        let mut conn = self.get_connection(connection_id).await?;
+        db_redis::RedisConnectorWithAuth::get_key_info(&mut conn, database, key).await
+    }
+
+    pub async fn load_key(
+        &self,
+        connection_id: ConnectionId,
+        database: u8,
+        key: &str,
+    ) -> Result<RedisKeyLoad> {
+        let profile = self
+            .connections
+            .get_profile(connection_id)
+            .await?
+            .ok_or_else(|| db_common::AppError::validation("connection profile not found"))?;
+        let mut conn = self.get_connection(connection_id).await?;
+        let info = db_redis::RedisConnectorWithAuth::get_key_info(&mut conn, database, key).await?;
+        let value =
+            db_redis::RedisConnectorWithAuth::get_key_value(&mut conn, database, key).await?;
+        Ok(RedisKeyLoad {
+            connection_label: profile.name,
+            database,
+            info,
+            value,
+        })
     }
 
     pub async fn delete_key(
@@ -253,7 +292,6 @@ impl Clone for RedisService {
     fn clone(&self) -> Self {
         Self {
             connections: self.connections.clone(),
-            redis_impl: self.redis_impl.clone(),
             connections_cache: self.connections_cache.clone(),
         }
     }

@@ -417,6 +417,36 @@ impl RedisConnectorWithAuth {
         }
     }
 
+    pub async fn get_key_info(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+    ) -> Result<RedisKeyInfo> {
+        select_database(conn, database).await?;
+        let type_name: String = redis::cmd("TYPE")
+            .arg(key)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        if type_name == "none" {
+            return Err(AppError::new(ErrorKind::NotFound, "Redis key not found"));
+        }
+
+        let ttl_seconds: i64 = redis::cmd("TTL")
+            .arg(key)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        let size_hint = Some(Self::get_key_size(conn, database, key).await?);
+
+        Ok(RedisKeyInfo {
+            name: key.to_string(),
+            type_name,
+            ttl_seconds: (ttl_seconds >= 0).then_some(ttl_seconds),
+            size_hint,
+        })
+    }
+
     pub async fn delete_key(
         conn: &mut redis::aio::MultiplexedConnection,
         database: u8,
