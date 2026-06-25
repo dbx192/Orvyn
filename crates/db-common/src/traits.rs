@@ -81,7 +81,7 @@ pub struct DatabaseFunction {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MetadataNodeKind {
     Connection,
     Database,

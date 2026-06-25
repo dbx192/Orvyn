@@ -44,9 +44,9 @@ impl Shortcut {
     }
 
     pub fn matches(&self, input: &InputState) -> bool {
-        if input.modifiers == self.modifiers || input.modifiers.matches(self.modifiers) {
-            if let Some(pressed_key) = input.key_pressed {
-                return pressed_key == self.key;
+        if input.modifiers == self.modifiers || input.modifiers.matches_exact(self.modifiers) {
+            if input.key_pressed(self.key) {
+                return true;
             }
         }
         false

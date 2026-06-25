@@ -1,5 +1,7 @@
 //! Import and export workflow primitives.
 
+pub mod import_csv;
+
 use db_common::{base64_preview, human_bytes, CellValue, QueryResult, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

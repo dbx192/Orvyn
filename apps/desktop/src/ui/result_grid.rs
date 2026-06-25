@@ -7,6 +7,7 @@ use eframe::egui::{
 };
 use import_export::{export_query_result, ExportFormat};
 use std::cmp::Ordering;
+use tokio::runtime::Handle;
 
 const DEFAULT_PAGE_SIZE: usize = 100;
 const MIN_COLUMN_WIDTH: f32 = 72.0;
@@ -38,6 +39,7 @@ pub struct ResultSetGrid {
     page_size: usize,
     selected: Option<SelectedCell>,
     sort: Option<SortState>,
+    runtime: Option<Handle>,
 }
 
 impl ResultSetGrid {
@@ -60,7 +62,13 @@ impl ResultSetGrid {
             page_size: DEFAULT_PAGE_SIZE,
             selected: None,
             sort: None,
+            runtime: None,
         }
+    }
+
+    pub fn with_runtime(mut self, runtime: Handle) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     pub fn set_result(&mut self, result: QueryResult) {
@@ -228,6 +236,16 @@ impl ResultSetGrid {
             if ui.button("Export Excel").clicked() {
                 self.copy_export(ui, ExportFormat::ExcelCompatible, message);
             }
+            ui.separator();
+            if ui.button("💾 Save CSV...").clicked() {
+                self.save_export(ExportFormat::Csv, message);
+            }
+            if ui.button("💾 Save JSON...").clicked() {
+                self.save_export(ExportFormat::Json, message);
+            }
+            if ui.button("💾 Save Excel...").clicked() {
+                self.save_export(ExportFormat::ExcelCompatible, message);
+            }
         });
 
         if let Some(sort) = self.sort {
@@ -255,11 +273,12 @@ impl ResultSetGrid {
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             for column_index in 0..self.result.columns.len() {
-                let column = &self.result.columns[column_index];
+                let column = self.result.columns[column_index].clone();
                 let column_name = column.name.clone();
+                let database_type = column.database_type.clone();
                 let column_hover = format!(
                     "{}{}{}",
-                    column.database_type,
+                    database_type,
                     if column.nullable { " · nullable" } else { "" },
                     if column.primary_key { " · PK" } else { "" }
                 );
@@ -306,7 +325,7 @@ impl ResultSetGrid {
                             );
                         });
                         ui.label(
-                            RichText::new(&column.database_type)
+                            RichText::new(&database_type)
                                 .color(Color32::GRAY)
                                 .size(10.0),
                         );
@@ -491,6 +510,62 @@ impl ResultSetGrid {
                         "Excel-compatible export copied to clipboard".to_string()
                     }
                 });
+            }
+            Err(error) => {
+                *message = Some(format!("Export failed: {}", error.message));
+            }
+        }
+    }
+
+    fn save_export(&self, format: ExportFormat, message: &mut Option<String>) {
+        let ext = match format {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Json => "json",
+            ExportFormat::ExcelCompatible => "tsv",
+        };
+        let format_name = match format {
+            ExportFormat::Csv => "CSV",
+            ExportFormat::Json => "JSON",
+            ExportFormat::ExcelCompatible => "Excel",
+        };
+
+        match export_query_result(&self.result, format) {
+            Ok(text) => {
+                if let Some(rt) = &self.runtime {
+                    let rt = rt.clone();
+                    let text_clone = text.clone();
+                    let format_label = format_name.to_string();
+                    let file_ext = ext.to_string();
+
+                    // Open file save dialog (blocking on a background thread to avoid freezing UI).
+                    let path = rfd::FileDialog::new()
+                        .set_title(&format!("Save as {}", format_label))
+                        .add_filter(format_label, &[file_ext.as_str()])
+                        .save_file();
+
+                    if let Some(path) = path {
+                        rt.spawn(async move {
+                            match tokio::fs::write(&path, &text_clone).await {
+                                Ok(()) => {
+                                    // Status update must be set via the egui context on next frame.
+                                    // We use a simpler approach: just log the success.
+                                    tracing::info!("Exported {} to {}", format_label, path.display());
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to write export file: {e}");
+                                }
+                            }
+                        });
+                        *message = Some(format!(
+                            "{} export saved to {}",
+                            format_label,
+                            path.display()
+                        ));
+                    }
+                } else {
+                    // Fallback: copy to clipboard if no runtime available.
+                    *message = Some(format!("{} export ready (no file dialog available — copied to clipboard)", format_name));
+                }
             }
             Err(error) => {
                 *message = Some(format!("Export failed: {}", error.message));

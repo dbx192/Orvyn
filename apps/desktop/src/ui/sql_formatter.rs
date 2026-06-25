@@ -30,7 +30,7 @@ pub fn format_sql(sql: &str) -> String {
     let mut string_char = ' ';
     let mut indent_level = 0;
     let mut line_start = true;
-    let mut prev_word = "";
+    let mut prev_word = String::new();
     let mut paren_depth = 0;
 
     let mut chars = sql.char_indices().peekable();
@@ -108,7 +108,7 @@ pub fn format_sql(sql: &str) -> String {
                             "WITH", "RECURSIVE", "OVER", "PARTITION"];
                         let should_deindent_before = ["END", "ELSE", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT"];
 
-                        if should_deindent_before.contains(&word_upper.as_str()) && prev_word != "(" {
+                        if should_deindent_before.contains(&word_upper.as_str()) && prev_word.as_str() != "(" {
                             indent_level = indent_level.saturating_sub(1);
                             if line_start && paren_depth == 0 {
                                 result.push_str(&"  ".repeat(indent_level));
@@ -125,7 +125,7 @@ pub fn format_sql(sql: &str) -> String {
                     for _ in 0..rest.len().saturating_sub(1) {
                         chars.next();
                     }
-                    prev_word = &rest;
+                    prev_word = rest;
                     line_start = false;
                 } else {
                     result.push(ch);

@@ -100,11 +100,13 @@ impl DesktopApp {
         let cm = connection_manager.clone();
         let ms = metadata_service.clone();
         let qs = query_service.clone();
-        let rt = runtime.clone();
-        let rt2 = runtime.clone();
+        let rt_grid = runtime.clone();
+        let rt_cm_ui = runtime.clone();
+        let rt_redis = runtime.clone();
+        let rt_field = runtime.clone();
         Self {
             app_name,
-            connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), rt2),
+            connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), rt_cm_ui),
             object_tree: ObjectTree::new(
                 metadata_service,
                 session_manager,
@@ -112,10 +114,10 @@ impl DesktopApp {
             ),
             query_editor: QueryEditor::new(query_service, connection_manager, runtime),
             state: AppState::with_sample_workspace(),
-            result_grid: ResultSetGrid::new(result_grid_result),
+            result_grid: ResultSetGrid::new(result_grid_result).with_runtime(rt_grid),
             table_editor: None,
             table_structure: None,
-            redis_browser: RedisKeyBrowser::new(redis_service, rt),
+            redis_browser: RedisKeyBrowser::new(redis_service, rt_redis),
             last_tree_status: String::new(),
             error_window_open: false,
             active_panel: ActivePanel::QueryEditor,
@@ -124,7 +126,7 @@ impl DesktopApp {
             connection_manager: cm,
             metadata_service: ms,
             query_service: qs,
-            runtime: rt,
+            runtime: rt_field,
         }
     }
 
@@ -485,10 +487,12 @@ impl DesktopApp {
     /// Poll pending async loads. Called at the top of each frame.
     fn poll_pending_loads(&mut self) {
         // ── Table data load ──
-        if let Some(cell) = &self.pending_table_load {
+        let table_cell = self.pending_table_load.take();
+        if let Some(cell) = table_cell {
+            let mut done = false;
             if let Ok(mut guard) = cell.lock() {
                 if let Some(result) = guard.take() {
-                    self.pending_table_load = None;
+                    done = true;
                     match result {
                         Ok(payload) => {
                             let row_count = payload.result.rows.len();
@@ -516,13 +520,18 @@ impl DesktopApp {
                     }
                 }
             }
+            if !done {
+                self.pending_table_load = Some(cell);
+            }
         }
 
         // ── Table structure load ──
-        if let Some(cell) = &self.pending_structure_load {
+        let structure_cell = self.pending_structure_load.take();
+        if let Some(cell) = structure_cell {
+            let mut done = false;
             if let Ok(mut guard) = cell.lock() {
                 if let Some(result) = guard.take() {
-                    self.pending_structure_load = None;
+                    done = true;
                     match result {
                         Ok(payload) => {
                             let view = TableStructureView::new(
@@ -546,6 +555,9 @@ impl DesktopApp {
                         }
                     }
                 }
+            }
+            if !done {
+                self.pending_structure_load = Some(cell);
             }
         }
     }
@@ -574,7 +586,7 @@ impl DesktopApp {
 
         runtime.spawn(async move {
             // Resolve the connection profile to determine the dialect.
-            let dialect: Box<dyn Dialect> = match connection_manager.get_profile(connection_id) {
+            let dialect: Box<dyn Dialect> = match connection_manager.get_profile(connection_id).await {
                 Ok(Some(profile)) => match profile.kind {
                     DataSourceKind::MySql => Box::new(BacktickDialect),
                     _ => Box::new(DoubleQuoteDialect),

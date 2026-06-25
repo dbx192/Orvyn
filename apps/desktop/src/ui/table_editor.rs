@@ -1,6 +1,6 @@
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
 use app_core::query::QueryService;
-use db_common::{AppError, CellValue, ConnectionId, Dialect, Identifier, QueryId, QueryResult, Row, TableColumn, Result};
+use db_common::{CellValue, ConnectionId, Dialect, Identifier, QueryId, QueryResult, Row, TableColumn, Result};
 use eframe::egui::{
     Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2, Window,
 };
@@ -228,13 +228,14 @@ impl TableEditor {
 
     /// Poll the async commit task. Returns a status message if the commit completed this frame.
     fn poll_commit(&mut self) -> Option<String> {
-        match &self.commit_state {
-            CommitState::Idle | CommitState::Success | CommitState::Failed(_) => {
-                // If previous commit was successful, acknowledge and return the success message.
-                if matches!(&self.commit_state, CommitState::Success) {
-                    self.commit_state = CommitState::Idle;
-                    return Some("Table changes committed successfully".to_string());
-                }
+        // Take ownership of the current state to avoid borrowing conflicts.
+        let state = std::mem::replace(&mut self.commit_state, CommitState::Idle);
+        match state {
+            CommitState::Idle => None,
+            CommitState::Success => Some("Table changes committed successfully".to_string()),
+            CommitState::Failed(msg) => {
+                // Keep the failed state so the error remains visible.
+                self.commit_state = CommitState::Failed(msg);
                 None
             }
             CommitState::Committing(cell) => {
@@ -243,7 +244,6 @@ impl TableEditor {
                         match result {
                             Ok(report) => {
                                 let affected = report.affected_rows;
-                                self.commit_state = CommitState::Idle;
                                 self.clear_changes();
                                 self.last_commit_result = Some((affected as usize, Vec::new()));
                                 Some(format!("Commit successful — {} row(s) affected", affected))
@@ -256,13 +256,15 @@ impl TableEditor {
                             }
                         }
                     } else {
-                        // Still waiting for the async task to complete.
+                        // Still waiting — put the cell back.
+                        self.commit_state = CommitState::Committing(cell);
                         None
                     }
                 } else {
-                    // Mutex poisoned — shouldn't happen in practice.
-                    self.commit_state = CommitState::Failed("Internal error: commit result lock poisoned".to_string());
-                    Some("Internal error during commit".to_string())
+                    let msg = "Internal error: commit result lock poisoned".to_string();
+                    self.commit_state = CommitState::Failed(msg.clone());
+                    self.commit_error = Some(msg.clone());
+                    Some(msg)
                 }
             }
         }
@@ -423,7 +425,7 @@ impl TableEditor {
 
                 ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                     if !summary.inserts.is_empty() {
-                        ui.label(RichText::new(format!("📥 {} INSERT(s)", summary.inserts.len())).bold());
+                        ui.label(RichText::new(format!("📥 {} INSERT(s)", summary.inserts.len())).strong());
                         for (idx, row) in &summary.inserts {
                             ui.label(format!("  Row {}", idx + 1));
                             for (col, val) in row {
@@ -434,7 +436,7 @@ impl TableEditor {
                     }
 
                     if !summary.updates.is_empty() {
-                        ui.label(RichText::new(format!("🔄 {} UPDATE(s)", summary.updates.len())).bold());
+                        ui.label(RichText::new(format!("🔄 {} UPDATE(s)", summary.updates.len())).strong());
                         for (idx, changes) in &summary.updates {
                             ui.label(format!("  Row {}", idx + 1));
                             for (col, old_val, new_val) in changes {
@@ -448,7 +450,7 @@ impl TableEditor {
                     }
 
                     if !summary.deletes.is_empty() {
-                        ui.label(RichText::new(format!("🗑 {} DELETE(s)", summary.deletes.len())).bold());
+                        ui.label(RichText::new(format!("🗑 {} DELETE(s)", summary.deletes.len())).strong());
                         for (idx, keys) in &summary.deletes {
                             ui.label(format!("  Row {}", idx + 1));
                             for (col, val) in keys {
@@ -462,14 +464,14 @@ impl TableEditor {
 
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
-                        open = false;
+                        self.show_commit_dialog = false;
                     }
                     if ui
                         .add_enabled(self.can_commit(), Button::new("Commit"))
                         .clicked()
                     {
                         self.execute_commit(message);
-                        open = false;
+                        self.show_commit_dialog = false;
                     }
                 });
             });
@@ -493,11 +495,11 @@ impl TableEditor {
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
-                        open = false;
+                        self.show_close_warning = false;
                     }
                     if ui.button("Close Anyway").clicked() {
                         self.clear_changes();
-                        open = false;
+                        self.show_close_warning = false;
                     }
                 });
             });

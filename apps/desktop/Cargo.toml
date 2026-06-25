@@ -11,6 +11,7 @@ chrono.workspace = true
 db-common.workspace = true
 eframe.workspace = true
 import-export = { path = "../../crates/import-export" }
+rfd.workspace = true
 secure-store = { path = "../../crates/secure-store" }
 tokio.workspace = true
 tracing.workspace = true

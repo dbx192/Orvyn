@@ -248,7 +248,8 @@ impl RedisKeyBrowser {
             ui.label(RichText::new(&self.connection_label).small().color(Color32::GRAY));
             ui.separator();
             ui.label(RichText::new(format!("DB {}", self.database_index)).small().color(Color32::GRAY));
-            if let Some(info) = &self.selected_key_info {
+            let key_info = self.selected_key_info.clone();
+            if let Some(info) = &key_info {
                 ui.separator();
                 ui.label(format!("Type: {}", info.type_name));
                 ui.separator();
@@ -796,13 +797,14 @@ impl RedisKeyBrowser {
 
     fn delete_confirm_dialogs(&mut self, ctx: &Context) {
         if self.confirm_delete_key {
+            let selected_key = self.selected_key.clone();
             let mut open = self.confirm_delete_key;
             Window::new("Confirm Delete")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    if let Some(key) = &self.selected_key {
+                    if let Some(key) = &selected_key {
                         ui.colored_label(Color32::RED, format!("Delete key \"{}\"?", key));
                         ui.label("This action cannot be undone.");
                         ui.horizontal(|ui| {
@@ -827,6 +829,7 @@ impl RedisKeyBrowser {
         }
 
         if let Some(field) = self.confirm_delete_hash_field.clone() {
+            let selected_key = self.selected_key.clone();
             let mut open = true;
             Window::new("Delete Hash Field")
                 .open(&mut open)
@@ -837,7 +840,7 @@ impl RedisKeyBrowser {
                     ui.horizontal(|ui| {
                         if ui.button("Delete").clicked() {
                             if let (Some(connection_id), Some(key)) =
-                                (self.active_connection_id, self.selected_key.clone())
+                                (self.active_connection_id, selected_key.clone())
                             {
                                 self.loading = true;
                                 self.error = None;

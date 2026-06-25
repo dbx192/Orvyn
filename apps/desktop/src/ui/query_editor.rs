@@ -1,10 +1,11 @@
 use app_core::{connection::ConnectionManager, query::QueryService};
+use crate::ui::format::display_cell_value;
 use db_common::{
-    AppError, ConnectionId, ConnectionProfile, DataSourceKind, QueryExecutionMode,
+    AppError, ConnectionId, ConnectionProfile, QueryExecutionMode,
     QueryExecutionReport, QueryExecutionRequest, QueryId, QueryResult, SqlHighlightToken, TextRange,
 };
 use eframe::egui::{
-    Align, Button, Color32, ComboBox, Layout, RichText, ScrollArea, Sense, TextEdit, Ui, Window,
+    Button, Color32, ComboBox, RichText, ScrollArea, TextEdit, Ui, Window,
 };
 use std::{
     collections::BTreeMap,
@@ -115,8 +116,10 @@ impl QueryEditor {
         ui.separator();
         self.tabs_bar(ui);
         ui.separator();
-        if let Some(tab) = self.active_tab.as_ref().and_then(|id| self.tabs.get_mut(id)) {
-            self.editor_panel(ui, tab);
+        if let Some(tab_id) = self.active_tab {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                self.editor_panel(ui, tab);
+            }
         }
 
         self.close_confirm_dialog(ctx);
@@ -166,9 +169,9 @@ impl QueryEditor {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.button("New Query").on_click(|_| {
+            if ui.button("New Query").clicked() {
                 self.new_query();
-            });
+            }
 
             ui.separator();
 
@@ -284,8 +287,7 @@ impl QueryEditor {
             let text_edit = TextEdit::multiline(&mut tab.sql)
                 .font(eframe::egui::FontId::monospace(14.0))
                 .desired_width(f32::INFINITY)
-                .code_editor()
-                .show_lines(30);
+                .code_editor();
 
             let response = text_edit.response;
 
@@ -296,9 +298,9 @@ impl QueryEditor {
 
             tab.cursor_offset = response.cursor_range().map(|r| r.min()).unwrap_or(0);
             tab.selection = response.cursor_range().map(|r| {
-                let min = r.min();
-                let max = r.max();
-                TextRange { min, max }
+                let start = r.min();
+                let end = r.max();
+                TextRange { start, end }
             });
         });
     }
@@ -360,13 +362,13 @@ impl QueryEditor {
                 .striped(true)
                 .show(ui, |ui| {
                     for col in &result.columns {
-                        ui.label(RichText::new(&col.name).bold());
+                        ui.label(RichText::new(&col.name).strong());
                     }
                     ui.end_row();
 
                     for row in &result.rows {
                         for val in &row.values {
-                            ui.label(val.to_string());
+                            ui.label(display_cell_value(val));
                         }
                         ui.end_row();
                     }
@@ -524,8 +526,9 @@ impl QueryEditor {
                                 );
                             }
                             Err(error) => {
-                                tab.execution_error = Some(error.message);
-                                self.status = format!("Execution failed: {}", error.message);
+                                let msg = error.message;
+                                tab.execution_error = Some(msg.clone());
+                                self.status = format!("Execution failed: {}", msg);
                             }
                         }
                     }
@@ -540,8 +543,7 @@ impl QueryEditor {
 
     fn close_confirm_dialog(&mut self, ctx: &eframe::egui::Context) {
         if let Some(tab_id) = self.show_close_confirm {
-            let tab = self.tabs.get(&tab_id);
-            let title = tab.map(|t| &t.title).unwrap_or("Query");
+            let title = self.tabs.get(&tab_id).map_or("Query", |t| t.title.as_str());
 
             let mut open = true;
             Window::new("Confirm Close")
@@ -553,11 +555,11 @@ impl QueryEditor {
                     ui.add_space(16.0);
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
-                            open = false;
+                            self.show_close_confirm = None;
                         }
                         if ui.button("Close").clicked() {
                             self.close_tab(tab_id);
-                            open = false;
+                            self.show_close_confirm = None;
                         }
                     });
                 });
@@ -581,11 +583,11 @@ impl QueryEditor {
                     ui.add_space(16.0);
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
-                            open = false;
+                            self.show_execute_all = false;
                         }
                         if ui.button("Execute All").clicked() {
                             self.execute_all_statements();
-                            open = false;
+                            self.show_execute_all = false;
                         }
                     });
                 });

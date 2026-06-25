@@ -4,7 +4,7 @@ use db_common::{
 };
 use eframe::egui::{
     vec2, Align, Button, Color32, Context, Frame, Label, Layout, RichText, ScrollArea, Sense,
-    TextEdit, Ui, Widget,
+    TextEdit, Ui,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,6 +51,7 @@ fn node_key_id(key: &NodeKey) -> String {
     )
 }
 
+#[derive(Clone)]
 struct TreeNode {
     node: MetadataNode,
     children: Option<Vec<MetadataNode>>,
@@ -474,7 +475,8 @@ impl ObjectTree {
         message: &mut Option<String>,
         actions: &mut Vec<ObjectTreeAction>,
     ) {
-        if let Some(results) = &self.search_results {
+        let results = self.search_results.clone();
+        if let Some(results) = &results {
             if results.is_empty() {
                 ui.label(
                     RichText::new("No results found").color(Color32::GRAY).italics(),
@@ -608,26 +610,36 @@ impl ObjectTree {
         match node.kind {
             MetadataNodeKind::Table => {
                 if ui.button("Open Table Data").clicked() {
-                    self.emit_table_action(node, ObjectTreeAction::OpenTableData, actions);
+                    self.emit_table_action(node, |conn_id, db, schema, table| {
+                        ObjectTreeAction::OpenTableData { connection_id: conn_id, database: db, schema, table }
+                    }, actions);
                     ui.close_menu();
                 }
                 if ui.button("View Structure").clicked() {
-                    self.emit_table_action(node, ObjectTreeAction::ViewStructure, actions);
+                    self.emit_table_action(node, |conn_id, db, schema, table| {
+                        ObjectTreeAction::ViewStructure { connection_id: conn_id, database: db, schema, table }
+                    }, actions);
                     ui.close_menu();
                 }
                 if ui.button("New Query on Table").clicked() {
-                    self.emit_table_action(node, ObjectTreeAction::OpenQuery, actions);
+                    self.emit_table_action(node, |conn_id, db, schema, _table| {
+                        ObjectTreeAction::OpenQuery { connection_id: conn_id, database: db, schema }
+                    }, actions);
                     ui.close_menu();
                 }
                 ui.separator();
             }
             MetadataNodeKind::View => {
                 if ui.button("Open View Data").clicked() {
-                    self.emit_table_action(node, ObjectTreeAction::OpenTableData, actions);
+                    self.emit_table_action(node, |conn_id, db, schema, table| {
+                        ObjectTreeAction::OpenTableData { connection_id: conn_id, database: db, schema, table }
+                    }, actions);
                     ui.close_menu();
                 }
                 if ui.button("View Structure").clicked() {
-                    self.emit_table_action(node, ObjectTreeAction::ViewStructure, actions);
+                    self.emit_table_action(node, |conn_id, db, schema, table| {
+                        ObjectTreeAction::ViewStructure { connection_id: conn_id, database: db, schema, table }
+                    }, actions);
                     ui.close_menu();
                 }
                 ui.separator();
@@ -670,7 +682,9 @@ impl ObjectTree {
             }
             MetadataNodeKind::RedisKey => {
                 if ui.button("View Key").clicked() {
-                    self.emit_key_action(node, ObjectTreeAction::ViewKey, actions);
+                    self.emit_key_action(node, |conn_id, db, key| {
+                        ObjectTreeAction::ViewKey { connection_id: conn_id, database: db, key }
+                    }, actions);
                     ui.close_menu();
                 }
                 ui.separator();
@@ -709,15 +723,21 @@ impl ObjectTree {
     ) {
         match node.kind {
             MetadataNodeKind::Table => {
-                self.emit_table_action(node, ObjectTreeAction::OpenTableData, actions);
+                self.emit_table_action(node, |conn_id, db, schema, table| {
+                    ObjectTreeAction::OpenTableData { connection_id: conn_id, database: db, schema, table }
+                }, actions);
                 *message = Some(format!("Opening {}", node.label));
             }
             MetadataNodeKind::View => {
-                self.emit_table_action(node, ObjectTreeAction::OpenTableData, actions);
+                self.emit_table_action(node, |conn_id, db, schema, table| {
+                    ObjectTreeAction::OpenTableData { connection_id: conn_id, database: db, schema, table }
+                }, actions);
                 *message = Some(format!("Opening view {}", node.label));
             }
             MetadataNodeKind::RedisKey => {
-                self.emit_key_action(node, ObjectTreeAction::ViewKey, actions);
+                self.emit_key_action(node, |conn_id, db, key| {
+                    ObjectTreeAction::ViewKey { connection_id: conn_id, database: db, key }
+                }, actions);
                 *message = Some(format!("Viewing key {}", node.label));
             }
             _ => {
@@ -729,7 +749,7 @@ impl ObjectTree {
     fn emit_table_action(
         &self,
         node: &MetadataNode,
-        ctor: fn(ConnectionId, Option<String>, Option<String>, String) -> ObjectTreeAction,
+        ctor: impl FnOnce(ConnectionId, Option<String>, Option<String>, String) -> ObjectTreeAction,
         actions: &mut Vec<ObjectTreeAction>,
     ) {
         let table = node
@@ -748,7 +768,7 @@ impl ObjectTree {
     fn emit_key_action(
         &self,
         node: &MetadataNode,
-        ctor: fn(ConnectionId, Option<String>, String) -> ObjectTreeAction,
+        ctor: impl FnOnce(ConnectionId, Option<String>, String) -> ObjectTreeAction,
         actions: &mut Vec<ObjectTreeAction>,
     ) {
         let key = node
@@ -804,22 +824,16 @@ impl ObjectTree {
     }
 
     fn apply_redis_pattern(&mut self, key: NodeKey, pattern: String) {
-        if pattern.trim().is_empty() {
+        let pattern_trimmed = pattern.trim().to_string();
+        let is_empty = pattern_trimmed.is_empty();
+
+        if is_empty {
             self.redis_pattern.remove(&key);
         } else {
-            self.redis_pattern.insert(key.clone(), pattern);
+            self.redis_pattern.insert(key, pattern);
         }
         // Invalidate and re-fetch with the new pattern.
         self.child_cache.remove(&key);
-
-        if let Some((conn_id, _)) = self
-            .connections
-            .iter()
-            .find(|(_, (node, _))| node.key() == key)
-            .map(|(id, _)| (*id, ()))
-        {
-            let _ = conn_id;
-        }
 
         // Recompute the path with extra set to the pattern.
         if let Some((conn_id, _)) = self.find_connection_id_for(&key) {
@@ -828,8 +842,8 @@ impl ObjectTree {
                 if let Some(database) = &key.database {
                     path = path.with_database(database.clone());
                 }
-                if !pattern.trim().is_empty() {
-                    path = path.with_extra(pattern.trim());
+                if !is_empty {
+                    path = path.with_extra(&pattern_trimmed);
                 }
                 self.load_children_for_path(path);
             }
