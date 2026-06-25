@@ -106,6 +106,12 @@ pub enum ObjectTreeAction {
         schema: Option<String>,
         table: String,
     },
+    ImportCsv {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    },
     EditConnection(ConnectionId),
     DeleteConnection(ConnectionId),
 }
@@ -624,6 +630,12 @@ impl ObjectTree {
                 if ui.button("New Query on Table").clicked() {
                     self.emit_table_action(node, |conn_id, db, schema, _table| {
                         ObjectTreeAction::OpenQuery { connection_id: conn_id, database: db, schema }
+                    }, actions);
+                    ui.close_menu();
+                }
+                if ui.button("Import CSV...").clicked() {
+                    self.emit_table_action(node, |conn_id, db, schema, table| {
+                        ObjectTreeAction::ImportCsv { connection_id: conn_id, database: db, schema, table }
                     }, actions);
                     ui.close_menu();
                 }

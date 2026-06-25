@@ -10,6 +10,7 @@ use crate::ui::{
     state::{AppState, AppTheme, TaskStatus, UiError},
     table_editor::TableEditor,
     table_structure::TableStructureView,
+    import_wizard::ImportWizard,
 };
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
@@ -38,6 +39,7 @@ pub struct DesktopApp {
     result_grid: ResultSetGrid,
     table_editor: Option<TableEditor>,
     table_structure: Option<TableStructureView>,
+    import_wizard: Option<ImportWizard>,
     redis_browser: RedisKeyBrowser,
     last_tree_status: String,
     error_window_open: bool,
@@ -83,6 +85,7 @@ enum ActivePanel {
     QueryEditor,
     TableEditor,
     TableStructure,
+    ImportWizard,
     RedisBrowser,
 }
 
@@ -117,6 +120,7 @@ impl DesktopApp {
             result_grid: ResultSetGrid::new(result_grid_result).with_runtime(rt_grid),
             table_editor: None,
             table_structure: None,
+            import_wizard: None,
             redis_browser: RedisKeyBrowser::new(redis_service, rt_redis),
             last_tree_status: String::new(),
             error_window_open: false,
@@ -258,6 +262,9 @@ impl DesktopApp {
                 if self.table_structure.is_some() {
                     ui.selectable_value(&mut self.active_panel, ActivePanel::TableStructure, "📐 Table Structure");
                 }
+                if self.import_wizard.is_some() {
+                    ui.selectable_value(&mut self.active_panel, ActivePanel::ImportWizard, "📥 Import CSV");
+                }
                 ui.selectable_value(&mut self.active_panel, ActivePanel::RedisBrowser, "🔑 Redis Browser");
             });
             ui.separator();
@@ -311,6 +318,21 @@ impl DesktopApp {
                             ui.label(RichText::new("📐").size(48.0));
                             ui.add_space(12.0);
                             ui.label("Loading table structure...");
+                        });
+                    }
+                },
+                ActivePanel::ImportWizard => match &mut self.import_wizard {
+                    Some(wizard) => {
+                        let message = wizard.ui(ui);
+                        if let Some(msg) = message {
+                            if !msg.is_empty() {
+                                self.state.set_status(msg);
+                            }
+                        }
+                    }
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            ui.label("No import wizard active.");
                         });
                     }
                 },
@@ -471,6 +493,30 @@ impl DesktopApp {
                     ));
                     self.spawn_structure_load(connection_id, database, schema, table);
                     self.active_panel = ActivePanel::TableStructure;
+                }
+                ObjectTreeAction::ImportCsv {
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                } => {
+                    let wizard = ImportWizard::new(
+                        connection_id,
+                        database,
+                        schema,
+                        table,
+                        self.metadata_service.clone(),
+                        self.query_service.clone(),
+                        self.connection_manager.clone(),
+                        self.runtime.clone(),
+                    );
+                    let table_name = wizard.table_name();
+                    self.import_wizard = Some(wizard);
+                    self.active_panel = ActivePanel::ImportWizard;
+                    self.state.set_status(format!(
+                        "Import CSV to {}",
+                        table_name
+                    ));
                 }
                 ObjectTreeAction::EditConnection(id) => {
                     self.state
