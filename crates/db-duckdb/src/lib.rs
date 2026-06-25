@@ -6,7 +6,7 @@ use db_common::{
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
     DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
     RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey,
-    TableIndex, TableTrigger,
+    TableIndex,
 };
 use std::{
     collections::BTreeMap,
@@ -633,7 +633,7 @@ fn duckdb_functions(path: PathBuf, schema: &str) -> Result<Vec<DatabaseFunction>
 }
 
 fn duckdb_create_table_sql(path: PathBuf, schema: &str, table: &str) -> Result<String> {
-    let conn = duckdb_connection(path)?;
+    let conn = duckdb_connection(path.clone())?;
 
     let mut col_stmt = conn
         .prepare(

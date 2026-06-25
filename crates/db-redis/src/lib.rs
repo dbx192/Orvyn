@@ -1,5 +1,7 @@
 //! Redis adapter crate.
 
+pub use redis;
+
 use async_trait::async_trait;
 use db_common::{
     redact_connection_url, AppError, CellValue, ConnectionProfile, ConnectionTestReport,
@@ -243,10 +245,6 @@ async fn select_database(conn: &mut redis::aio::MultiplexedConnection, database:
 
 #[async_trait]
 impl RedisConnector for RedisConnectorImpl {
-    fn kind(&self) -> DataSourceKind {
-        DataSourceKind::Redis
-    }
-
     async fn test_connection(&self, profile: &ConnectionProfile) -> Result<()> {
         profile.validate()?;
         let url = redis_url(profile, None)?;
@@ -323,7 +321,6 @@ impl RedisConnector for RedisConnectorImpl {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RedisConnectorWithAuth;
 
-#[async_trait]
 impl RedisConnectorWithAuth {
     pub async fn new(
         profile: &ConnectionProfile,
@@ -391,7 +388,7 @@ impl RedisConnectorWithAuth {
                     .arg(key)
                     .arg(0)
                     .arg(-1)
-                    .with_scores()
+                    .arg("WITHSCORES")
                     .query_async(conn)
                     .await
                     .map_err(redis_query_error)?;
@@ -513,5 +510,396 @@ impl RedisConnectorWithAuth {
             _ => 0,
         };
         Ok(size)
+    }
+
+    pub async fn set_string_value(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        value: &str,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
+        select_database(conn, database).await?;
+        let mut cmd = redis::cmd("SET");
+        cmd.arg(key).arg(value);
+        if let Some(ttl) = ttl_seconds {
+            if ttl > 0 {
+                cmd.arg("EX").arg(ttl);
+            }
+        }
+        cmd.query_async::<_, ()>(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(())
+    }
+
+    pub async fn hset_field(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<u32> {
+        select_database(conn, database).await?;
+        let result: u32 = redis::cmd("HSET")
+            .arg(key)
+            .arg(field)
+            .arg(value)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn hdel_field(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        field: &str,
+    ) -> Result<u32> {
+        select_database(conn, database).await?;
+        let result: u32 = redis::cmd("HDEL")
+            .arg(key)
+            .arg(field)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn lpush(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        value: &str,
+    ) -> Result<i64> {
+        select_database(conn, database).await?;
+        let result: i64 = redis::cmd("LPUSH")
+            .arg(key)
+            .arg(value)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn rpush(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        value: &str,
+    ) -> Result<i64> {
+        select_database(conn, database).await?;
+        let result: i64 = redis::cmd("RPUSH")
+            .arg(key)
+            .arg(value)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn lpop(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+    ) -> Result<Option<String>> {
+        select_database(conn, database).await?;
+        let result: Option<String> = redis::cmd("LPOP")
+            .arg(key)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn rpop(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+    ) -> Result<Option<String>> {
+        select_database(conn, database).await?;
+        let result: Option<String> = redis::cmd("RPOP")
+            .arg(key)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn lset(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        index: i64,
+        value: &str,
+    ) -> Result<()> {
+        select_database(conn, database).await?;
+        redis::cmd("LSET")
+            .arg(key)
+            .arg(index)
+            .arg(value)
+            .query_async::<_, ()>(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(())
+    }
+
+    pub async fn lrem(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        value: &str,
+    ) -> Result<i64> {
+        select_database(conn, database).await?;
+        let result: i64 = redis::cmd("LREM")
+            .arg(key)
+            .arg(1)
+            .arg(value)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn lrange(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        start: i64,
+        stop: i64,
+    ) -> Result<Vec<CellValue>> {
+        select_database(conn, database).await?;
+        let items: Vec<String> = redis::cmd("LRANGE")
+            .arg(key)
+            .arg(start)
+            .arg(stop)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(items.into_iter().map(CellValue::Text).collect())
+    }
+
+    pub async fn sadd(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        member: &str,
+    ) -> Result<u32> {
+        select_database(conn, database).await?;
+        let result: u32 = redis::cmd("SADD")
+            .arg(key)
+            .arg(member)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn srem(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        member: &str,
+    ) -> Result<u32> {
+        select_database(conn, database).await?;
+        let result: u32 = redis::cmd("SREM")
+            .arg(key)
+            .arg(member)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn zadd(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        member: &str,
+        score: f64,
+    ) -> Result<u32> {
+        select_database(conn, database).await?;
+        let result: u32 = redis::cmd("ZADD")
+            .arg(key)
+            .arg(score)
+            .arg(member)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn zrem(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        member: &str,
+    ) -> Result<u32> {
+        select_database(conn, database).await?;
+        let result: u32 = redis::cmd("ZREM")
+            .arg(key)
+            .arg(member)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn zrange(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        start: i64,
+        stop: i64,
+    ) -> Result<Vec<(CellValue, f64)>> {
+        select_database(conn, database).await?;
+        let members: Vec<(String, f64)> = redis::cmd("ZRANGE")
+            .arg(key)
+            .arg(start)
+            .arg(stop)
+            .arg("WITHSCORES")
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(members
+            .into_iter()
+            .map(|(m, s)| (CellValue::Text(m), s))
+            .collect())
+    }
+
+    pub async fn zscore(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        member: &str,
+    ) -> Result<Option<f64>> {
+        select_database(conn, database).await?;
+        let result: Option<f64> = redis::cmd("ZSCORE")
+            .arg(key)
+            .arg(member)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(result)
+    }
+
+    pub async fn create_key(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        key_type: &str,
+        initial_value: &str,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
+        select_database(conn, database).await?;
+        match key_type {
+            "string" => {
+                let mut cmd = redis::cmd("SET");
+                cmd.arg(key).arg(initial_value);
+                if let Some(ttl) = ttl_seconds {
+                    if ttl > 0 {
+                        cmd.arg("EX").arg(ttl);
+                    }
+                }
+                cmd.query_async::<_, ()>(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+            }
+            "hash" => {
+                if !initial_value.is_empty() {
+                    let parts: Vec<&str> = initial_value.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        redis::cmd("HSET")
+                            .arg(key)
+                            .arg(parts[0])
+                            .arg(parts[1])
+                            .query_async::<_, ()>(conn)
+                            .await
+                            .map_err(redis_query_error)?;
+                    }
+                }
+                if let Some(ttl) = ttl_seconds {
+                    if ttl > 0 {
+                        redis::cmd("EXPIRE")
+                            .arg(key)
+                            .arg(ttl)
+                            .query_async::<_, ()>(conn)
+                            .await
+                            .map_err(redis_query_error)?;
+                    }
+                }
+            }
+            "list" => {
+                if !initial_value.is_empty() {
+                    redis::cmd("RPUSH")
+                        .arg(key)
+                        .arg(initial_value)
+                        .query_async::<_, ()>(conn)
+                        .await
+                        .map_err(redis_query_error)?;
+                }
+                if let Some(ttl) = ttl_seconds {
+                    if ttl > 0 {
+                        redis::cmd("EXPIRE")
+                            .arg(key)
+                            .arg(ttl)
+                            .query_async::<_, ()>(conn)
+                            .await
+                            .map_err(redis_query_error)?;
+                    }
+                }
+            }
+            "set" => {
+                if !initial_value.is_empty() {
+                    redis::cmd("SADD")
+                        .arg(key)
+                        .arg(initial_value)
+                        .query_async::<_, ()>(conn)
+                        .await
+                        .map_err(redis_query_error)?;
+                }
+                if let Some(ttl) = ttl_seconds {
+                    if ttl > 0 {
+                        redis::cmd("EXPIRE")
+                            .arg(key)
+                            .arg(ttl)
+                            .query_async::<_, ()>(conn)
+                            .await
+                            .map_err(redis_query_error)?;
+                    }
+                }
+            }
+            "zset" => {
+                if !initial_value.is_empty() {
+                    let parts: Vec<&str> = initial_value.splitn(2, ':').collect();
+                    let score: f64 = if parts.len() == 2 {
+                        parts[0].parse().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let member = if parts.len() == 2 { parts[1] } else { initial_value };
+                    redis::cmd("ZADD")
+                        .arg(key)
+                        .arg(score)
+                        .arg(member)
+                        .query_async::<_, ()>(conn)
+                        .await
+                        .map_err(redis_query_error)?;
+                }
+                if let Some(ttl) = ttl_seconds {
+                    if ttl > 0 {
+                        redis::cmd("EXPIRE")
+                            .arg(key)
+                            .arg(ttl)
+                            .query_async::<_, ()>(conn)
+                            .await
+                            .map_err(redis_query_error)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }

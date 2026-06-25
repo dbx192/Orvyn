@@ -1,7 +1,7 @@
 //! Connection profile persistence.
 
 use async_trait::async_trait;
-use db_common::{AppError, ConnectionId, ErrorKind, FavoriteQuery, QueryHistoryEntry, QueryId, Result};
+use db_common::{AppError, ConnectionId, ConnectionProfile, ErrorKind, FavoriteQuery, QueryHistoryEntry, QueryId, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 use tokio::task;

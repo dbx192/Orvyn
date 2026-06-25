@@ -2,6 +2,7 @@ use crate::ui::{
     connection_manager::ConnectionManagerUi,
     object_tree::{ObjectTree, ObjectTreeAction},
     query_editor::QueryEditor,
+    redis_key_browser::RedisKeyBrowser,
     result_grid::ResultSetGrid,
     samples::{sample_result_set, sample_table_columns},
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
@@ -28,8 +29,17 @@ pub struct DesktopApp {
     state: AppState,
     result_grid: ResultSetGrid,
     table_editor: TableEditor,
+    redis_browser: RedisKeyBrowser,
     last_tree_status: String,
     error_window_open: bool,
+    active_panel: ActivePanel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivePanel {
+    QueryEditor,
+    TableEditor,
+    RedisBrowser,
 }
 
 impl DesktopApp {
@@ -61,8 +71,10 @@ impl DesktopApp {
                 sample,
                 Box::new(BacktickDialect),
             ),
+            redis_browser: RedisKeyBrowser::with_sample_data("Local Redis", 0),
             last_tree_status: String::new(),
             error_window_open: false,
+            active_panel: ActivePanel::RedisBrowser,
         }
     }
 
@@ -182,13 +194,36 @@ impl eframe::App for DesktopApp {
 impl DesktopApp {
     fn central_panel(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
-            let query_status = self.query_editor.ui(ctx, ui);
+            // Tab bar to switch between panels
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.active_panel, ActivePanel::QueryEditor, "📝 Query Editor");
+                ui.selectable_value(&mut self.active_panel, ActivePanel::TableEditor, "📋 Table Editor");
+                ui.selectable_value(&mut self.active_panel, ActivePanel::RedisBrowser, "🔑 Redis Browser");
+            });
             ui.separator();
-            self.sync_result_grid();
-            let grid_status = self.result_grid.ui(ui);
-            if let Some(message) = query_status.or(grid_status) {
-                if !message.is_empty() {
-                    self.state.set_status(message);
+
+            match self.active_panel {
+                ActivePanel::QueryEditor => {
+                    let query_status = self.query_editor.ui(ctx, ui);
+                    ui.separator();
+                    self.sync_result_grid();
+                    let grid_status = self.result_grid.ui(ui);
+                    if let Some(message) = query_status.or(grid_status) {
+                        if !message.is_empty() {
+                            self.state.set_status(message);
+                        }
+                    }
+                }
+                ActivePanel::TableEditor => {
+                    let message = self.table_editor.ui(ui);
+                    if let Some(msg) = message {
+                        if !msg.is_empty() {
+                            self.state.set_status(msg);
+                        }
+                    }
+                }
+                ActivePanel::RedisBrowser => {
+                    self.redis_browser.ui(ui);
                 }
             }
         });

@@ -7,6 +7,7 @@ pub mod blocking_pool;
 pub mod connection;
 pub mod metadata;
 pub mod query;
+pub mod redis_service;
 pub mod session;
 pub mod storage;
 pub mod task;

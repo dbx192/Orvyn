@@ -58,6 +58,31 @@ impl CellValue {
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
     }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self {
+            Self::Null => "NULL".to_string(),
+            Self::Bool(b) => b.to_string(),
+            Self::Int(i) => i.to_string(),
+            Self::UInt(u) => u.to_string(),
+            Self::Float(f) => f.to_string(),
+            Self::Decimal(s) => s.clone(),
+            Self::Text(s) => s.clone(),
+            Self::Bytes(b) => format!("<{} bytes>", b.len()),
+            Self::Date(d) => d.to_string(),
+            Self::Time(t) => t.to_string(),
+            Self::DateTime(dt) => dt.to_string(),
+            Self::Timestamp(ts) => ts.to_string(),
+            Self::Json(j) => j.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

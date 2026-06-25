@@ -3,7 +3,7 @@ pub mod connection_manager;
 pub mod format;
 pub mod object_tree;
 pub mod query_editor;
-pub mod redis_browser;
+pub mod redis_key_browser;
 pub mod result_grid;
 pub mod samples;
 pub mod shortcuts;

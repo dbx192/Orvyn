@@ -18,6 +18,7 @@ pub enum ErrorKind {
     Cancelled,
     Unsupported,
     Internal,
+    NotFound,
 }
 
 #[derive(Debug, Error, Clone, Serialize, Deserialize)]
