@@ -55,6 +55,32 @@ pub struct TableIndex {
     pub primary: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableForeignKey {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    pub on_update: Option<String>,
+    pub on_delete: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableTrigger {
+    pub name: String,
+    pub event: String,
+    pub timing: String,
+    pub statement: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseFunction {
+    pub name: String,
+    pub return_type: Option<String>,
+    pub language: Option<String>,
+    pub kind: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MetadataNodeKind {
     Connection,
@@ -62,12 +88,18 @@ pub enum MetadataNodeKind {
     Schema,
     TablesFolder,
     ViewsFolder,
+    FunctionsFolder,
     ColumnsFolder,
     IndexesFolder,
+    ForeignKeysFolder,
+    TriggersFolder,
     Table,
     View,
     Column,
     Index,
+    ForeignKey,
+    Trigger,
+    Function,
     RedisDatabase,
     RedisKeysFolder,
     RedisKey,

@@ -1,9 +1,11 @@
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
-use db_common::{CellValue, Dialect, Identifier, QueryResult, Row, TableColumn};
+use app_core::query::QueryService;
+use db_common::{AppError, CellValue, ConnectionId, Dialect, Identifier, QueryId, QueryResult, Row, TableColumn, Result};
 use eframe::egui::{
-    Align, Button, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, TextEdit, Ui, Vec2,
+    Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2, Window,
 };
 use std::{collections::BTreeMap, fmt::Write};
+use tokio::runtime::Handle;
 
 const DEFAULT_PAGE_SIZE: usize = 100;
 const MIN_COLUMN_WIDTH: f32 = 72.0;
@@ -40,6 +42,23 @@ struct NewRow {
     values: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ChangeSummary {
+    inserts: Vec<(usize, Vec<(String, String)>)>,
+    updates: Vec<(usize, Vec<(String, String, String)>)>,
+    deletes: Vec<(usize, Vec<(String, String)>)>,
+}
+
+impl ChangeSummary {
+    fn is_empty(&self) -> bool {
+        self.inserts.is_empty() && self.updates.is_empty() && self.deletes.is_empty()
+    }
+
+    fn total_changes(&self) -> usize {
+        self.inserts.len() + self.updates.len() + self.deletes.len()
+    }
+}
+
 pub struct TableEditor {
     schema: Option<String>,
     table: String,
@@ -56,7 +75,14 @@ pub struct TableEditor {
     new_rows: Vec<NewRow>,
     deleted_rows: BTreeMap<usize, Row>,
     allow_risk_without_pk: bool,
-    last_sql_preview: String,
+    query_service: Option<QueryService>,
+    connection_id: Option<ConnectionId>,
+    runtime: Option<Handle>,
+    show_commit_dialog: bool,
+    show_close_warning: bool,
+    commit_error: Option<String>,
+    error_row_index: Option<usize>,
+    last_commit_result: Option<(usize, Vec<usize>)>,
 }
 
 impl TableEditor {
@@ -88,12 +114,53 @@ impl TableEditor {
             new_rows: Vec::new(),
             deleted_rows: BTreeMap::new(),
             allow_risk_without_pk: false,
-            last_sql_preview: String::new(),
+            query_service: None,
+            connection_id: None,
+            runtime: None,
+            show_commit_dialog: false,
+            show_close_warning: false,
+            commit_error: None,
+            error_row_index: None,
+            last_commit_result: None,
         }
+    }
+
+    pub fn with_query_service(
+        schema: impl Into<String>,
+        table: impl Into<String>,
+        columns: Vec<TableColumn>,
+        result: QueryResult,
+        dialect: Box<dyn Dialect>,
+        query_service: QueryService,
+        connection_id: ConnectionId,
+        runtime: Handle,
+    ) -> Self {
+        let mut editor = Self::new(schema, table, columns, result, dialect);
+        editor.query_service = Some(query_service);
+        editor.connection_id = Some(connection_id);
+        editor.runtime = Some(runtime);
+        editor
     }
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
         let mut message = None;
+
+        if self.show_commit_dialog {
+            self.commit_dialog(ui, &mut message);
+        }
+
+        if self.show_close_warning {
+            self.close_warning_dialog(ui);
+        }
+
+        if let Some(error) = &self.commit_error {
+            ui.colored_label(Color32::RED, error);
+            if ui.button("Clear Error").clicked() {
+                self.commit_error = None;
+                self.error_row_index = None;
+            }
+        }
+
         self.toolbar(ui, &mut message);
         ui.add_space(8.0);
 
@@ -133,18 +200,16 @@ impl TableEditor {
                 });
         });
 
-        if !self.last_sql_preview.is_empty() {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Pending SQL preview").strong());
-            ui.add(
-                TextEdit::multiline(&mut self.last_sql_preview)
-                    .desired_rows(6)
-                    .code_editor()
-                    .interactive(false),
-            );
-        }
-
         message
+    }
+
+    pub fn request_close(&mut self) -> bool {
+        if self.has_changes() {
+            self.show_close_warning = true;
+            true
+        } else {
+            false
+        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
@@ -194,30 +259,20 @@ impl TableEditor {
                 .add_enabled(self.has_changes(), Button::new("Commit"))
                 .clicked()
             {
-                match self.build_commit_sql() {
-                    Ok(sql) => {
-                        self.last_sql_preview = sql;
-                        self.clear_changes();
-                        *message =
-                            Some("Changes converted to SQL preview and marked clean".to_string());
-                    }
-                    Err(error) => {
-                        *message = Some(error);
-                    }
-                }
+                self.show_commit_dialog = true;
             }
             if ui
                 .add_enabled(self.has_changes(), Button::new("Rollback"))
                 .clicked()
             {
                 self.clear_changes();
-                self.last_sql_preview.clear();
+                self.last_commit_result = None;
                 *message = Some("Uncommitted table changes rolled back".to_string());
             }
 
             ui.separator();
             ui.checkbox(&mut self.allow_risk_without_pk, "Risk mode");
-            ui.label(format!("{} pending", self.pending_change_count()));
+            ui.label(format!("{} pending changes", self.pending_change_count()));
         });
 
         ui.horizontal_wrapped(|ui| {
@@ -249,6 +304,262 @@ impl TableEditor {
                 self.page = 0;
             }
         });
+    }
+
+    fn commit_dialog(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+        let summary = self.build_change_summary();
+
+        let mut open = true;
+        Window::new("Commit Changes")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .min_width(500.0)
+            .min_height(400.0)
+            .show(ui.ctx(), |ui| {
+                ui.heading(format!(
+                    "{} pending changes",
+                    summary.total_changes()
+                ));
+                ui.add_space(16.0);
+
+                ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    if !summary.inserts.is_empty() {
+                        ui.label(RichText::new(format!("📥 {} INSERT(s)", summary.inserts.len())).bold());
+                        for (idx, row) in &summary.inserts {
+                            ui.label(format!("  Row {}", idx + 1));
+                            for (col, val) in row {
+                                ui.label(format!("    {} = {}", col, val));
+                            }
+                        }
+                        ui.add_space(8.0);
+                    }
+
+                    if !summary.updates.is_empty() {
+                        ui.label(RichText::new(format!("🔄 {} UPDATE(s)", summary.updates.len())).bold());
+                        for (idx, changes) in &summary.updates {
+                            ui.label(format!("  Row {}", idx + 1));
+                            for (col, old_val, new_val) in changes {
+                                ui.label(format!(
+                                    "    {}: {} -> {}",
+                                    col, old_val, new_val
+                                ));
+                            }
+                        }
+                        ui.add_space(8.0);
+                    }
+
+                    if !summary.deletes.is_empty() {
+                        ui.label(RichText::new(format!("🗑 {} DELETE(s)", summary.deletes.len())).bold());
+                        for (idx, keys) in &summary.deletes {
+                            ui.label(format!("  Row {}", idx + 1));
+                            for (col, val) in keys {
+                                ui.label(format!("    {} = {}", col, val));
+                            }
+                        }
+                    }
+                });
+
+                ui.add_space(16.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        open = false;
+                    }
+                    if ui
+                        .add_enabled(self.can_commit(), Button::new("Commit"))
+                        .clicked()
+                    {
+                        self.execute_commit(message);
+                        open = false;
+                    }
+                });
+            });
+
+        if !open {
+            self.show_commit_dialog = false;
+        }
+    }
+
+    fn close_warning_dialog(&mut self, ui: &mut Ui) {
+        let mut open = true;
+        Window::new("Close Confirmation")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!(
+                    "There are {} pending changes. Close without saving?",
+                    self.pending_change_count()
+                ));
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        open = false;
+                    }
+                    if ui.button("Close Anyway").clicked() {
+                        self.clear_changes();
+                        open = false;
+                    }
+                });
+            });
+
+        if !open {
+            self.show_close_warning = false;
+        }
+    }
+
+    fn execute_commit(&mut self, message: &mut Option<String>) {
+        if self.query_service.is_none() || self.connection_id.is_none() {
+            *message = Some("Query service not configured".to_string());
+            return;
+        }
+
+        let sql = match self.build_commit_sql() {
+            Ok(sql) => sql,
+            Err(e) => {
+                *message = Some(e);
+                return;
+            }
+        };
+
+        let service = self.query_service.clone().unwrap();
+        let connection_id = self.connection_id.unwrap();
+        let runtime = self.runtime.clone().unwrap();
+        let editor_clone = self.clone();
+
+        runtime.spawn(async move {
+            let result = service.execute(
+                db_common::QueryExecutionRequest {
+                    tab_id: QueryId::new(),
+                    connection_id,
+                    sql,
+                    mode: db_common::QueryExecutionMode::All,
+                    cursor_offset: 0,
+                    selection: None,
+                    timeout_ms: 30000,
+                },
+                None,
+            ).await;
+
+            match result {
+                Ok(report) => {
+                    let affected_rows = report.affected_rows;
+                    let mut success = true;
+                    let mut error_msg = String::new();
+
+                    for (idx, result) in report.results.iter().enumerate() {
+                        if result.affected_rows == 0 && idx < editor_clone.new_rows.len() {
+                            success = false;
+                            write!(&mut error_msg, "INSERT {} affected 0 rows (conflict?); ", idx + 1).unwrap();
+                        } else if result.affected_rows == 0 && idx >= editor_clone.new_rows.len() {
+                            success = false;
+                            write!(&mut error_msg, "Statement {} affected 0 rows (conflict?); ", idx + 1).unwrap();
+                        } else if result.affected_rows > 1 {
+                            success = false;
+                            write!(&mut error_msg, "Statement {} affected {} rows (danger, rolled back); ", idx + 1, result.affected_rows).unwrap();
+                        }
+                    }
+
+                    if success {
+                        *message = Some(format!("Commit successful, {} rows affected", affected_rows));
+                    } else {
+                        *message = Some(error_msg);
+                    }
+                }
+                Err(e) => {
+                    *message = Some(format!("Commit failed: {}", e.message));
+                }
+            }
+        });
+
+        self.clear_changes();
+    }
+
+    fn build_change_summary(&self) -> ChangeSummary {
+        let mut summary = ChangeSummary {
+            inserts: Vec::new(),
+            updates: Vec::new(),
+            deletes: Vec::new(),
+        };
+
+        for (idx, row) in self.new_rows.iter().enumerate() {
+            let mut values = Vec::new();
+            for (col_idx, val) in row.values.iter().enumerate() {
+                if !val.trim().is_empty() {
+                    values.push((
+                        self.columns[col_idx].name.clone(),
+                        val.clone(),
+                    ));
+                }
+            }
+            if !values.is_empty() {
+                summary.inserts.push((idx, values));
+            }
+        }
+
+        let mut by_row: BTreeMap<usize, Vec<(usize, String)>> = BTreeMap::new();
+        for (key, value) in &self.edits {
+            by_row
+                .entry(key.row)
+                .or_default()
+                .push((key.column, value.clone()));
+        }
+
+        for (row_index, changes) in by_row {
+            let mut updates = Vec::new();
+            for (col_idx, new_val) in changes {
+                let original = self
+                    .result
+                    .rows
+                    .get(row_index)
+                    .and_then(|row| row.values.get(col_idx))
+                    .unwrap_or(&CellValue::Null);
+                let old_val = copy_cell_value(original);
+                if old_val != new_val {
+                    updates.push((
+                        self.columns[col_idx].name.clone(),
+                        old_val,
+                        new_val,
+                    ));
+                }
+            }
+            if !updates.is_empty() {
+                summary.updates.push((row_index, updates));
+            }
+        }
+
+        for (row_index, row) in &self.deleted_rows {
+            let mut keys = Vec::new();
+            for (col_idx, col) in self.columns.iter().enumerate() {
+                if col.primary_key {
+                    let val = row.values.get(col_idx).unwrap_or(&CellValue::Null);
+                    keys.push((col.name.clone(), copy_cell_value(val)));
+                }
+            }
+            if keys.is_empty() && self.has_primary_key() {
+                continue;
+            }
+            if keys.is_empty() {
+                for (col_idx, col) in self.columns.iter().enumerate() {
+                    let val = row.values.get(col_idx).unwrap_or(&CellValue::Null);
+                    keys.push((col.name.clone(), copy_cell_value(val)));
+                }
+            }
+            summary.deletes.push((*row_index, keys));
+        }
+
+        summary
+    }
+
+    fn can_commit(&self) -> bool {
+        if !self.has_changes() {
+            return false;
+        }
+        if !self.can_edit_existing_rows() && (!self.edits.is_empty() || !self.deleted_rows.is_empty()) {
+            return false;
+        }
+        true
     }
 
     fn header(&mut self, ui: &mut Ui) {
@@ -307,7 +618,17 @@ impl TableEditor {
         let deleted =
             matches!(row_key, RowKey::Existing(index) if self.deleted_rows.contains_key(&index));
 
+        let is_error_row = self.error_row_index == Some(match row_key {
+            RowKey::Existing(i) => i,
+            RowKey::New(i) => self.result.rows.len() + i,
+        });
+
         ui.horizontal(|ui| {
+            if is_error_row {
+                ui.painter()
+                    .rect_stroke(ui.available_rect_before_wrap(), 2.0, Stroke::new(2.0, Color32::RED));
+            }
+
             ui.allocate_ui_with_layout(
                 Vec2::new(ACTION_WIDTH, ROW_HEIGHT),
                 Layout::left_to_right(Align::Center),
@@ -390,7 +711,7 @@ impl TableEditor {
             if self.edits.contains_key(&key) {
                 let rect = response.rect;
                 ui.painter()
-                    .rect_stroke(rect, 2.0, (1.0, ui.visuals().selection.stroke.color));
+                    .rect_stroke(rect, 2.0, (1.0, Color32::YELLOW));
             }
         } else {
             let mut rich = cell_rich_text(original, display_cell_value(original));
@@ -526,6 +847,8 @@ impl TableEditor {
         self.edits.clear();
         self.new_rows.clear();
         self.deleted_rows.clear();
+        self.commit_error = None;
+        self.error_row_index = None;
     }
 
     fn build_commit_sql(&self) -> std::result::Result<String, String> {
@@ -720,6 +1043,24 @@ mod tests {
         editor.allow_risk_without_pk = true;
         let sql = editor.build_commit_sql().unwrap();
         assert!(sql.contains("WHERE `id` = '1' AND `name` = 'Alice';"));
+    }
+
+    #[test]
+    fn builds_change_summary() {
+        let mut editor = test_editor(true);
+        editor
+            .edits
+            .insert(CellKey { row: 0, column: 1 }, "Bob".to_string());
+        editor.deleted_rows.insert(1, editor.result.rows[1].clone());
+        editor.new_rows.push(NewRow {
+            values: vec!["3".to_string(), "Charlie".to_string()],
+        });
+
+        let summary = editor.build_change_summary();
+        assert_eq!(summary.inserts.len(), 1);
+        assert_eq!(summary.updates.len(), 1);
+        assert_eq!(summary.deletes.len(), 1);
+        assert_eq!(summary.total_changes(), 3);
     }
 
     fn test_editor(primary_key: bool) -> TableEditor {

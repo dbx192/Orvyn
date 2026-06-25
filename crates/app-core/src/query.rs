@@ -4,6 +4,7 @@
 //! execution selection, cancellation, history, favorites, and pool lifecycle.
 
 use crate::connection::ConnectionManager;
+use crate::storage::{FavoriteQueryStore, QueryHistoryStore};
 use crate::task::TaskManager;
 use db_common::{
     highlight_sql, split_statements, statement_at_offset, statement_summary, unsupported_kind,
@@ -28,6 +29,8 @@ pub struct QueryService {
     executors: Arc<BTreeMap<DataSourceKind, Arc<dyn RelationalQueryExecutor>>>,
     pool_config: ConnectionPoolConfig,
     task_manager: TaskManager,
+    history_store: Option<Arc<dyn QueryHistoryStore>>,
+    favorite_store: Option<Arc<dyn FavoriteQueryStore>>,
     state: Arc<Mutex<QueryServiceState>>,
 }
 
@@ -37,8 +40,10 @@ impl QueryService {
         executors: Vec<Arc<dyn RelationalQueryExecutor>>,
         pool_config: ConnectionPoolConfig,
         task_manager: TaskManager,
+        history_store: Option<Arc<dyn QueryHistoryStore>>,
+        favorite_store: Option<Arc<dyn FavoriteQueryStore>>,
     ) -> Self {
-        Self {
+        let mut service = Self {
             connections,
             executors: Arc::new(
                 executors
@@ -48,8 +53,12 @@ impl QueryService {
             ),
             pool_config,
             task_manager,
+            history_store,
+            favorite_store,
             state: Arc::new(Mutex::new(QueryServiceState::default())),
-        }
+        };
+        service.load_history_and_favorites().unwrap();
+        service
     }
 
     pub fn with_default_executors(connections: ConnectionManager) -> Self {
@@ -63,6 +72,8 @@ impl QueryService {
             ],
             ConnectionPoolConfig::default(),
             TaskManager::default(),
+            None,
+            None,
         )
     }
 
@@ -72,7 +83,55 @@ impl QueryService {
         pool_config: ConnectionPoolConfig,
         task_manager: TaskManager,
     ) -> Self {
-        Self::new(connections, executors, pool_config, task_manager)
+        Self::new(connections, executors, pool_config, task_manager, None, None)
+    }
+
+    pub fn with_stores(
+        connections: ConnectionManager,
+        executors: Vec<Arc<dyn RelationalQueryExecutor>>,
+        pool_config: ConnectionPoolConfig,
+        task_manager: TaskManager,
+        history_store: Arc<dyn QueryHistoryStore>,
+        favorite_store: Arc<dyn FavoriteQueryStore>,
+    ) -> Self {
+        Self::new(connections, executors, pool_config, task_manager, Some(history_store), Some(favorite_store))
+    }
+
+    fn load_history_and_favorites(&self) -> Result<()> {
+        let handle = tokio::runtime::Handle::current();
+        let history_store = self.history_store.clone();
+        let favorite_store = self.favorite_store.clone();
+        let state = self.state.clone();
+
+        handle.block_on(async move {
+            if let Some(store) = history_store {
+                match store.list().await {
+                    Ok(entries) => {
+                        let mut state = state.lock().await;
+                        state.history.extend(entries);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to load query history: {}", e.message);
+                    }
+                }
+            }
+
+            if let Some(store) = favorite_store {
+                match store.list().await {
+                    Ok(favorites) => {
+                        let mut state = state.lock().await;
+                        for fav in favorites {
+                            state.favorites.insert(fav.id, fav);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to load favorites: {}", e.message);
+                    }
+                }
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn open_tab(
@@ -321,6 +380,14 @@ impl QueryService {
         self.state.lock().await.history.iter().cloned().collect()
     }
 
+    pub async fn clear_history(&self) -> Result<()> {
+        self.state.lock().await.history.clear();
+        if let Some(store) = &self.history_store {
+            store.clear().await?;
+        }
+        Ok(())
+    }
+
     pub async fn add_favorite(
         &self,
         connection_id: Option<ConnectionId>,
@@ -341,6 +408,9 @@ impl QueryService {
             .await
             .favorites
             .insert(favorite.id, favorite.clone());
+        if let Some(store) = &self.favorite_store {
+            store.upsert(favorite.clone()).await?;
+        }
         Ok(favorite)
     }
 
@@ -360,11 +430,18 @@ impl QueryService {
         favorite.title = title;
         favorite.sql = sql;
         favorite.updated_at = db_common::now_utc();
-        Ok(favorite.clone())
+        let updated = favorite.clone();
+        if let Some(store) = &self.favorite_store {
+            store.upsert(updated.clone()).await?;
+        }
+        Ok(updated)
     }
 
     pub async fn remove_favorite(&self, id: QueryId) -> Result<()> {
         self.state.lock().await.favorites.remove(&id);
+        if let Some(store) = &self.favorite_store {
+            store.delete(id).await?;
+        }
         Ok(())
     }
 
@@ -424,7 +501,13 @@ impl QueryService {
             success: error_message.is_none(),
             error_message,
         };
-        push_history(&mut self.state.lock().await.history, entry);
+        push_history(&mut self.state.lock().await.history, entry.clone());
+
+        if let Some(store) = &self.history_store {
+            if let Err(e) = store.add(entry).await {
+                tracing::warn!("failed to write history entry: {}", e.message);
+            }
+        }
     }
 
     async fn record_failed_history(
@@ -446,7 +529,13 @@ impl QueryService {
             success: false,
             error_message: Some(error.message.clone()),
         };
-        push_history(&mut self.state.lock().await.history, entry);
+        push_history(&mut self.state.lock().await.history, entry.clone());
+
+        if let Some(store) = &self.history_store {
+            if let Err(e) = store.add(entry).await {
+                tracing::warn!("failed to write history entry: {}", e.message);
+            }
+        }
     }
 }
 

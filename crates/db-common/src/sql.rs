@@ -674,6 +674,114 @@ mod tests {
     }
 
     #[test]
+    fn splits_empty_statements() {
+        assert_eq!(split_statements(""), vec![]);
+        assert_eq!(split_statements("   "), vec![]);
+        assert_eq!(split_statements(";;"), vec![]);
+        assert_eq!(split_statements("; select 1 ; ;"), vec!["select 1"]);
+    }
+
+    #[test]
+    fn splits_single_statement() {
+        assert_eq!(split_statements("select 1"), vec!["select 1"]);
+        assert_eq!(split_statements("select 1;"), vec!["select 1"]);
+    }
+
+    #[test]
+    fn splits_multiple_statements() {
+        assert_eq!(
+            split_statements("select 1; select 2"),
+            vec!["select 1", "select 2"]
+        );
+        assert_eq!(
+            split_statements("select 1;\nselect 2;\nselect 3;"),
+            vec!["select 1", "select 2", "select 3"]
+        );
+    }
+
+    #[test]
+    fn handles_single_line_comments() {
+        assert_eq!(
+            split_statements("-- this is a comment\nselect 1"),
+            vec!["-- this is a comment select 1"]
+        );
+        assert_eq!(
+            split_statements("select 1 -- comment;\nselect 2"),
+            vec!["select 1 -- comment; select 2"]
+        );
+        assert_eq!(
+            split_statements("-- comment with ; semicolon\nselect 1;"),
+            vec!["-- comment with ; semicolon select 1"]
+        );
+    }
+
+    #[test]
+    fn handles_multi_line_comments() {
+        assert_eq!(
+            split_statements("/* comment */ select 1"),
+            vec!["/* comment */ select 1"]
+        );
+        assert_eq!(
+            split_statements("select /* comment */ 1; select 2"),
+            vec!["select /* comment */ 1", "select 2"]
+        );
+        assert_eq!(
+            split_statements("select /* comment ; with ; semicolons */ 1"),
+            vec!["select /* comment ; with ; semicolons */ 1"]
+        );
+    }
+
+    #[test]
+    fn handles_single_quoted_strings() {
+        assert_eq!(split_statements("select 'a';"), vec!["select 'a'"]);
+        assert_eq!(split_statements("select 'a;b';"), vec!["select 'a;b'"]);
+        assert_eq!(split_statements("select 'a''b';"), vec!["select 'a''b'"]);
+        assert_eq!(split_statements("select ';';"), vec!["select ';'"]);
+    }
+
+    #[test]
+    fn handles_double_quoted_strings() {
+        assert_eq!(split_statements(r#"select "a";"#), vec![r#"select "a""#]);
+        assert_eq!(split_statements(r#"select "a;b";"#), vec![r#"select "a;b""#]);
+        assert_eq!(split_statements(r#"select "a""b";"#), vec![r#"select "a""b""#]);
+        assert_eq!(split_statements(r#"select ";";"#), vec![r#"select ";"#]);
+    }
+
+    #[test]
+    fn handles_mixed_quotes_and_comments() {
+        assert_eq!(
+            split_statements("select 'a'; /* comment */ select \"b\"; -- comment\nselect 3"),
+            vec!["select 'a'", "/* comment */ select \"b\"", "-- comment select 3"]
+        );
+    }
+
+    #[test]
+    fn handles_statement_at_offset_with_comments() {
+        let sql = "-- comment\nselect 1;\n/* comment */\nselect 2;";
+        assert_eq!(statement_at_offset(sql, 20).as_deref(), Some("select 1"));
+        assert_eq!(statement_at_offset(sql, 40).as_deref(), Some("/* comment */ select 2"));
+    }
+
+    #[test]
+    fn handles_statement_at_offset_with_strings() {
+        let sql = "select 'a;b'; select 2;";
+        assert_eq!(statement_at_offset(sql, 5).as_deref(), Some("select 'a;b'"));
+        assert_eq!(statement_at_offset(sql, 15).as_deref(), Some("select 2"));
+    }
+
+    #[test]
+    fn handles_trailing_semicolon() {
+        assert_eq!(split_statements("select 1;;"), vec!["select 1"]);
+        assert_eq!(split_statements("select 1;\n;"), vec!["select 1"]);
+    }
+
+    #[test]
+    fn handles_whitespace_around_semicolons() {
+        assert_eq!(split_statements("select 1 ; select 2"), vec!["select 1", "select 2"]);
+        assert_eq!(split_statements("select 1 \n ; \n select 2"), vec!["select 1", "select 2"]);
+    }
+
+    #[test]
     fn highlights_sql_tokens_with_byte_ranges() {
         let sql = "select count(*) from users where name = 'a;'; -- tail";
         let tokens = highlight_sql(sql);
