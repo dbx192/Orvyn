@@ -13,7 +13,7 @@ use app_core::{
 };
 use db_common::dialect::BacktickDialect;
 use eframe::egui::{
-    Align, Button, Color32, Context, Layout, RichText, SidePanel, TopBottomPanel, Window,
+    Align, Button, CentralPanel, Color32, Context, Layout, RichText, SidePanel, TopBottomPanel, Window,
 };
 use tokio::runtime::Handle;
 
@@ -66,16 +66,38 @@ impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.top_toolbar(ctx);
         self.left_tree(ctx);
+        self.central_panel(ctx);
         self.bottom_status(ctx);
         self.error_window(ctx);
-
-        if let Some(message) = self.query_editor.ui(ctx) {
-            self.state.set_status(message);
-        }
     }
 }
 
 impl DesktopApp {
+    fn central_panel(&mut self, ctx: &Context) {
+        CentralPanel::default().show(ctx, |ui| {
+            let query_status = self.query_editor.ui(ctx, ui);
+            ui.separator();
+            self.sync_result_grid();
+            let grid_status = self.result_grid.ui(ui);
+            if let Some(message) = query_status.or(grid_status) {
+                if !message.is_empty() {
+                    self.state.set_status(message);
+                }
+            }
+        });
+    }
+
+    fn sync_result_grid(&mut self) {
+        let latest = self.query_editor.latest_result().cloned();
+        if let Some(new_result) = latest {
+            // Update the result grid if the latest result is different
+            // from what it currently shows.
+            if self.result_grid.result() != &new_result {
+                self.result_grid.set_result(new_result);
+            }
+        }
+    }
+
     fn top_toolbar(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {

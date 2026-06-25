@@ -35,7 +35,7 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TaskState {
     pub id: TaskId,
     pub label: String,
@@ -57,6 +57,7 @@ pub struct UiError {
     pub title: String,
     pub message: String,
     pub detail: Option<String>,
+    pub expanded: bool,
 }
 
 impl UiError {
@@ -65,7 +66,13 @@ impl UiError {
             title: title.into(),
             message: message.into(),
             detail: None,
+            expanded: false,
         }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 }
 
@@ -77,6 +84,23 @@ pub struct ConnectionTreeNode {
     pub children: Vec<String>,
 }
 
+/// Application theme options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppTheme {
+    Light,
+    #[default]
+    Dark,
+}
+
+impl AppTheme {
+    pub fn toggle(&mut self) {
+        *self = match self {
+            AppTheme::Light => AppTheme::Dark,
+            AppTheme::Dark => AppTheme::Light,
+        };
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub active_tab: Option<QueryId>,
@@ -85,6 +109,23 @@ pub struct AppState {
     pub errors: Vec<UiError>,
     pub connection_tree: Vec<ConnectionTreeNode>,
     pub status: String,
+    pub theme: AppTheme,
+    pub search_focused: bool,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            active_tab: None,
+            tabs: Vec::new(),
+            tasks: Vec::new(),
+            errors: Vec::new(),
+            connection_tree: Vec::new(),
+            status: String::from("Ready"),
+            theme: AppTheme::Dark,
+            search_focused: false,
+        }
+    }
 }
 
 impl AppState {
@@ -113,6 +154,8 @@ impl AppState {
                 },
             ],
             status: "Ready".to_string(),
+            theme: AppTheme::Dark,
+            search_focused: false,
         }
     }
 
@@ -127,5 +170,13 @@ impl AppState {
 
     pub fn push_error(&mut self, error: UiError) {
         self.errors.push(error);
+    }
+
+    pub fn toggle_theme(&mut self) {
+        self.theme.toggle();
+    }
+
+    pub fn set_search_focused(&mut self, focused: bool) {
+        self.search_focused = focused;
     }
 }

@@ -2,9 +2,9 @@
 
 use async_trait::async_trait;
 use db_common::{
-    redact_connection_url, AppError, ConnectionProfile, ConnectionTestReport, ConnectionTester,
-    DataSourceKind, ErrorKind, RedisDatabase, RedisKeyInfo, RedisKeyScan, RedisMetadataReader,
-    Result,
+    redact_connection_url, AppError, CellValue, ConnectionProfile, ConnectionTestReport,
+    ConnectionTester, DataSourceKind, ErrorKind, RedisConnector, RedisDatabase, RedisKeyInfo,
+    RedisKeyScan, RedisMetadataReader, RedisValue, Result,
 };
 use std::time::Instant;
 
@@ -15,6 +15,9 @@ pub struct RedisConnectionTester;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RedisMetadataReaderImpl;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RedisConnectorImpl;
 
 #[async_trait]
 impl ConnectionTester for RedisConnectionTester {
@@ -236,4 +239,279 @@ async fn select_database(conn: &mut redis::aio::MultiplexedConnection, database:
         .await
         .map_err(redis_query_error)?;
     Ok(())
+}
+
+#[async_trait]
+impl RedisConnector for RedisConnectorImpl {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::Redis
+    }
+
+    async fn test_connection(&self, profile: &ConnectionProfile) -> Result<()> {
+        profile.validate()?;
+        let url = redis_url(profile, None)?;
+        let client = redis::Client::open(url.as_str()).map_err(|error| {
+            AppError::new(ErrorKind::Connection, "invalid Redis connection options")
+                .with_detail(redact_connection_url(&error.to_string()))
+        })?;
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(redis_connection_error)?;
+        let _: String = redis::cmd("PING")
+            .query_async(&mut conn)
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Query, "failed to test Redis connection")
+                    .with_detail(error.to_string())
+            })?;
+        Ok(())
+    }
+
+    async fn list_databases(&self) -> Result<Vec<RedisDatabase>> {
+        Err(AppError::internal(
+            "RedisConnector::list_databases requires profile and password",
+        ))
+    }
+
+    async fn scan_keys(
+        &self,
+        database: u8,
+        pattern: Option<&str>,
+        cursor: u64,
+        limit: u32,
+    ) -> Result<(u64, Vec<RedisKeyInfo>)> {
+        Err(AppError::internal(
+            "RedisConnector::scan_keys requires profile and password",
+        ))
+    }
+
+    async fn get_value(&self, database: u8, key: &str) -> Result<RedisValue> {
+        Err(AppError::internal(
+            "RedisConnector::get_value requires profile and password",
+        ))
+    }
+
+    async fn set_value(
+        &self,
+        database: u8,
+        key: &str,
+        value: RedisValue,
+        ttl_seconds: Option<u64>,
+    ) -> Result<()> {
+        let _ = (database, key, value, ttl_seconds);
+        Err(AppError::internal("set_value not implemented in metadata reader"))
+    }
+
+    async fn delete_key(&self, database: u8, key: &str) -> Result<()> {
+        let _ = (database, key);
+        Err(AppError::internal(
+            "RedisConnector::delete_key requires profile and password",
+        ))
+    }
+
+    async fn execute_command(&self, database: u8, command: &str) -> Result<RedisValue> {
+        let _ = (database, command);
+        Err(AppError::internal(
+            "RedisConnector::execute_command requires profile and password",
+        ))
+    }
+}
+
+/// Extended RedisConnector that works with ConnectionProfile and password.
+/// This is the main connector used by the application layer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RedisConnectorWithAuth;
+
+#[async_trait]
+impl RedisConnectorWithAuth {
+    pub async fn new(
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<redis::aio::MultiplexedConnection> {
+        profile.validate()?;
+        let client = redis_client(profile, password)?;
+        client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(redis_connection_error)
+    }
+
+    pub async fn get_key_value(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+    ) -> Result<RedisValue> {
+        select_database(conn, database).await?;
+        let type_name: String =
+            redis::cmd("TYPE")
+                .arg(key)
+                .query_async(conn)
+                .await
+                .map_err(redis_query_error)?;
+
+        match type_name.as_str() {
+            "string" => {
+                let value: Vec<u8> = redis::cmd("GET")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+                Ok(RedisValue::String(value))
+            }
+            "list" => {
+                let len: i64 = redis::cmd("LLEN")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+                let items: Vec<String> = redis::cmd("LRANGE")
+                    .arg(key)
+                    .arg(0)
+                    .arg(len.saturating_sub(1))
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+                Ok(RedisValue::List(
+                    items.into_iter().map(CellValue::Text).collect(),
+                ))
+            }
+            "set" => {
+                let members: Vec<String> = redis::cmd("SMEMBERS")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+                Ok(RedisValue::Set(
+                    members.into_iter().map(CellValue::Text).collect(),
+                ))
+            }
+            "zset" => {
+                let members: Vec<(String, f64)> = redis::cmd("ZRANGE")
+                    .arg(key)
+                    .arg(0)
+                    .arg(-1)
+                    .with_scores()
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+                Ok(RedisValue::SortedSet(
+                    members
+                        .into_iter()
+                        .map(|(m, s)| (CellValue::Text(m), s))
+                        .collect(),
+                ))
+            }
+            "hash" => {
+                let entries: Vec<(String, String)> = redis::cmd("HGETALL")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+                Ok(RedisValue::Hash(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k, CellValue::Text(v)))
+                        .collect(),
+                ))
+            }
+            "none" => Ok(RedisValue::None),
+            _ => Ok(RedisValue::None),
+        }
+    }
+
+    pub async fn delete_key(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+    ) -> Result<()> {
+        select_database(conn, database).await?;
+        redis::cmd("DEL")
+            .arg(key)
+            .query_async::<_, i32>(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(())
+    }
+
+    pub async fn update_ttl(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+        ttl_seconds: Option<i64>,
+    ) -> Result<()> {
+        select_database(conn, database).await?;
+        match ttl_seconds {
+            Some(ttl) if ttl > 0 => {
+                redis::cmd("EXPIRE")
+                    .arg(key)
+                    .arg(ttl)
+                    .query_async::<_, i32>(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+            }
+            Some(_) | None => {
+                redis::cmd("PERSIST")
+                    .arg(key)
+                    .query_async::<_, i32>(conn)
+                    .await
+                    .map_err(redis_query_error)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn get_key_size(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        key: &str,
+    ) -> Result<u64> {
+        select_database(conn, database).await?;
+        let type_name: String =
+            redis::cmd("TYPE")
+                .arg(key)
+                .query_async(conn)
+                .await
+                .map_err(redis_query_error)?;
+
+        let size: u64 = match type_name.as_str() {
+            "string" => {
+                redis::cmd("STRLEN")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?
+            }
+            "list" => {
+                redis::cmd("LLEN")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?
+            }
+            "set" => {
+                redis::cmd("SCARD")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?
+            }
+            "zset" => {
+                redis::cmd("ZCARD")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?
+            }
+            "hash" => {
+                redis::cmd("HLEN")
+                    .arg(key)
+                    .query_async(conn)
+                    .await
+                    .map_err(redis_query_error)?
+            }
+            _ => 0,
+        };
+        Ok(size)
+    }
 }

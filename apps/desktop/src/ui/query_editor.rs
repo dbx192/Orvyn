@@ -1,15 +1,13 @@
 use app_core::{connection::ConnectionManager, query::QueryService};
 use db_common::{
     AppError, ConnectionId, ConnectionProfile, DataSourceKind, QueryExecutionMode,
-    QueryExecutionReport, QueryExecutionRequest, QueryId, QueryResult, ResultSet, SqlHighlightToken,
-    TextRange,
+    QueryExecutionReport, QueryExecutionRequest, QueryId, QueryResult, SqlHighlightToken, TextRange,
 };
 use eframe::egui::{
-    Align, Button, CentralPanel, Checkbox, Color32, ComboBox, Frame, Label, Layout, RichText,
-    ScrollArea, Separator, Sense, TextEdit, Ui, Window,
+    Align, Button, Color32, ComboBox, Layout, RichText, ScrollArea, Sense, TextEdit, Ui, Window,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     sync::mpsc::{self, Receiver, Sender},
 };
 use tokio::runtime::Handle;
@@ -98,37 +96,40 @@ impl QueryEditor {
         editor
     }
 
-    pub fn ui(&mut self, ctx: &eframe::egui::Context) -> Option<String> {
+    pub fn ui(&mut self, ctx: &eframe::egui::Context, ui: &mut Ui) -> Option<String> {
         self.drain_events();
 
         if self.tabs.is_empty() {
-            CentralPanel::default().show(ctx, |ui| {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No query tab open");
-                    if ui.button("New Query").clicked() {
-                        self.new_query();
-                    }
-                });
+            ui.centered_and_justified(|ui| {
+                ui.label("No query tab open");
+                if ui.button("New Query").clicked() {
+                    self.new_query();
+                }
             });
-            return None;
+            self.close_confirm_dialog(ctx);
+            self.execute_all_dialog(ctx);
+            return Some(self.status.clone());
         }
 
-        CentralPanel::default().show(ctx, |ui| {
-            self.toolbar(ui);
-            ui.separator();
-            self.tabs_bar(ui);
-            ui.separator();
-            if let Some(tab) = self.active_tab.as_ref().and_then(|id| self.tabs.get_mut(id)) {
-                self.editor_panel(ui, tab);
-                ui.separator();
-                self.results_panel(ui, tab);
-            }
-        });
+        self.toolbar(ui);
+        ui.separator();
+        self.tabs_bar(ui);
+        ui.separator();
+        if let Some(tab) = self.active_tab.as_ref().and_then(|id| self.tabs.get_mut(id)) {
+            self.editor_panel(ui, tab);
+        }
 
         self.close_confirm_dialog(ctx);
         self.execute_all_dialog(ctx);
 
         Some(self.status.clone())
+    }
+
+    pub fn latest_result(&self) -> Option<&QueryResult> {
+        let tab_id = self.active_tab?;
+        let tab = self.tabs.get(&tab_id)?;
+        let report = tab.results.as_ref()?;
+        report.results.first()
     }
 
     pub fn new_query_with_connection(&mut self, connection_id: ConnectionId) {
