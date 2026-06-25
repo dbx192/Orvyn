@@ -561,24 +561,26 @@ fn duckdb_indexes(path: PathBuf, schema: &str, table: &str) -> Result<Vec<TableI
 
 fn duckdb_foreign_keys(path: PathBuf, schema: &str, table: &str) -> Result<Vec<TableForeignKey>> {
     let conn = duckdb_connection(path)?;
-    let Ok(mut stmt) = conn.prepare(
+    let mut stmt = match conn.prepare(
         "SELECT constraint_name, column_name, foreign_table_name, foreign_column_name \
          FROM duckdb_constraints() \
          WHERE schema_name = ?1 AND table_name = ?2 AND constraint_type = 'FOREIGN KEY' \
          ORDER BY constraint_name, column_index",
-    ) else {
-        return Ok(Vec::new());
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Ok(Vec::new()),
     };
-    let rows = stmt
-        .query_map([schema, table], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
-        .unwrap_or_else(|_| duckdb::Result::Ok(Vec::new().into_iter()));
+    let rows = match stmt.query_map([schema, table], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return Ok(Vec::new()),
+    };
 
     let mut fks: Vec<TableForeignKey> = Vec::new();
     for row in rows {
@@ -602,24 +604,26 @@ fn duckdb_foreign_keys(path: PathBuf, schema: &str, table: &str) -> Result<Vec<T
 
 fn duckdb_functions(path: PathBuf, schema: &str) -> Result<Vec<DatabaseFunction>> {
     let conn = duckdb_connection(path)?;
-    let Ok(mut stmt) = conn.prepare(
+    let mut stmt = match conn.prepare(
         "SELECT function_name, return_type, schema_name \
          FROM duckdb_functions() \
          WHERE schema_name = ?1 \
          ORDER BY function_name",
-    ) else {
-        return Ok(Vec::new());
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Ok(Vec::new()),
     };
-    let rows = stmt
-        .query_map([schema], |row| {
-            Ok(DatabaseFunction {
-                name: row.get::<_, String>(0)?,
-                return_type: row.get::<_, Option<String>>(1)?,
-                language: None,
-                kind: "FUNCTION".to_string(),
-            })
+    let rows = match stmt.query_map([schema], |row| {
+        Ok(DatabaseFunction {
+            name: row.get::<_, String>(0)?,
+            return_type: row.get::<_, Option<String>>(1)?,
+            language: None,
+            kind: "FUNCTION".to_string(),
         })
-        .unwrap_or_else(|_| duckdb::Result::Ok(Vec::new().into_iter()));
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return Ok(Vec::new()),
+    };
 
     let mut functions = Vec::new();
     for row in rows {

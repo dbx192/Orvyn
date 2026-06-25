@@ -1,15 +1,15 @@
 use crate::ui::format::{
     cell_rich_text, compare_cell_values, copy_cell_value, copy_to_clipboard, display_cell_value,
 };
-use db_common::{CellValue, QueryResult};
+use db_common::{CellValue, Column, QueryResult};
 use eframe::egui::{
-    Align, Button, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Ui, Vec2,
+    Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Ui, Vec2,
 };
 use import_export::{export_query_result, ExportFormat};
 use std::cmp::Ordering;
 
 const DEFAULT_PAGE_SIZE: usize = 100;
-const MIN_COLUMN_WIDTH: f32 = 64.0;
+const MIN_COLUMN_WIDTH: f32 = 72.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const ROW_HEIGHT: f32 = 26.0;
 
@@ -45,7 +45,12 @@ impl ResultSetGrid {
         let column_widths = result
             .columns
             .iter()
-            .map(|column| ((column.name.len() as f32 * 8.0) + 56.0).clamp(MIN_COLUMN_WIDTH, 180.0))
+            .map(|column| {
+                let estimated = (column.name.chars().count() as f32 * 8.0)
+                    + (column.database_type.chars().count() as f32 * 7.0)
+                    + 32.0;
+                estimated.clamp(MIN_COLUMN_WIDTH, 220.0)
+            })
             .collect();
 
         Self {
@@ -58,14 +63,55 @@ impl ResultSetGrid {
         }
     }
 
+    pub fn set_result(&mut self, result: QueryResult) {
+        self.result = result;
+        self.selected = None;
+        self.sort = None;
+        self.page = 0;
+        self.column_widths = self
+            .result
+            .columns
+            .iter()
+            .map(|column| {
+                let estimated = (column.name.chars().count() as f32 * 8.0)
+                    + (column.database_type.chars().count() as f32 * 7.0)
+                    + 32.0;
+                estimated.clamp(MIN_COLUMN_WIDTH, 220.0)
+            })
+            .collect();
+    }
+
+    pub fn result(&self) -> &QueryResult {
+        &self.result
+    }
+
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
         let mut message = None;
         self.toolbar(ui, &mut message);
-        ui.add_space(8.0);
+        ui.add_space(4.0);
+
+        if self.result.columns.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label(
+                    RichText::new("No columns in result")
+                        .color(Color32::GRAY)
+                        .italics(),
+                );
+                if !self.result.rows.is_empty() {
+                    ui.label(
+                        RichText::new(format!("{} row(s) returned", self.result.rows.len()))
+                            .color(Color32::GRAY),
+                    );
+                }
+            });
+            return message;
+        }
 
         Frame::group(ui.style()).show(ui, |ui| {
             ScrollArea::horizontal()
                 .id_source("result_set_horizontal")
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
                     self.header(ui);
                     ui.separator();
@@ -73,16 +119,21 @@ impl ResultSetGrid {
                         .id_source("result_set_vertical")
                         .max_height(ui.available_height().max(240.0))
                         .auto_shrink([false, false])
-                        .show_rows(ui, ROW_HEIGHT, self.page_rows().len(), |ui, row_range| {
-                            let page_rows = self.page_rows();
-                            for visible_row_index in row_range {
-                                let Some(row_index) = page_rows.get(visible_row_index).copied()
-                                else {
-                                    continue;
-                                };
-                                self.row(ui, row_index);
-                            }
-                        });
+                        .show_rows(
+                            ui,
+                            ROW_HEIGHT,
+                            self.page_rows().len(),
+                            |ui, row_range| {
+                                let page_rows = self.page_rows();
+                                for visible_row_index in row_range {
+                                    let Some(row_index) = page_rows.get(visible_row_index).copied()
+                                    else {
+                                        continue;
+                                    };
+                                    self.row(ui, row_index);
+                                }
+                            },
+                        );
                 });
         });
 
@@ -96,6 +147,13 @@ impl ResultSetGrid {
                 self.result.rows.len(),
                 self.result.columns.len()
             ));
+            if self.result.execution_time_ms > 0 {
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("{} ms", self.result.execution_time_ms))
+                        .color(Color32::from_rgb(60, 140, 60)),
+                );
+            }
             ui.separator();
             ui.label(format!(
                 "Page {} / {}",
@@ -103,11 +161,14 @@ impl ResultSetGrid {
                 self.total_pages().max(1)
             ));
 
-            if ui.add_enabled(self.page > 0, Button::new("Prev")).clicked() {
+            if ui
+                .add_enabled(self.page > 0, Button::new("◀ Prev"))
+                .clicked()
+            {
                 self.page -= 1;
             }
             if ui
-                .add_enabled(self.page + 1 < self.total_pages(), Button::new("Next"))
+                .add_enabled(self.page + 1 < self.total_pages(), Button::new("Next ▶"))
                 .clicked()
             {
                 self.page += 1;
@@ -128,33 +189,26 @@ impl ResultSetGrid {
 
             ui.separator();
             let has_selection = self.selected.is_some();
-            if ui
-                .add_enabled(has_selection, Button::new("Copy Cell"))
-                .clicked()
-            {
-                if let Some(text) = self.copy_cell_text() {
-                    copy_to_clipboard(ui, text);
-                    *message = Some("Cell copied".to_string());
+            ui.add_enabled_ui(has_selection, |ui| {
+                if ui.button("Copy Cell").clicked() {
+                    if let Some(text) = self.copy_cell_text() {
+                        copy_to_clipboard(ui, text);
+                        *message = Some("Cell copied".to_string());
+                    }
                 }
-            }
-            if ui
-                .add_enabled(has_selection, Button::new("Copy Row"))
-                .clicked()
-            {
-                if let Some(text) = self.copy_row_text(false) {
-                    copy_to_clipboard(ui, text);
-                    *message = Some("Row copied".to_string());
+                if ui.button("Copy Row").clicked() {
+                    if let Some(text) = self.copy_row_text(false) {
+                        copy_to_clipboard(ui, text);
+                        *message = Some("Row copied".to_string());
+                    }
                 }
-            }
-            if ui
-                .add_enabled(has_selection, Button::new("Copy Row + Header"))
-                .clicked()
-            {
-                if let Some(text) = self.copy_row_text(true) {
-                    copy_to_clipboard(ui, text);
-                    *message = Some("Row copied with header".to_string());
+                if ui.button("Copy Row + Header").clicked() {
+                    if let Some(text) = self.copy_row_text(true) {
+                        copy_to_clipboard(ui, text);
+                        *message = Some("Row copied with header".to_string());
+                    }
                 }
-            }
+            });
             if ui.button("Copy Page + Header").clicked() {
                 copy_to_clipboard(ui, self.copy_rows_text(self.page_rows(), true));
                 *message = Some("Visible page copied with header".to_string());
@@ -175,6 +229,27 @@ impl ResultSetGrid {
                 self.copy_export(ui, ExportFormat::ExcelCompatible, message);
             }
         });
+
+        if let Some(sort) = self.sort {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "Sorted by {}{}",
+                        self.result.columns[sort.column].name,
+                        match sort.direction {
+                            SortDirection::Asc => " ↑",
+                            SortDirection::Desc => " ↓",
+                        }
+                    ))
+                    .color(Color32::from_rgb(80, 80, 180))
+                    .small(),
+                );
+                if ui.small_button("Clear sort").clicked() {
+                    self.sort = None;
+                    self.page = 0;
+                }
+            });
+        }
     }
 
     fn header(&mut self, ui: &mut Ui) {
@@ -183,33 +258,58 @@ impl ResultSetGrid {
                 let column = &self.result.columns[column_index];
                 let column_name = column.name.clone();
                 let column_hover = format!(
-                    "{}{}",
+                    "{}{}{}",
                     column.database_type,
-                    if column.nullable { ", nullable" } else { "" }
+                    if column.nullable { " · nullable" } else { "" },
+                    if column.primary_key { " · PK" } else { "" }
                 );
                 let width = self.column_widths[column_index];
+                let sort_dir = self.sort_direction_for(column_index);
+
                 ui.allocate_ui_with_layout(
-                    Vec2::new(width, 46.0),
+                    Vec2::new(width, 56.0),
                     Layout::top_down(Align::Min),
                     |ui| {
-                        let marker = self.sort_marker(column_index);
+                        let marker = match sort_dir {
+                            Some(SortDirection::Asc) => " ↑",
+                            Some(SortDirection::Desc) => " ↓",
+                            None => "",
+                        };
                         let title = format!("{column_name}{marker}");
+                        let title_btn = if sort_dir.is_some() {
+                            Button::new(RichText::new(title).strong().color(Color32::from_rgb(
+                                60,
+                                100,
+                                180,
+                            )))
+                        } else {
+                            Button::new(RichText::new(title).strong())
+                        };
                         if ui
-                            .add_sized([width, 22.0], Button::new(RichText::new(title).strong()))
-                            .on_hover_text(column_hover)
+                            .add_sized([width, 22.0], title_btn)
+                            .on_hover_text(format!("{column_hover}\nClick to sort"))
                             .clicked()
                         {
                             self.toggle_sort(column_index);
                             self.page = 0;
                         }
                         ui.horizontal(|ui| {
-                            ui.label("W");
+                            ui.label(
+                                RichText::new("↔")
+                                    .color(Color32::GRAY)
+                                    .size(10.0),
+                            );
                             ui.add(
                                 DragValue::new(&mut self.column_widths[column_index])
                                     .speed(2.0)
                                     .clamp_range(MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH),
                             );
                         });
+                        ui.label(
+                            RichText::new(&column.database_type)
+                                .color(Color32::GRAY)
+                                .size(10.0),
+                        );
                     },
                 );
             }
@@ -234,7 +334,9 @@ impl ResultSetGrid {
                         Vec2::new(width, ROW_HEIGHT),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            let label = Label::new(rich_text).sense(Sense::click());
+                            let label = Label::new(rich_text)
+                                .sense(Sense::click())
+                                .truncate(true);
                             ui.add_sized([width, ROW_HEIGHT], label)
                         },
                     )
@@ -277,6 +379,16 @@ impl ResultSetGrid {
         self.result.rows.len().div_ceil(self.page_size.max(1))
     }
 
+    fn sort_direction_for(&self, column: usize) -> Option<SortDirection> {
+        match self.sort {
+            Some(SortState {
+                column: sort_column,
+                direction,
+            }) if sort_column == column => Some(direction),
+            _ => None,
+        }
+    }
+
     fn toggle_sort(&mut self, column: usize) {
         self.sort = match self.sort {
             Some(sort) if sort.column == column && sort.direction == SortDirection::Asc => {
@@ -291,20 +403,6 @@ impl ResultSetGrid {
                 direction: SortDirection::Asc,
             }),
         };
-    }
-
-    fn sort_marker(&self, column: usize) -> &'static str {
-        match self.sort {
-            Some(SortState {
-                column: sort_column,
-                direction: SortDirection::Asc,
-            }) if sort_column == column => " ^",
-            Some(SortState {
-                column: sort_column,
-                direction: SortDirection::Desc,
-            }) if sort_column == column => " v",
-            _ => "",
-        }
     }
 
     fn compare_rows(&self, left: usize, right: usize, sort: SortState) -> Ordering {
@@ -362,7 +460,7 @@ impl ResultSetGrid {
         self.result
             .columns
             .iter()
-            .map(|column| column.name.as_str())
+            .map(|column: &Column| column.name.as_str())
             .collect::<Vec<_>>()
             .join("\t")
     }

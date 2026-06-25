@@ -1,10 +1,10 @@
 use crate::ui::{
     connection_manager::ConnectionManagerUi,
-    object_tree::ObjectTree,
+    object_tree::{ObjectTree, ObjectTreeAction},
     query_editor::QueryEditor,
     result_grid::ResultSetGrid,
     samples::{sample_result_set, sample_table_columns},
-    state::{AppState, TaskStatus, UiError, WorkspaceTabKind},
+    state::{AppState, TaskStatus, UiError},
     table_editor::TableEditor,
 };
 use app_core::{
@@ -13,8 +13,7 @@ use app_core::{
 };
 use db_common::dialect::BacktickDialect;
 use eframe::egui::{
-    Align, Button, CentralPanel, Context, Layout, RichText, ScrollArea, SidePanel, TopBottomPanel,
-    Ui, Window,
+    Align, Button, Color32, Context, Layout, RichText, SidePanel, TopBottomPanel, Window,
 };
 use tokio::runtime::Handle;
 
@@ -23,11 +22,10 @@ pub struct DesktopApp {
     connection_manager_ui: ConnectionManagerUi,
     object_tree: ObjectTree,
     query_editor: QueryEditor,
-    _metadata_service: MetadataService,
-    _session_manager: SessionManager,
     state: AppState,
     result_grid: ResultSetGrid,
     table_editor: TableEditor,
+    last_tree_status: String,
 }
 
 impl DesktopApp {
@@ -39,22 +37,27 @@ impl DesktopApp {
         query_service: QueryService,
         runtime: Handle,
     ) -> Self {
+        let result_grid_result = sample_result_set();
+        let sample = result_grid_result.clone();
         Self {
             app_name,
             connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), runtime.clone()),
-            object_tree: ObjectTree::new(metadata_service.clone(), session_manager.clone(), runtime.clone()),
+            object_tree: ObjectTree::new(
+                metadata_service,
+                session_manager,
+                runtime.clone(),
+            ),
             query_editor: QueryEditor::new(query_service, connection_manager, runtime),
-            _metadata_service: metadata_service,
-            _session_manager: session_manager,
             state: AppState::with_sample_workspace(),
-            result_grid: ResultSetGrid::new(sample_result_set()),
+            result_grid: ResultSetGrid::new(result_grid_result),
             table_editor: TableEditor::new(
                 "main",
                 "customers",
                 sample_table_columns(),
-                sample_result_set(),
+                sample,
                 Box::new(BacktickDialect),
             ),
+            last_tree_status: String::new(),
         }
     }
 }
@@ -107,13 +110,93 @@ impl DesktopApp {
     fn left_tree(&mut self, ctx: &Context) {
         SidePanel::left("connection_object_tree")
             .resizable(true)
-            .default_width(260.0)
-            .width_range(200.0..=420.0)
+            .default_width(280.0)
+            .width_range(220.0..=440.0)
             .show(ctx, |ui| {
-                if let Some(message) = self.object_tree.ui(ui) {
-                    self.state.set_status(message);
+                let (message, actions) = self.object_tree.ui(ctx, ui);
+                if let Some(message) = message {
+                    if !message.is_empty() {
+                        self.last_tree_status = message.clone();
+                        self.state.set_status(message);
+                    }
+                }
+                self.handle_tree_actions(actions);
+                // Always show last tree status hint at the bottom of the panel.
+                if !self.last_tree_status.is_empty() {
+                    ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
+                        ui.label(
+                            RichText::new(&self.last_tree_status)
+                                .small()
+                                .color(Color32::GRAY),
+                        );
+                    });
                 }
             });
+    }
+
+    fn handle_tree_actions(&mut self, actions: Vec<ObjectTreeAction>) {
+        for action in actions {
+            match action {
+                ObjectTreeAction::OpenTableData {
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                } => {
+                    self.state.set_status(format!(
+                        "Open table {}.{}{} ({})",
+                        schema.as_deref().unwrap_or(""),
+                        database.as_deref().unwrap_or(""),
+                        table,
+                        connection_id
+                    ));
+                }
+                ObjectTreeAction::OpenQuery {
+                    connection_id,
+                    database,
+                    schema,
+                } => {
+                    self.query_editor
+                        .new_query_with_connection(connection_id);
+                    self.state.set_status(format!(
+                        "New query on {} (db={:?}, schema={:?})",
+                        connection_id, database, schema
+                    ));
+                }
+                ObjectTreeAction::ViewKey {
+                    connection_id,
+                    database,
+                    key,
+                } => {
+                    self.state.set_status(format!(
+                        "View Redis key {key} (db={:?}, conn={})",
+                        database, connection_id
+                    ));
+                }
+                ObjectTreeAction::ViewStructure {
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                } => {
+                    self.state.set_status(format!(
+                        "View structure {}.{}{} ({})",
+                        schema.as_deref().unwrap_or(""),
+                        database.as_deref().unwrap_or(""),
+                        table,
+                        connection_id
+                    ));
+                }
+                ObjectTreeAction::EditConnection(id) => {
+                    self.state
+                        .set_status(format!("Edit connection: {}", id));
+                }
+                ObjectTreeAction::DeleteConnection(id) => {
+                    self.state
+                        .set_status(format!("Delete connection: {}", id));
+                }
+            }
+        }
     }
 
     fn bottom_status(&mut self, ctx: &Context) {
