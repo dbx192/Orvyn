@@ -1,11 +1,16 @@
 use crate::ui::{
     connection_manager::ConnectionManagerUi,
+    object_tree::ObjectTree,
+    query_editor::QueryEditor,
     result_grid::ResultSetGrid,
     samples::{sample_result_set, sample_table_columns},
     state::{AppState, TaskStatus, UiError, WorkspaceTabKind},
     table_editor::TableEditor,
 };
-use app_core::{connection::ConnectionManager, query::QueryService};
+use app_core::{
+    connection::ConnectionManager, metadata::MetadataService, query::QueryService,
+    session::SessionManager,
+};
 use db_common::dialect::BacktickDialect;
 use eframe::egui::{
     Align, Button, CentralPanel, Context, Layout, RichText, ScrollArea, SidePanel, TopBottomPanel,
@@ -16,7 +21,10 @@ use tokio::runtime::Handle;
 pub struct DesktopApp {
     app_name: String,
     connection_manager_ui: ConnectionManagerUi,
-    _query_service: QueryService,
+    object_tree: ObjectTree,
+    query_editor: QueryEditor,
+    _metadata_service: MetadataService,
+    _session_manager: SessionManager,
     state: AppState,
     result_grid: ResultSetGrid,
     table_editor: TableEditor,
@@ -26,13 +34,18 @@ impl DesktopApp {
     pub fn new(
         app_name: String,
         connection_manager: ConnectionManager,
+        metadata_service: MetadataService,
+        session_manager: SessionManager,
         query_service: QueryService,
         runtime: Handle,
     ) -> Self {
         Self {
             app_name,
-            connection_manager_ui: ConnectionManagerUi::new(connection_manager, runtime),
-            _query_service: query_service,
+            connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), runtime.clone()),
+            object_tree: ObjectTree::new(metadata_service.clone(), session_manager.clone(), runtime.clone()),
+            query_editor: QueryEditor::new(query_service, connection_manager, runtime),
+            _metadata_service: metadata_service,
+            _session_manager: session_manager,
             state: AppState::with_sample_workspace(),
             result_grid: ResultSetGrid::new(sample_result_set()),
             table_editor: TableEditor::new(
@@ -53,11 +66,9 @@ impl eframe::App for DesktopApp {
         self.bottom_status(ctx);
         self.error_window(ctx);
 
-        CentralPanel::default().show(ctx, |ui| {
-            self.workspace_tabs(ui);
-            ui.separator();
-            self.active_workspace(ui);
-        });
+        if let Some(message) = self.query_editor.ui(ctx) {
+            self.state.set_status(message);
+        }
     }
 }
 
@@ -73,10 +84,8 @@ impl DesktopApp {
                     self.state.set_status("New connection editor opened");
                 }
                 if ui.button("New Query").clicked() {
-                    let tab = crate::ui::state::WorkspaceTab::new("Query", WorkspaceTabKind::Query);
-                    self.state.active_tab = Some(tab.id);
-                    self.state.tabs.push(tab);
-                    self.state.set_status("Query tab opened");
+                    self.query_editor.new_query();
+                    self.state.set_status("New query tab opened");
                 }
                 if ui.button("Refresh").clicked() {
                     self.state.set_status("Refresh requested");
@@ -101,70 +110,10 @@ impl DesktopApp {
             .default_width(260.0)
             .width_range(200.0..=420.0)
             .show(ctx, |ui| {
-                if let Some(message) = self.connection_manager_ui.ui(ui) {
+                if let Some(message) = self.object_tree.ui(ui) {
                     self.state.set_status(message);
                 }
             });
-    }
-
-    fn workspace_tabs(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui| {
-            let mut close_tab = None;
-            for tab in &self.state.tabs {
-                let selected = self.state.active_tab == Some(tab.id);
-                let title = if tab.dirty {
-                    format!("{} *", tab.title)
-                } else {
-                    tab.title.clone()
-                };
-
-                if ui.selectable_label(selected, title).clicked() {
-                    self.state.active_tab = Some(tab.id);
-                }
-                if ui.small_button("x").clicked() {
-                    close_tab = Some(tab.id);
-                }
-            }
-
-            if let Some(tab_id) = close_tab {
-                self.state.tabs.retain(|tab| tab.id != tab_id);
-                if self.state.active_tab == Some(tab_id) {
-                    self.state.active_tab = self.state.tabs.first().map(|tab| tab.id);
-                }
-            }
-        });
-    }
-
-    fn active_workspace(&mut self, ui: &mut Ui) {
-        let Some(tab) = self.state.active_tab().cloned() else {
-            ui.centered_and_justified(|ui| {
-                ui.label("No tab open");
-            });
-            return;
-        };
-
-        let message = match tab.kind {
-            WorkspaceTabKind::Query => {
-                ui.heading("SQL Query");
-                ui.add_space(6.0);
-                ui.label("Query editor wiring will use app-core::query::QueryService.");
-                None
-            }
-            WorkspaceTabKind::TableData => {
-                ui.heading("Table Data");
-                ui.add_space(6.0);
-                self.table_editor.ui(ui)
-            }
-            WorkspaceTabKind::ResultSet => {
-                ui.heading("Query Result");
-                ui.add_space(6.0);
-                self.result_grid.ui(ui)
-            }
-        };
-
-        if let Some(message) = message {
-            self.state.set_status(message);
-        }
     }
 
     fn bottom_status(&mut self, ctx: &Context) {

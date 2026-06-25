@@ -7,7 +7,6 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio::{sync::RwLock, task::AbortHandle, time::Duration};
 use tracing::{info, instrument};
 
-#[derive(Clone)]
 pub struct TaskManager {
     tasks: Arc<RwLock<BTreeMap<TaskId, TaskInfo>>>,
     running_tasks: Arc<RwLock<BTreeMap<TaskId, AbortHandle>>>,
