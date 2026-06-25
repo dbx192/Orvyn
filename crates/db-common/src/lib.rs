@@ -45,8 +45,8 @@ pub use session::{
     SessionInfo, SessionState, TaskInfo, TaskKind, TaskProgress, TaskStatus,
 };
 pub use traits::{
-    ConnectionTester, DatabaseObject, DatabaseObjectKind, MetadataNode, MetadataNodeKind,
-    MetadataPath, RedisConnector, RedisDatabase, RedisKeyInfo, RedisKeyScan, RedisMetadataReader,
-    RedisValue, RelationalConnector, RelationalMetadataReader, RelationalQueryExecutor,
-    TableColumn, TableIndex,
+    ConnectionTester, DatabaseFunction, DatabaseObject, DatabaseObjectKind, MetadataNode,
+    MetadataNodeKind, MetadataPath, RedisConnector, RedisDatabase, RedisKeyInfo, RedisKeyScan,
+    RedisMetadataReader, RedisValue, RelationalConnector, RelationalMetadataReader,
+    RelationalQueryExecutor, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };

@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
-    DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
-    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableIndex,
+    DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
+    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey,
+    TableIndex, TableTrigger,
 };
 use std::{
     collections::BTreeMap,
@@ -288,6 +289,61 @@ impl RelationalMetadataReader for DuckDbMetadataReader {
                     .with_detail(error.to_string())
             })?
     }
+
+    async fn list_foreign_keys(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableForeignKey>> {
+        let path = PathBuf::from(profile.required_file_path()?);
+        let schema = schema.unwrap_or("main").to_string();
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || duckdb_foreign_keys(path, &schema, &table))
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Internal, "DuckDB foreign keys task failed")
+                    .with_detail(error.to_string())
+            })?
+    }
+
+    async fn list_functions(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        _database: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<Vec<DatabaseFunction>> {
+        let path = PathBuf::from(profile.required_file_path()?);
+        let schema = schema.unwrap_or("main").to_string();
+        tokio::task::spawn_blocking(move || duckdb_functions(path, &schema))
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Internal, "DuckDB functions task failed")
+                    .with_detail(error.to_string())
+            })?
+    }
+
+    async fn get_create_table_sql(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<String> {
+        let path = PathBuf::from(profile.required_file_path()?);
+        let schema = schema.unwrap_or("main").to_string();
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || duckdb_create_table_sql(path, &schema, &table))
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Internal, "DuckDB create table task failed")
+                    .with_detail(error.to_string())
+            })?
+    }
 }
 
 #[async_trait]
@@ -501,6 +557,138 @@ fn duckdb_indexes(path: PathBuf, schema: &str, table: &str) -> Result<Vec<TableI
         indexes.push(row.map_err(duckdb_query_error)?);
     }
     Ok(indexes)
+}
+
+fn duckdb_foreign_keys(path: PathBuf, schema: &str, table: &str) -> Result<Vec<TableForeignKey>> {
+    let conn = duckdb_connection(path)?;
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT constraint_name, column_name, foreign_table_name, foreign_column_name \
+         FROM duckdb_constraints() \
+         WHERE schema_name = ?1 AND table_name = ?2 AND constraint_type = 'FOREIGN KEY' \
+         ORDER BY constraint_name, column_index",
+    ) else {
+        return Ok(Vec::new());
+    };
+    let rows = stmt
+        .query_map([schema, table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap_or_else(|_| duckdb::Result::Ok(Vec::new().into_iter()));
+
+    let mut fks: Vec<TableForeignKey> = Vec::new();
+    for row in rows {
+        let (name, col, ref_table, ref_col) = row.map_err(duckdb_query_error)?;
+        if let Some(fk) = fks.iter_mut().find(|fk| fk.name == name) {
+            fk.columns.push(col);
+            fk.referenced_columns.push(ref_col);
+        } else {
+            fks.push(TableForeignKey {
+                name,
+                columns: vec![col],
+                referenced_table: ref_table,
+                referenced_columns: vec![ref_col],
+                on_update: None,
+                on_delete: None,
+            });
+        }
+    }
+    Ok(fks)
+}
+
+fn duckdb_functions(path: PathBuf, schema: &str) -> Result<Vec<DatabaseFunction>> {
+    let conn = duckdb_connection(path)?;
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT function_name, return_type, schema_name \
+         FROM duckdb_functions() \
+         WHERE schema_name = ?1 \
+         ORDER BY function_name",
+    ) else {
+        return Ok(Vec::new());
+    };
+    let rows = stmt
+        .query_map([schema], |row| {
+            Ok(DatabaseFunction {
+                name: row.get::<_, String>(0)?,
+                return_type: row.get::<_, Option<String>>(1)?,
+                language: None,
+                kind: "FUNCTION".to_string(),
+            })
+        })
+        .unwrap_or_else(|_| duckdb::Result::Ok(Vec::new().into_iter()));
+
+    let mut functions = Vec::new();
+    for row in rows {
+        functions.push(row.map_err(duckdb_query_error)?);
+    }
+    Ok(functions)
+}
+
+fn duckdb_create_table_sql(path: PathBuf, schema: &str, table: &str) -> Result<String> {
+    let conn = duckdb_connection(path)?;
+
+    let mut col_stmt = conn
+        .prepare(
+            "SELECT column_name, data_type, is_nullable, column_default \
+             FROM information_schema.columns \
+             WHERE table_schema = ?1 AND table_name = ?2 \
+             ORDER BY ordinal_position",
+        )
+        .map_err(duckdb_query_error)?;
+    let col_rows = col_stmt
+        .query_map([schema, table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(duckdb_query_error)?;
+
+    let mut col_defs: Vec<String> = Vec::new();
+    let mut table_exists = false;
+    for row in col_rows {
+        table_exists = true;
+        let (name, dtype, nullable, default) = row.map_err(duckdb_query_error)?;
+        let mut col_def = format!("    \"{}\" {}", name, dtype);
+        if let Some(default_value) = default {
+            col_def.push_str(&format!(" DEFAULT {}", default_value));
+        }
+        if !nullable.eq_ignore_ascii_case("YES") {
+            col_def.push_str(" NOT NULL");
+        }
+        col_defs.push(col_def);
+    }
+
+    if !table_exists {
+        return Err(AppError::new(
+            ErrorKind::NotFound,
+            format!("table {}.{} not found", schema, table),
+        ));
+    }
+
+    let mut ddl = format!("CREATE TABLE \"{}\".\"{}\" (\n", schema, table);
+    ddl.push_str(&col_defs.join(",\n"));
+    ddl.push_str("\n);");
+
+    let idx_result: Result<Vec<TableIndex>> = duckdb_indexes(path.clone(), schema, table);
+    if let Ok(indexes) = idx_result {
+        for idx in &indexes {
+            let cols: Vec<String> = idx.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+            let unique = if idx.unique { " UNIQUE" } else { "" };
+            ddl.push_str(&format!(
+                "\nCREATE{} INDEX \"{}\" ON \"{}\".\"{}\" ({});",
+                unique, idx.name, schema, table, cols.join(", ")
+            ));
+        }
+    }
+
+    Ok(ddl)
 }
 
 fn duckdb_connection(path: PathBuf) -> Result<duckdb::Connection> {

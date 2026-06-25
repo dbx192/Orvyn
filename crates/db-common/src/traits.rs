@@ -234,6 +234,53 @@ pub trait RelationalMetadataReader: Send + Sync {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableIndex>>;
+
+    async fn list_foreign_keys(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableForeignKey>> {
+        let _ = (profile, password, database, schema, table);
+        Ok(Vec::new())
+    }
+
+    async fn list_triggers(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableTrigger>> {
+        let _ = (profile, password, database, schema, table);
+        Ok(Vec::new())
+    }
+
+    async fn list_functions(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<Vec<DatabaseFunction>> {
+        let _ = (profile, password, database, schema);
+        Ok(Vec::new())
+    }
+
+    async fn get_create_table_sql(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<String> {
+        let _ = (profile, password, database, schema, table);
+        Ok(String::new())
+    }
 }
 
 #[async_trait]

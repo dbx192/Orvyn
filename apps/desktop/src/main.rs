@@ -1,6 +1,9 @@
 mod ui;
 
-use app_core::{connection::ConnectionManager, query::QueryService, storage::FileConnectionProfileStore};
+use app_core::{
+    connection::ConnectionManager, metadata::MetadataService, query::QueryService,
+    session::SessionManager, storage::FileConnectionProfileStore,
+};
 use eframe::NativeOptions;
 use secure_store::EncryptedFileStore;
 use std::{path::PathBuf, sync::Arc};
@@ -15,6 +18,8 @@ fn main() -> eframe::Result<()> {
         Runtime::new().expect("failed to create background async runtime for desktop app"),
     );
     let connection_manager = bootstrap_connection_manager(default_config_dir());
+    let session_manager = SessionManager::with_default_testers(connection_manager.clone());
+    let metadata_service = MetadataService::with_default_readers(connection_manager.clone());
     let query_service = QueryService::with_default_executors(connection_manager.clone());
     let native_options = NativeOptions::default();
     let runtime_handle = runtime.handle().clone();
@@ -26,6 +31,8 @@ fn main() -> eframe::Result<()> {
             Box::new(DesktopApp::new(
                 app_name.to_string(),
                 connection_manager,
+                metadata_service,
+                session_manager,
                 query_service,
                 runtime_handle.clone(),
             ))

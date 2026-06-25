@@ -6,9 +6,9 @@
 use crate::connection::ConnectionManager;
 use crate::task::TaskManager;
 use db_common::{
-    unsupported_kind, AppError, ConnectionId, DataSourceKind, DatabaseObject, ErrorKind,
-    MetadataNode, MetadataNodeKind, MetadataPath, RedisKeyInfo, RedisMetadataReader,
-    RelationalMetadataReader, Result, TableColumn, TableIndex,
+    unsupported_kind, AppError, ConnectionId, DataSourceKind, DatabaseFunction, DatabaseObject,
+    ErrorKind, MetadataNode, MetadataNodeKind, MetadataPath, RedisKeyInfo, RedisMetadataReader,
+    RelationalMetadataReader, Result, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::instrument;
@@ -144,6 +144,77 @@ impl MetadataService {
             .await
     }
 
+    pub async fn table_foreign_keys(
+        &self,
+        connection_id: ConnectionId,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+        runtime_password: Option<&str>,
+    ) -> Result<Vec<TableForeignKey>> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.relational_reader(profile.kind)?;
+        reader
+            .list_foreign_keys(&profile, password.as_deref(), database, schema, table)
+            .await
+    }
+
+    pub async fn table_triggers(
+        &self,
+        connection_id: ConnectionId,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+        runtime_password: Option<&str>,
+    ) -> Result<Vec<TableTrigger>> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.relational_reader(profile.kind)?;
+        reader
+            .list_triggers(&profile, password.as_deref(), database, schema, table)
+            .await
+    }
+
+    pub async fn schema_functions(
+        &self,
+        connection_id: ConnectionId,
+        database: Option<&str>,
+        schema: Option<&str>,
+        runtime_password: Option<&str>,
+    ) -> Result<Vec<DatabaseFunction>> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.relational_reader(profile.kind)?;
+        reader
+            .list_functions(&profile, password.as_deref(), database, schema)
+            .await
+    }
+
+    pub async fn get_create_table_sql(
+        &self,
+        connection_id: ConnectionId,
+        database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+        runtime_password: Option<&str>,
+    ) -> Result<String> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.relational_reader(profile.kind)?;
+        reader
+            .get_create_table_sql(&profile, password.as_deref(), database, schema, table)
+            .await
+    }
+
     pub async fn scan_redis_keys(
         &self,
         connection_id: ConnectionId,
@@ -200,6 +271,7 @@ impl MetadataService {
             MetadataNodeKind::Schema => Ok(vec![
                 folder_node(profile.id, path, MetadataNodeKind::TablesFolder, "Tables"),
                 folder_node(profile.id, path, MetadataNodeKind::ViewsFolder, "Views"),
+                folder_node(profile.id, path, MetadataNodeKind::FunctionsFolder, "Functions"),
             ]),
             MetadataNodeKind::TablesFolder => {
                 let tables = reader
@@ -236,6 +308,13 @@ impl MetadataService {
             MetadataNodeKind::Table => Ok(vec![
                 folder_node(profile.id, path, MetadataNodeKind::ColumnsFolder, "Columns"),
                 folder_node(profile.id, path, MetadataNodeKind::IndexesFolder, "Indexes"),
+                folder_node(
+                    profile.id,
+                    path,
+                    MetadataNodeKind::ForeignKeysFolder,
+                    "Foreign Keys",
+                ),
+                folder_node(profile.id, path, MetadataNodeKind::TriggersFolder, "Triggers"),
             ]),
             MetadataNodeKind::ColumnsFolder => {
                 let table = required_object(path)?;
@@ -262,6 +341,43 @@ impl MetadataService {
                     )
                     .await?;
                 Ok(index_nodes(profile.id, path, indexes))
+            }
+            MetadataNodeKind::ForeignKeysFolder => {
+                let table = required_object(path)?;
+                let fks = reader
+                    .list_foreign_keys(
+                        profile,
+                        password,
+                        path.database.as_deref(),
+                        path.schema.as_deref(),
+                        table,
+                    )
+                    .await?;
+                Ok(foreign_key_nodes(profile.id, path, fks))
+            }
+            MetadataNodeKind::TriggersFolder => {
+                let table = required_object(path)?;
+                let triggers = reader
+                    .list_triggers(
+                        profile,
+                        password,
+                        path.database.as_deref(),
+                        path.schema.as_deref(),
+                        table,
+                    )
+                    .await?;
+                Ok(trigger_nodes(profile.id, path, triggers))
+            }
+            MetadataNodeKind::FunctionsFolder => {
+                let functions = reader
+                    .list_functions(
+                        profile,
+                        password,
+                        path.database.as_deref(),
+                        path.schema.as_deref(),
+                    )
+                    .await?;
+                Ok(function_nodes(profile.id, path, functions))
             }
             _ => Ok(Vec::new()),
         }
@@ -431,6 +547,74 @@ fn index_nodes(
                     .with_extra(index.name.clone()),
                 index.name,
                 MetadataNodeKind::Index,
+            )
+            .leaf(true)
+            .detail(detail)
+        })
+        .collect()
+}
+
+fn foreign_key_nodes(
+    connection_id: ConnectionId,
+    parent: &MetadataPath,
+    fks: Vec<TableForeignKey>,
+) -> Vec<MetadataNode> {
+    fks.into_iter()
+        .map(|fk| {
+            let detail = format!("→ {}", fk.referenced_table);
+            MetadataNode::new(
+                inherit_parent(connection_id, parent)
+                    .child(MetadataNodeKind::ForeignKey)
+                    .with_extra(fk.name.clone()),
+                fk.name,
+                MetadataNodeKind::ForeignKey,
+            )
+            .leaf(true)
+            .detail(detail)
+        })
+        .collect()
+}
+
+fn trigger_nodes(
+    connection_id: ConnectionId,
+    parent: &MetadataPath,
+    triggers: Vec<TableTrigger>,
+) -> Vec<MetadataNode> {
+    triggers
+        .into_iter()
+        .map(|trigger| {
+            let detail = format!("{} {}", trigger.timing, trigger.event);
+            MetadataNode::new(
+                inherit_parent(connection_id, parent)
+                    .child(MetadataNodeKind::Trigger)
+                    .with_extra(trigger.name.clone()),
+                trigger.name,
+                MetadataNodeKind::Trigger,
+            )
+            .leaf(true)
+            .detail(detail)
+        })
+        .collect()
+}
+
+fn function_nodes(
+    connection_id: ConnectionId,
+    parent: &MetadataPath,
+    functions: Vec<DatabaseFunction>,
+) -> Vec<MetadataNode> {
+    functions
+        .into_iter()
+        .map(|func| {
+            let detail = func
+                .return_type
+                .clone()
+                .unwrap_or_else(|| func.kind.clone());
+            MetadataNode::new(
+                inherit_parent(connection_id, parent)
+                    .child(MetadataNodeKind::Function)
+                    .with_extra(func.name.clone()),
+                func.name,
+                MetadataNodeKind::Function,
             )
             .leaf(true)
             .detail(detail)

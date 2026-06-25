@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use db_common::{
     is_result_set_statement, redact_connection_url, AppError, CellValue, Column, ConnectionId,
     ConnectionPoolConfig, ConnectionPoolStats, ConnectionProfile, ConnectionTestReport,
-    ConnectionTester, DataSourceKind, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType,
-    QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
-    TableIndex,
+    ConnectionTester, DataSourceKind, DatabaseFunction, DatabaseObject, DatabaseObjectKind,
+    ErrorKind, LogicalType, QueryResult, RelationalMetadataReader, RelationalQueryExecutor,
+    Result, Row, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
 use sqlx::{mysql::MySqlPoolOptions, Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
@@ -236,6 +236,143 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         pool.close().await;
 
         Ok(group_mysql_indexes(rows))
+    }
+
+    async fn list_foreign_keys(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableForeignKey>> {
+        let database = database.or(profile.database.as_deref()).ok_or_else(|| {
+            AppError::new(
+                ErrorKind::Validation,
+                "database is required for MySQL foreign keys",
+            )
+        })?;
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let rows = sqlx::query(
+            "SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME, \
+                    kcu.REFERENCED_COLUMN_NAME, rc.UPDATE_RULE, rc.DELETE_RULE \
+             FROM information_schema.KEY_COLUMN_USAGE kcu \
+             JOIN information_schema.REFERENTIAL_CONSTRAINTS rc \
+               ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME \
+              AND kcu.TABLE_SCHEMA = rc.CONSTRAINT_SCHEMA \
+             WHERE kcu.TABLE_SCHEMA = ? AND kcu.TABLE_NAME = ? \
+               AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&pool)
+        .await
+        .map_err(mysql_query_error)?;
+        pool.close().await;
+
+        Ok(group_mysql_foreign_keys(rows))
+    }
+
+    async fn list_triggers(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableTrigger>> {
+        let database = database.or(profile.database.as_deref()).ok_or_else(|| {
+            AppError::new(
+                ErrorKind::Validation,
+                "database is required for MySQL triggers",
+            )
+        })?;
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let rows = sqlx::query(
+            "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \
+             FROM information_schema.TRIGGERS \
+             WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ? \
+             ORDER BY TRIGGER_NAME",
+        )
+        .bind(database)
+        .bind(table)
+        .fetch_all(&pool)
+        .await
+        .map_err(mysql_query_error)?;
+        pool.close().await;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| TableTrigger {
+                name: row.get("TRIGGER_NAME"),
+                event: row.get("EVENT_MANIPULATION"),
+                timing: row.get("ACTION_TIMING"),
+                statement: row.get("ACTION_STATEMENT"),
+            })
+            .collect())
+    }
+
+    async fn list_functions(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        _schema: Option<&str>,
+    ) -> Result<Vec<DatabaseFunction>> {
+        let database = database.or(profile.database.as_deref()).ok_or_else(|| {
+            AppError::new(
+                ErrorKind::Validation,
+                "database is required for MySQL functions",
+            )
+        })?;
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let rows = sqlx::query(
+            "SELECT ROUTINE_NAME, ROUTINE_TYPE, DTD_IDENTIFIER, EXTERNAL_LANGUAGE \
+             FROM information_schema.ROUTINES \
+             WHERE ROUTINE_SCHEMA = ? \
+             ORDER BY ROUTINE_NAME",
+        )
+        .bind(database)
+        .fetch_all(&pool)
+        .await
+        .map_err(mysql_query_error)?;
+        pool.close().await;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| DatabaseFunction {
+                name: row.get("ROUTINE_NAME"),
+                return_type: row.get("DTD_IDENTIFIER"),
+                language: row.get("EXTERNAL_LANGUAGE"),
+                kind: row.get("ROUTINE_TYPE"),
+            })
+            .collect())
+    }
+
+    async fn get_create_table_sql(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<String> {
+        let database = database.or(profile.database.as_deref()).ok_or_else(|| {
+            AppError::new(
+                ErrorKind::Validation,
+                "database is required for MySQL create table",
+            )
+        })?;
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let sql = format!("SHOW CREATE TABLE `{}`.`{}`", database, table);
+        let row = sqlx::query(&sql)
+            .fetch_one(&pool)
+            .await
+            .map_err(mysql_query_error)?;
+        pool.close().await;
+
+        Ok(row.get(1))
     }
 }
 
@@ -493,4 +630,34 @@ fn group_mysql_indexes(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<TableIndex> {
     }
 
     indexes
+}
+
+fn group_mysql_foreign_keys(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<TableForeignKey> {
+    let mut fks: Vec<TableForeignKey> = Vec::new();
+
+    for row in rows {
+        let name: String = row.get("CONSTRAINT_NAME");
+        let column: String = row.get("COLUMN_NAME");
+        let ref_table: String = row.get("REFERENCED_TABLE_NAME");
+        let ref_column: String = row.get("REFERENCED_COLUMN_NAME");
+        let on_update: Option<String> = row.get("UPDATE_RULE");
+        let on_delete: Option<String> = row.get("DELETE_RULE");
+
+        if let Some(fk) = fks.iter_mut().find(|fk| fk.name == name) {
+            fk.columns.push(column);
+            fk.referenced_columns.push(ref_column);
+            continue;
+        }
+
+        fks.push(TableForeignKey {
+            name,
+            columns: vec![column],
+            referenced_table: ref_table,
+            referenced_columns: vec![ref_column],
+            on_update,
+            on_delete,
+        });
+    }
+
+    fks
 }

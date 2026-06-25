@@ -5,7 +5,8 @@ use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
     DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
-    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableIndex,
+    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey,
+    TableIndex, TableTrigger,
 };
 use std::{
     collections::BTreeMap,
@@ -285,6 +286,60 @@ impl RelationalMetadataReader for SqliteMetadataReader {
                     .with_detail(error.to_string())
             })?
     }
+
+    async fn list_foreign_keys(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        _database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableForeignKey>> {
+        let path = PathBuf::from(profile.required_file_path()?);
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || sqlite_foreign_keys(path, &table))
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Internal, "SQLite foreign keys task failed")
+                    .with_detail(error.to_string())
+            })?
+    }
+
+    async fn list_triggers(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        _database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableTrigger>> {
+        let path = PathBuf::from(profile.required_file_path()?);
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || sqlite_triggers(path, &table))
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Internal, "SQLite triggers task failed")
+                    .with_detail(error.to_string())
+            })?
+    }
+
+    async fn get_create_table_sql(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        _database: Option<&str>,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> Result<String> {
+        let path = PathBuf::from(profile.required_file_path()?);
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || sqlite_create_table_sql(path, &table))
+            .await
+            .map_err(|error| {
+                AppError::new(ErrorKind::Internal, "SQLite create table task failed")
+                    .with_detail(error.to_string())
+            })?
+    }
 }
 
 #[async_trait]
@@ -476,6 +531,144 @@ fn sqlite_index_columns(conn: &rusqlite::Connection, index_name: &str) -> Result
         columns.push(row.map_err(sqlite_query_error)?);
     }
     Ok(columns)
+}
+
+fn sqlite_foreign_keys(path: PathBuf, table: &str) -> Result<Vec<TableForeignKey>> {
+    let conn = sqlite_connection(path)?;
+    let sql = format!("PRAGMA foreign_key_list({})", quote_sqlite_identifier(table));
+    let mut stmt = conn.prepare(&sql).map_err(sqlite_query_error)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(sqlite_query_error)?;
+
+    let mut fks: Vec<TableForeignKey> = Vec::new();
+    for row in rows {
+        let (id, ref_table, from, to, on_update, on_delete) = row.map_err(sqlite_query_error)?;
+        let fk_name = format!("fk_{id}");
+        if let Some(fk) = fks.iter_mut().find(|fk| fk.name == fk_name) {
+            fk.columns.push(from);
+            fk.referenced_columns.push(to);
+        } else {
+            fks.push(TableForeignKey {
+                name: fk_name,
+                columns: vec![from],
+                referenced_table: ref_table,
+                referenced_columns: vec![to],
+                on_update: if on_update == "NO ACTION" { None } else { Some(on_update) },
+                on_delete: if on_delete == "NO ACTION" { None } else { Some(on_delete) },
+            });
+        }
+    }
+    Ok(fks)
+}
+
+fn sqlite_triggers(path: PathBuf, table: &str) -> Result<Vec<TableTrigger>> {
+    let conn = sqlite_connection(path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, sql FROM sqlite_master \
+             WHERE type = 'trigger' AND tbl_name = ?1 \
+             ORDER BY name",
+        )
+        .map_err(sqlite_query_error)?;
+    let rows = stmt
+        .query_map([table], |row| {
+            let name: String = row.get(0)?;
+            let sql: Option<String> = row.get(1)?;
+            Ok((name, sql))
+        })
+        .map_err(sqlite_query_error)?;
+
+    let mut triggers = Vec::new();
+    for row in rows {
+        let (name, sql) = row.map_err(sqlite_query_error)?;
+        let (timing, event) = parse_sqlite_trigger_sql(sql.as_deref().unwrap_or_default());
+        triggers.push(TableTrigger {
+            name,
+            event,
+            timing,
+            statement: sql,
+        });
+    }
+    Ok(triggers)
+}
+
+fn parse_sqlite_trigger_sql(sql: &str) -> (String, String) {
+    let upper = sql.to_uppercase();
+    let timing = if upper.contains(" BEFORE ") {
+        "BEFORE"
+    } else if upper.contains(" AFTER ") {
+        "AFTER"
+    } else if upper.contains(" INSTEAD OF ") {
+        "INSTEAD OF"
+    } else {
+        ""
+    };
+    let event = if upper.contains(" INSERT ") {
+        "INSERT"
+    } else if upper.contains(" UPDATE ") {
+        "UPDATE"
+    } else if upper.contains(" DELETE ") {
+        "DELETE"
+    } else {
+        ""
+    };
+    (timing.to_string(), event.to_string())
+}
+
+fn sqlite_create_table_sql(path: PathBuf, table: &str) -> Result<String> {
+    let conn = sqlite_connection(path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT sql FROM sqlite_master \
+             WHERE type = 'table' AND name = ?1",
+        )
+        .map_err(sqlite_query_error)?;
+    let mut rows = stmt.query([table]).map_err(sqlite_query_error)?;
+
+    if let Some(row) = rows.next().map_err(sqlite_query_error)? {
+        let ddl: String = row.get(0).map_err(sqlite_query_error)?;
+        let mut result = ddl;
+        if !result.ends_with(';') {
+            result.push(';');
+        }
+
+        let mut index_stmt = conn
+            .prepare(
+                "SELECT sql FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = ?1 \
+                   AND name NOT LIKE 'sqlite_%' \
+                   AND sql IS NOT NULL \
+                 ORDER BY name",
+            )
+            .map_err(sqlite_query_error)?;
+        let index_rows = index_stmt
+            .query_map([table], |row| row.get::<_, String>(0))
+            .map_err(sqlite_query_error)?;
+
+        for index_row in index_rows {
+            let idx_sql = index_row.map_err(sqlite_query_error)?;
+            result.push('\n');
+            result.push_str(&idx_sql);
+            result.push(';');
+        }
+
+        Ok(result)
+    } else {
+        Err(AppError::new(
+            ErrorKind::NotFound,
+            format!("table {} not found", table),
+        ))
+    }
 }
 
 fn sqlite_connection(path: PathBuf) -> Result<rusqlite::Connection> {

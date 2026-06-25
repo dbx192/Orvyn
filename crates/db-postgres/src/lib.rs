@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
-    DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
-    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableIndex,
+    DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
+    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey,
+    TableIndex, TableTrigger,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{Mutex, Semaphore};
@@ -360,6 +361,133 @@ impl RelationalMetadataReader for PostgresMetadataReader {
             })
             .collect())
     }
+
+    async fn list_foreign_keys(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableForeignKey>> {
+        let schema = schema.unwrap_or("public");
+        let client = postgres_client(profile, password).await?;
+        let rows = client
+            .query(
+                "SELECT tc.constraint_name, kcu.column_name, \
+                        ccu.table_name AS referenced_table, \
+                        ccu.column_name AS referenced_column, \
+                        rc.update_rule, rc.delete_rule \
+                 FROM information_schema.table_constraints tc \
+                 JOIN information_schema.key_column_usage kcu \
+                   ON tc.constraint_name = kcu.constraint_name \
+                  AND tc.table_schema = kcu.table_schema \
+                 JOIN information_schema.constraint_column_usage ccu \
+                   ON tc.constraint_name = ccu.constraint_name \
+                  AND tc.table_schema = ccu.table_schema \
+                 JOIN information_schema.referential_constraints rc \
+                   ON tc.constraint_name = rc.constraint_name \
+                  AND tc.table_schema = rc.constraint_schema \
+                 WHERE tc.constraint_type = 'FOREIGN KEY' \
+                   AND tc.table_schema = $1 AND tc.table_name = $2 \
+                 ORDER BY tc.constraint_name, kcu.ordinal_position",
+                &[&schema, &table],
+            )
+            .await
+            .map_err(query_error)?;
+
+        Ok(group_postgres_foreign_keys(rows))
+    }
+
+    async fn list_triggers(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableTrigger>> {
+        let schema = schema.unwrap_or("public");
+        let client = postgres_client(profile, password).await?;
+        let rows = client
+            .query(
+                "SELECT trigger_name, event_manipulation, action_timing, action_statement \
+                 FROM information_schema.triggers \
+                 WHERE trigger_schema = $1 AND event_object_table = $2 \
+                 ORDER BY trigger_name",
+                &[&schema, &table],
+            )
+            .await
+            .map_err(query_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| TableTrigger {
+                name: row.get(0),
+                event: row.get(1),
+                timing: row.get(2),
+                statement: row.get(3),
+            })
+            .collect())
+    }
+
+    async fn list_functions(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        _database: Option<&str>,
+        schema: Option<&str>,
+    ) -> Result<Vec<DatabaseFunction>> {
+        let schema = schema.unwrap_or("public");
+        let client = postgres_client(profile, password).await?;
+        let rows = client
+            .query(
+                "SELECT p.proname AS function_name, \
+                        pg_get_function_result(p.oid) AS return_type, \
+                        l.lanname AS language, \
+                        CASE p.prokind \
+                            WHEN 'f' THEN 'FUNCTION' \
+                            WHEN 'p' THEN 'PROCEDURE' \
+                            WHEN 'a' THEN 'AGGREGATE' \
+                            WHEN 'w' THEN 'WINDOW' \
+                            ELSE 'FUNCTION' \
+                        END AS kind \
+                 FROM pg_proc p \
+                 JOIN pg_namespace n ON p.pronamespace = n.oid \
+                 LEFT JOIN pg_language l ON p.prolang = l.oid \
+                 WHERE n.nspname = $1 \
+                   AND p.prokind IN ('f', 'p') \
+                 ORDER BY p.proname",
+                &[&schema],
+            )
+            .await
+            .map_err(query_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| DatabaseFunction {
+                name: row.get(0),
+                return_type: row.get(1),
+                language: row.get(2),
+                kind: row.get(3),
+            })
+            .collect())
+    }
+
+    async fn get_create_table_sql(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        _database: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<String> {
+        let schema = schema.unwrap_or("public");
+        let client = postgres_client(profile, password).await?;
+
+        let ddl = pg_get_create_table(&client, schema, table).await?;
+        Ok(ddl)
+    }
 }
 
 #[async_trait]
@@ -509,6 +637,175 @@ fn parse_postgres_index_columns(definition: &str) -> Vec<String> {
         .map(|column| column.trim().trim_matches('"').to_string())
         .filter(|column| !column.is_empty())
         .collect()
+}
+
+fn group_postgres_foreign_keys(rows: Vec<PgRow>) -> Vec<TableForeignKey> {
+    let mut fks: Vec<TableForeignKey> = Vec::new();
+
+    for row in rows {
+        let name: String = row.get(0);
+        let column: String = row.get(1);
+        let ref_table: String = row.get(2);
+        let ref_column: String = row.get(3);
+        let on_update: Option<String> = row.get(4);
+        let on_delete: Option<String> = row.get(5);
+
+        if let Some(fk) = fks.iter_mut().find(|fk| fk.name == name) {
+            fk.columns.push(column);
+            fk.referenced_columns.push(ref_column);
+            continue;
+        }
+
+        fks.push(TableForeignKey {
+            name,
+            columns: vec![column],
+            referenced_table: ref_table,
+            referenced_columns: vec![ref_column],
+            on_update,
+            on_delete,
+        });
+    }
+
+    fks
+}
+
+async fn pg_get_create_table(client: &Client, schema: &str, table: &str) -> Result<String> {
+    let mut ddl = String::new();
+
+    let col_rows = client
+        .query(
+            "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, \
+                    c.character_maximum_length, c.numeric_precision, c.numeric_scale, \
+                    c.datetime_precision, c.udt_name \
+             FROM information_schema.columns c \
+             WHERE c.table_schema = $1 AND c.table_name = $2 \
+             ORDER BY c.ordinal_position",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(query_error)?;
+
+    if col_rows.is_empty() {
+        return Err(AppError::new(
+            ErrorKind::NotFound,
+            format!("table {}.{} not found", schema, table),
+        ));
+    }
+
+    ddl.push_str(&format!("CREATE TABLE \"{}\".\"{}\" (\n", schema, table));
+
+    let mut col_defs: Vec<String> = Vec::new();
+    for row in &col_rows {
+        let col_name: String = row.get(0);
+        let data_type: String = row.get(1);
+        let is_nullable: String = row.get(2);
+        let default: Option<String> = row.get(3);
+
+        let mut col_def = format!("    \"{}\" {}", col_name, data_type);
+        if let Some(default_value) = default {
+            col_def.push_str(&format!(" DEFAULT {}", default_value));
+        }
+        if is_nullable == "NO" {
+            col_def.push_str(" NOT NULL");
+        }
+        col_defs.push(col_def);
+    }
+
+    let pk_rows = client
+        .query(
+            "SELECT kcu.constraint_name, kcu.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name \
+              AND tc.table_schema = kcu.table_schema \
+             WHERE tc.constraint_type = 'PRIMARY KEY' \
+               AND tc.table_schema = $1 AND tc.table_name = $2 \
+             ORDER BY tc.constraint_name, kcu.ordinal_position",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(query_error)?;
+
+    if !pk_rows.is_empty() {
+        let pk_name: String = pk_rows[0].get(0);
+        let pk_cols: Vec<String> = pk_rows.iter().map(|r| format!("\"{}\"", r.get::<_, String>(1))).collect();
+        col_defs.push(format!("    CONSTRAINT \"{}\" PRIMARY KEY ({})", pk_name, pk_cols.join(", ")));
+    }
+
+    let fk_rows = client
+        .query(
+            "SELECT tc.constraint_name, kcu.column_name, \
+                    ccu.table_name AS referenced_table, \
+                    ccu.column_name AS referenced_column, \
+                    rc.update_rule, rc.delete_rule \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name \
+              AND tc.table_schema = kcu.table_schema \
+             JOIN information_schema.constraint_column_usage ccu \
+               ON tc.constraint_name = ccu.constraint_name \
+              AND tc.table_schema = ccu.table_schema \
+             JOIN information_schema.referential_constraints rc \
+               ON tc.constraint_name = rc.constraint_name \
+              AND tc.table_schema = rc.constraint_schema \
+             WHERE tc.constraint_type = 'FOREIGN KEY' \
+               AND tc.table_schema = $1 AND tc.table_name = $2 \
+             ORDER BY tc.constraint_name, kcu.ordinal_position",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(query_error)?;
+
+    let fks = group_postgres_foreign_keys(fk_rows);
+    for fk in &fks {
+        let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+        let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("\"{}\"", c)).collect();
+        let mut fk_def = format!(
+            "    CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
+            fk.name,
+            cols.join(", "),
+            fk.referenced_table,
+            ref_cols.join(", ")
+        );
+        if let Some(on_del) = &fk.on_delete {
+            fk_def.push_str(&format!(" ON DELETE {}", on_del));
+        }
+        if let Some(on_upd) = &fk.on_update {
+            fk_def.push_str(&format!(" ON UPDATE {}", on_upd));
+        }
+        col_defs.push(fk_def);
+    }
+
+    ddl.push_str(&col_defs.join(",\n"));
+    ddl.push_str("\n);");
+
+    let idx_rows = client
+        .query(
+            "SELECT indexname, indexdef FROM pg_indexes \
+             WHERE schemaname = $1 AND tablename = $2 \
+               AND indexname NOT IN ( \
+                   SELECT kcu.constraint_name \
+                   FROM information_schema.table_constraints tc \
+                   JOIN information_schema.key_column_usage kcu \
+                     ON tc.constraint_name = kcu.constraint_name \
+                    AND tc.table_schema = kcu.table_schema \
+                   WHERE tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY') \
+                     AND tc.table_schema = $1 AND tc.table_name = $2 \
+               ) \
+             ORDER BY indexname",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(query_error)?;
+
+    for row in idx_rows {
+        let indexdef: String = row.get(1);
+        ddl.push_str("\n");
+        ddl.push_str(&indexdef);
+        ddl.push(';');
+    }
+
+    Ok(ddl)
 }
 
 fn postgres_rows_to_query_result(statement: &str, rows: Vec<PgRow>) -> QueryResult {
