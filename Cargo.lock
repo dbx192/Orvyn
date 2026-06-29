@@ -1491,8 +1491,10 @@ name = "db-redis"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "db-common",
  "redis",
+ "serde_json",
  "urlencoding",
 ]
 
@@ -2711,6 +2713,7 @@ dependencies = [
  "db-common",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

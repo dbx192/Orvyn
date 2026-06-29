@@ -69,6 +69,7 @@ pub struct RedisBrowserUi {
     profile: Option<ConnectionProfile>,
     databases: Vec<RedisDatabase>,
     selected_database: u8,
+    active_tab: RedisBrowserTab,
 
     // Key list state
     keys: Vec<KeyEntry>,
@@ -132,6 +133,15 @@ pub struct RedisBrowserUi {
     // Error display
     error: Option<String>,
     status: String,
+    cli_command: String,
+    cli_result: Option<String>,
+    cli_running: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedisBrowserTab {
+    Browser,
+    Cli,
 }
 
 enum BrowserCommand {
@@ -281,6 +291,7 @@ enum BrowserResponse {
     ZSetMemberRemoved {
         key: String,
     },
+    CommandExecuted(Result<RedisValue, AppError>),
     Error(String),
     Status(String),
 }
@@ -306,6 +317,7 @@ impl RedisBrowserUi {
             profile: None,
             databases: Vec::new(),
             selected_database: 0,
+            active_tab: RedisBrowserTab::Browser,
             keys: Vec::new(),
             cursor: 0,
             is_loading: false,
@@ -347,6 +359,9 @@ impl RedisBrowserUi {
             confirm_delete_zset_member: None,
             error: None,
             status: "Loading...".to_string(),
+            cli_command: String::new(),
+            cli_result: None,
+            cli_running: false,
         };
 
         ui.load_connection_profile();
@@ -435,38 +450,17 @@ impl RedisBrowserUi {
 
         ui.separator();
 
-        // Search bar
         ui.horizontal(|ui| {
-            ui.label("Pattern:");
-            let response = ui.add(
-                TextEdit::singleline(&mut self.search_pattern)
-                    .hint_text("* or user:*")
-                    .desired_width(200.0),
-            );
-            if response.lost_focus() && self.search_pattern != self.pattern {
-                self.apply_pattern();
-            }
-            if ui.button("Apply").clicked() {
-                self.apply_pattern();
-            }
+            ui.selectable_value(&mut self.active_tab, RedisBrowserTab::Browser, "Keys");
+            ui.selectable_value(&mut self.active_tab, RedisBrowserTab::Cli, "CLI");
         });
 
         ui.separator();
 
-        // Main content: key list + detail panel
-        ui.horizontal(|ui| {
-            // Left: Key list
-            ui.vertical(|ui| {
-                self.key_list_panel(ui);
-            });
-
-            ui.separator();
-
-            // Right: Key detail
-            ui.vertical(|ui| {
-                self.key_detail_panel(ui);
-            });
-        });
+        match self.active_tab {
+            RedisBrowserTab::Browser => self.browser_content(ui),
+            RedisBrowserTab::Cli => self.cli_content(ui),
+        }
 
         // Delete confirmation dialog
         self.delete_confirmation_window(ctx);
@@ -501,6 +495,75 @@ impl RedisBrowserUi {
         }
 
         None
+    }
+
+    fn browser_content(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Pattern:");
+            let response = ui.add(
+                TextEdit::singleline(&mut self.search_pattern)
+                    .hint_text("* or user:*")
+                    .desired_width(200.0),
+            );
+            if response.lost_focus() && self.search_pattern != self.pattern {
+                self.apply_pattern();
+            }
+            if ui.button("Apply").clicked() {
+                self.apply_pattern();
+            }
+        });
+
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                self.key_list_panel(ui);
+            });
+
+            ui.separator();
+
+            ui.vertical(|ui| {
+                self.key_detail_panel(ui);
+            });
+        });
+    }
+
+    fn cli_content(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Redis CLI").strong());
+        ui.add_space(8.0);
+        ui.add(
+            TextEdit::multiline(&mut self.cli_command)
+                .desired_width(f32::INFINITY)
+                .desired_rows(4)
+                .hint_text("SET mykey hello\nLRANGE mylist 0 9"),
+        );
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!self.cli_running, Button::new("Execute"))
+                .clicked()
+            {
+                self.execute_cli_command();
+            }
+            if self.cli_running {
+                ui.add(Spinner::new());
+                ui.label("Running...");
+            }
+        });
+        ui.add_space(8.0);
+        ScrollArea::vertical()
+            .id_source("redis_cli_result")
+            .max_height(320.0)
+            .show(ui, |ui| {
+                if let Some(result) = &self.cli_result {
+                    ui.label(RichText::new(result).monospace().color(Color32::LIGHT_GRAY));
+                } else {
+                    ui.label(
+                        RichText::new("No command executed")
+                            .italics()
+                            .color(Color32::GRAY),
+                    );
+                }
+            });
     }
 
     fn database_selector(&mut self, ui: &mut Ui) {
@@ -1302,8 +1365,22 @@ impl RedisBrowserUi {
                     self.confirm_delete_zset_member = None;
                     self.status = "ZSet member removed".to_string();
                 }
+                BrowserResponse::CommandExecuted(result) => {
+                    self.cli_running = false;
+                    match result {
+                        Ok(value) => {
+                            self.cli_result = Some(format_redis_command_result(&value));
+                            self.status = "Redis command executed".to_string();
+                        }
+                        Err(error) => {
+                            self.cli_result = Some(format!("ERROR: {}", error.message));
+                            self.error = Some(format!("Redis command failed: {}", error.message));
+                        }
+                    }
+                }
                 BrowserResponse::Error(msg) => {
                     self.is_loading = false;
+                    self.cli_running = false;
                     self.error = Some(msg);
                 }
                 BrowserResponse::Status(msg) => {
@@ -1350,6 +1427,28 @@ impl RedisBrowserUi {
         self.selected_key = None;
         self.value_display = ValueDisplay::NotLoaded;
         self.scan_keys();
+    }
+
+    fn execute_cli_command(&mut self) {
+        let command = self.cli_command.trim().to_string();
+        if command.is_empty() {
+            self.error = Some("Redis command cannot be empty".to_string());
+            return;
+        }
+
+        self.cli_running = true;
+        self.error = None;
+        let tx = self.response_tx.clone();
+        let service = self.redis_service.clone();
+        let connection_id = self.connection_id;
+        let database = self.selected_database;
+
+        self.runtime.spawn(async move {
+            let result = service
+                .execute_command(connection_id, database, &command)
+                .await;
+            let _ = tx.send(BrowserResponse::CommandExecuted(result));
+        });
     }
 
     fn scan_keys(&mut self) {
@@ -2461,6 +2560,39 @@ fn estimate_value_size(value: &RedisValue) -> usize {
         RedisValue::SortedSet(members) => members.iter().map(|(m, _)| cell_value_len(m)).sum(),
         RedisValue::Stream(_) => 0,
         RedisValue::None => 0,
+    }
+}
+
+fn format_redis_command_result(value: &RedisValue) -> String {
+    match value {
+        RedisValue::String(bytes) => String::from_utf8_lossy(bytes).to_string(),
+        RedisValue::Hash(fields) => fields
+            .iter()
+            .map(|(key, value)| format!("{key}: {}", cell_value_to_string(value)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        RedisValue::List(items) => items
+            .iter()
+            .enumerate()
+            .map(|(index, value)| format!("{index}: {}", cell_value_to_string(value)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        RedisValue::Set(items) => items
+            .iter()
+            .map(cell_value_to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        RedisValue::SortedSet(members) => members
+            .iter()
+            .map(|(member, score)| format!("{} ({score})", cell_value_to_string(member)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        RedisValue::Stream(entries) => entries
+            .iter()
+            .map(|entry| entry.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        RedisValue::None => "(nil)".to_string(),
     }
 }
 

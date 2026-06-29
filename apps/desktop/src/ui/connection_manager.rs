@@ -4,7 +4,7 @@ use db_common::{
     ConnectionTestReport, DataSourceKind, PasswordUpdate, SslMode,
 };
 use eframe::egui::{
-    Button, Checkbox, ComboBox, DragValue, Grid, RichText, ScrollArea, TextEdit, Ui,
+    Button, Checkbox, ComboBox, DragValue, Grid, RichText, ScrollArea, TextEdit, Ui, Window,
 };
 use std::{
     collections::BTreeMap,
@@ -145,6 +145,7 @@ pub struct ConnectionManagerUi {
     error: Option<String>,
     test_report: Option<ConnectionTestReport>,
     confirm_delete: Option<ConnectionId>,
+    window_open: bool,
 }
 
 impl ConnectionManagerUi {
@@ -164,16 +165,61 @@ impl ConnectionManagerUi {
             error: None,
             test_report: None,
             confirm_delete: None,
+            window_open: false,
         };
         ui.load_profiles();
         ui
     }
 
     pub fn new_connection(&mut self) {
+        self.window_open = true;
         self.selected = None;
         self.form = ConnectionForm::new();
         self.test_report = None;
         self.error = None;
+    }
+
+    pub fn edit_connection(&mut self, id: ConnectionId) {
+        self.window_open = true;
+        self.select_profile(id);
+    }
+
+    pub fn delete_connection_prompt(&mut self, id: ConnectionId) {
+        self.window_open = true;
+        self.select_profile(id);
+        self.confirm_delete = Some(id);
+    }
+
+    pub fn ui_window(&mut self, ctx: &eframe::egui::Context) -> Option<String> {
+        self.drain_events();
+        if !self.window_open {
+            return None;
+        }
+
+        let mut open = true;
+        let mut message = None;
+        let title = match self.form.mode {
+            EditorMode::New => "New Connection",
+            EditorMode::Edit(_) => "Edit Connection",
+        };
+
+        Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                self.editor_panel(ui, &mut message, true);
+            });
+
+        if !open {
+            self.window_open = false;
+            self.confirm_delete = None;
+            self.error = None;
+            self.test_report = None;
+        }
+
+        message.or_else(|| (!self.status.is_empty()).then(|| self.status.clone()))
     }
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
@@ -186,7 +232,7 @@ impl ConnectionManagerUi {
             });
             ui.separator();
             ui.vertical(|ui| {
-                self.editor_panel(ui, &mut message);
+                self.editor_panel(ui, &mut message, false);
             });
         });
 
@@ -250,7 +296,7 @@ impl ConnectionManagerUi {
         });
     }
 
-    fn editor_panel(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+    fn editor_panel(&mut self, ui: &mut Ui, message: &mut Option<String>, as_window: bool) {
         ui.heading(match self.form.mode {
             EditorMode::New => "New Connection",
             EditorMode::Edit(_) => "Edit Connection",
@@ -361,6 +407,12 @@ impl ConnectionManagerUi {
             }
             if ui.add_enabled(!self.busy, Button::new("Save")).clicked() {
                 self.save_connection();
+            }
+            if as_window && ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+                self.window_open = false;
+                self.confirm_delete = None;
+                self.error = None;
+                self.test_report = None;
             }
             if let EditorMode::Edit(id) = self.form.mode {
                 if ui.add_enabled(!self.busy, Button::new("Delete")).clicked() {
@@ -503,6 +555,7 @@ impl ConnectionManagerUi {
                         self.form = ConnectionForm::from_profile(&profile);
                         self.remember_recent(id);
                         self.status = "Connection saved".to_string();
+                        self.window_open = false;
                     }
                     Err(error) => {
                         self.error = Some(actionable_error(
@@ -519,6 +572,7 @@ impl ConnectionManagerUi {
                         self.selected = None;
                         self.form = ConnectionForm::new();
                         self.status = "Connection deleted".to_string();
+                        self.window_open = false;
                     }
                     Err(error) => {
                         self.error = Some(actionable_error(

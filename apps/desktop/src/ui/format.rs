@@ -1,5 +1,5 @@
 use db_common::{base64_preview, human_bytes, CellValue};
-use eframe::egui::{Color32, RichText, Ui};
+use eframe::egui::{Color32, FontFamily, RichText, Ui};
 use std::cmp::Ordering;
 
 const MAX_DISPLAY_CHARS: usize = 96;
@@ -26,19 +26,27 @@ pub fn copy_to_clipboard(ui: &mut Ui, text: String) {
 pub fn cell_rich_text(value: &CellValue, text: String) -> RichText {
     match value {
         CellValue::Null => RichText::new(text)
+            .family(FontFamily::Monospace)
             .italics()
             .color(Color32::from_rgb(170, 90, 60))
             .strong(),
         CellValue::Text(s) if s.is_empty() => RichText::new(text)
+            .family(FontFamily::Monospace)
             .italics()
             .color(Color32::from_rgb(150, 150, 150))
             .weak(),
-        CellValue::Bytes(_) => RichText::new(text).color(Color32::from_rgb(70, 110, 175)),
+        CellValue::Bytes(_) => RichText::new(text)
+            .family(FontFamily::Monospace)
+            .color(Color32::from_rgb(70, 110, 175)),
         CellValue::Date(_)
         | CellValue::Time(_)
         | CellValue::DateTime(_)
-        | CellValue::Timestamp(_) => RichText::new(text).color(Color32::from_rgb(70, 110, 70)),
-        CellValue::Json(_) => RichText::new(text).color(Color32::from_rgb(140, 100, 150)),
+        | CellValue::Timestamp(_) => RichText::new(text)
+            .family(FontFamily::Monospace)
+            .color(Color32::from_rgb(70, 110, 70)),
+        CellValue::Json(_) => RichText::new(text)
+            .family(FontFamily::Monospace)
+            .color(Color32::from_rgb(140, 100, 150)),
         _ => RichText::new(text),
     }
 }
@@ -52,13 +60,45 @@ pub fn display_cell_value(value: &CellValue) -> String {
             human_bytes(bytes.len() as u64),
             base64_preview(bytes, 16)
         ),
-        CellValue::Date(value) => value.format("%Y-%m-%d").to_string(),
-        CellValue::Time(value) => value.format("%H:%M:%S").to_string(),
-        CellValue::DateTime(value) => value.format("%Y-%m-%d %H:%M:%S").to_string(),
-        CellValue::Timestamp(value) => value.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        CellValue::Json(value) => value.to_string(),
+        CellValue::Date(value) => format!("<date {}>", value.format("%Y-%m-%d")),
+        CellValue::Time(value) => format!("<time {}>", value.format("%H:%M:%S")),
+        CellValue::DateTime(value) => {
+            format!("<datetime {}>", value.format("%Y-%m-%d %H:%M:%S"))
+        }
+        CellValue::Timestamp(value) => {
+            format!("<timestamp {}>", value.format("%Y-%m-%d %H:%M:%S UTC"))
+        }
+        CellValue::Json(value) => format!("<json {}>", value),
         _ => copy_cell_value(value),
     })
+}
+
+pub fn hover_cell_value(value: &CellValue) -> String {
+    match value {
+        CellValue::Null => "Type: NULL\nValue: NULL".to_string(),
+        CellValue::Text(text) if text.is_empty() => "Type: TEXT\nValue: empty string".to_string(),
+        CellValue::Text(text) => format!("Type: TEXT\nValue: {}", text),
+        CellValue::Bytes(bytes) => format!(
+            "Type: BINARY\nSize: {}\nBase64: {}",
+            human_bytes(bytes.len() as u64),
+            base64_preview(bytes, bytes.len().min(128))
+        ),
+        CellValue::Date(value) => format!("Type: DATE\nValue: {}", value.format("%Y-%m-%d")),
+        CellValue::Time(value) => format!("Type: TIME\nValue: {}", value.format("%H:%M:%S%.3f")),
+        CellValue::DateTime(value) => {
+            format!(
+                "Type: DATETIME\nValue: {}",
+                value.format("%Y-%m-%d %H:%M:%S%.3f")
+            )
+        }
+        CellValue::Timestamp(value) => format!("Type: TIMESTAMP\nValue: {}", value.to_rfc3339()),
+        CellValue::Json(value) => format!("Type: JSON\nValue: {}", value),
+        CellValue::Bool(value) => format!("Type: BOOL\nValue: {}", value),
+        CellValue::Int(value) => format!("Type: INT\nValue: {}", value),
+        CellValue::UInt(value) => format!("Type: UINT\nValue: {}", value),
+        CellValue::Float(value) => format!("Type: FLOAT\nValue: {}", value),
+        CellValue::Decimal(value) => format!("Type: DECIMAL\nValue: {}", value),
+    }
 }
 
 pub fn truncate_display(value: String) -> String {
@@ -156,7 +196,7 @@ mod tests {
         let text = display_cell_value(&CellValue::Date(
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
         ));
-        assert_eq!(text, "2024-01-02");
+        assert_eq!(text, "<date 2024-01-02>");
     }
 
     #[test]
@@ -165,6 +205,6 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             NaiveTime::from_hms_opt(3, 4, 5).unwrap(),
         )));
-        assert_eq!(text, "2024-01-02 03:04:05");
+        assert_eq!(text, "<datetime 2024-01-02 03:04:05>");
     }
 }

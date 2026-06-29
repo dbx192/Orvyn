@@ -1,7 +1,8 @@
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
-use app_core::query::QueryService;
+use app_core::{metadata::MetadataService, query::QueryService};
 use db_common::{
-    CellValue, ConnectionId, Dialect, Identifier, QueryId, QueryResult, Result, Row, TableColumn,
+    CellValue, ConnectionId, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest,
+    QueryId, QueryResult, Result, Row, TableColumn,
 };
 use eframe::egui::{
     Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Stroke,
@@ -76,6 +77,8 @@ enum CommitState {
     Success,
     /// Previous commit failed with a reason.
     Failed(String),
+    /// Commit succeeded and refresh is running.
+    Refreshing(Arc<Mutex<Option<Result<(Vec<TableColumn>, QueryResult)>>>>),
 }
 
 pub struct TableEditor {
@@ -95,7 +98,9 @@ pub struct TableEditor {
     deleted_rows: BTreeMap<usize, Row>,
     allow_risk_without_pk: bool,
     query_service: Option<QueryService>,
+    metadata_service: Option<MetadataService>,
     connection_id: Option<ConnectionId>,
+    database: Option<String>,
     runtime: Option<Handle>,
     show_commit_dialog: bool,
     show_close_warning: bool,
@@ -103,6 +108,7 @@ pub struct TableEditor {
     commit_error: Option<String>,
     error_row_index: Option<usize>,
     last_commit_result: Option<(usize, Vec<usize>)>,
+    pending_refresh_page: Option<usize>,
 }
 
 impl TableEditor {
@@ -135,7 +141,9 @@ impl TableEditor {
             deleted_rows: BTreeMap::new(),
             allow_risk_without_pk: false,
             query_service: None,
+            metadata_service: None,
             connection_id: None,
+            database: None,
             runtime: None,
             show_commit_dialog: false,
             show_close_warning: false,
@@ -143,22 +151,34 @@ impl TableEditor {
             commit_error: None,
             error_row_index: None,
             last_commit_result: None,
+            pending_refresh_page: None,
         }
     }
 
-    pub fn with_query_service(
-        schema: impl Into<String>,
+    pub fn with_services(
+        schema: Option<String>,
         table: impl Into<String>,
         columns: Vec<TableColumn>,
         result: QueryResult,
         dialect: Box<dyn Dialect>,
         query_service: QueryService,
+        metadata_service: MetadataService,
         connection_id: ConnectionId,
+        database: Option<String>,
         runtime: Handle,
     ) -> Self {
-        let mut editor = Self::new(schema, table, columns, result, dialect);
+        let mut editor = Self::new(
+            schema.clone().unwrap_or_default(),
+            table,
+            columns,
+            result,
+            dialect,
+        );
+        editor.schema = schema;
         editor.query_service = Some(query_service);
+        editor.metadata_service = Some(metadata_service);
         editor.connection_id = Some(connection_id);
+        editor.database = database;
         editor.runtime = Some(runtime);
         editor
     }
@@ -259,9 +279,13 @@ impl TableEditor {
                     match result {
                         Ok(report) => {
                             let affected = report.affected_rows;
-                            self.clear_changes();
                             self.last_commit_result = Some((affected as usize, Vec::new()));
-                            Some(format!("Commit successful — {} row(s) affected", affected))
+                            self.pending_refresh_page = Some(self.page);
+                            self.start_refresh_after_commit();
+                            Some(format!(
+                                "Commit successful — {} row(s) affected, refreshing...",
+                                affected
+                            ))
                         }
                         Err(e) => {
                             let msg = format!("Commit failed: {}", e.message);
@@ -273,6 +297,37 @@ impl TableEditor {
                 } else {
                     // Still waiting — put the cell back.
                     self.commit_state = CommitState::Committing(cell);
+                    None
+                }
+            }
+            CommitState::Refreshing(cell) => {
+                let poll_result = if let Ok(mut guard) = cell.lock() {
+                    guard.take()
+                } else {
+                    let msg = "Internal error: refresh result lock poisoned".to_string();
+                    self.commit_state = CommitState::Failed(msg.clone());
+                    self.commit_error = Some(msg.clone());
+                    return Some(msg);
+                };
+
+                if let Some(result) = poll_result {
+                    match result {
+                        Ok((columns, query_result)) => {
+                            let table = self.table.clone();
+                            let schema = self.schema.clone();
+                            self.load_data(schema, table, columns, query_result);
+                            Some("Table data refreshed after commit".to_string())
+                        }
+                        Err(error) => {
+                            let msg =
+                                format!("Commit succeeded but refresh failed: {}", error.message);
+                            self.commit_state = CommitState::Failed(msg.clone());
+                            self.commit_error = Some(msg.clone());
+                            Some(msg)
+                        }
+                    }
+                } else {
+                    self.commit_state = CommitState::Refreshing(cell);
                     None
                 }
             }
@@ -295,7 +350,11 @@ impl TableEditor {
         self.table = table;
         self.columns = columns;
         self.result = result;
-        self.page = 0;
+        self.page = self
+            .pending_refresh_page
+            .take()
+            .unwrap_or(0)
+            .min(self.total_pages().saturating_sub(1));
         self.filter_text.clear();
         self.sort = None;
         self.clear_changes();
@@ -610,6 +669,79 @@ impl TableEditor {
         });
 
         self.commit_state = CommitState::Committing(result_cell);
+    }
+
+    fn start_refresh_after_commit(&mut self) {
+        let Some(query_service) = self.query_service.clone() else {
+            return;
+        };
+        let Some(metadata_service) = self.metadata_service.clone() else {
+            return;
+        };
+        let Some(connection_id) = self.connection_id else {
+            return;
+        };
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+
+        let database = self.database.clone();
+        let schema = self.schema.clone();
+        let table = self.table.clone();
+        let qualified = match schema.as_deref().filter(|value| !value.is_empty()) {
+            Some(schema_name) => {
+                format!(
+                    "{}.{}",
+                    self.dialect
+                        .quote_identifier(&Identifier::new(schema_name).unwrap()),
+                    self.dialect
+                        .quote_identifier(&Identifier::new(&table).unwrap()),
+                )
+            }
+            None => self
+                .dialect
+                .quote_identifier(&Identifier::new(&table).unwrap()),
+        };
+        let sql = format!("SELECT * FROM {} LIMIT 500", qualified);
+
+        let cell = Arc::new(Mutex::new(None::<Result<(Vec<TableColumn>, QueryResult)>>));
+        let cell_for_task = cell.clone();
+
+        runtime.spawn(async move {
+            let columns_future = metadata_service.table_columns(
+                connection_id,
+                database.as_deref(),
+                schema.as_deref(),
+                &table,
+                None,
+            );
+            let query_future = query_service.execute(
+                QueryExecutionRequest {
+                    tab_id: QueryId::new(),
+                    connection_id,
+                    sql,
+                    mode: QueryExecutionMode::All,
+                    cursor_offset: 0,
+                    selection: None,
+                    timeout_ms: 30_000,
+                },
+                None,
+            );
+            let result = match tokio::join!(columns_future, query_future) {
+                (Ok(cols), Ok(report)) => Ok((
+                    cols,
+                    report
+                        .results
+                        .into_iter()
+                        .next()
+                        .unwrap_or(QueryResult::empty("")),
+                )),
+                (Err(error), _) => Err(error),
+                (_, Err(error)) => Err(error),
+            };
+            *cell_for_task.lock().unwrap() = Some(result);
+        });
+        self.commit_state = CommitState::Refreshing(cell);
     }
 
     fn build_change_summary(&self) -> ChangeSummary {

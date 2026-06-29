@@ -926,4 +926,124 @@ impl RedisConnectorWithAuth {
         }
         Ok(())
     }
+
+    pub async fn execute_command(
+        conn: &mut redis::aio::MultiplexedConnection,
+        database: u8,
+        command: &str,
+    ) -> Result<RedisValue> {
+        select_database(conn, database).await?;
+        let tokens = split_command(command)?;
+        let Some((head, tail)) = tokens.split_first() else {
+            return Err(AppError::validation("Redis command cannot be empty"));
+        };
+
+        let mut cmd = redis::cmd(head);
+        for token in tail {
+            cmd.arg(token);
+        }
+
+        let value: redis::Value = cmd.query_async(conn).await.map_err(redis_query_error)?;
+        redis_value_from_raw(value)
+    }
+}
+
+fn split_command(command: &str) -> Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in command.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '\'' | '"' => {
+                if let Some(quote) = in_quote {
+                    if quote == ch {
+                        in_quote = None;
+                    } else {
+                        current.push(ch);
+                    }
+                } else {
+                    in_quote = Some(ch);
+                }
+            }
+            c if c.is_whitespace() && in_quote.is_none() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if escaped || in_quote.is_some() {
+        return Err(AppError::validation("Unterminated Redis command"));
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    Ok(tokens)
+}
+
+fn redis_value_from_raw(value: redis::Value) -> Result<RedisValue> {
+    match value {
+        redis::Value::Nil => Ok(RedisValue::None),
+        redis::Value::Int(number) => Ok(RedisValue::String(number.to_string().into_bytes())),
+        redis::Value::Data(bytes) => Ok(RedisValue::String(bytes)),
+        redis::Value::Status(text) => Ok(RedisValue::String(text.into_bytes())),
+        redis::Value::Okay => Ok(RedisValue::String(b"OK".to_vec())),
+        redis::Value::Bulk(items) => Ok(RedisValue::List(
+            items
+                .into_iter()
+                .map(redis_cell_from_raw)
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        other => Ok(RedisValue::String(format!("{other:?}").into_bytes())),
+    }
+}
+
+fn redis_cell_from_raw(value: redis::Value) -> Result<CellValue> {
+    match value {
+        redis::Value::Nil => Ok(CellValue::Null),
+        redis::Value::Int(number) => Ok(CellValue::Int(number)),
+        redis::Value::Data(bytes) => match String::from_utf8(bytes.clone()) {
+            Ok(text) => Ok(CellValue::Text(text)),
+            Err(_) => Ok(CellValue::Bytes(bytes)),
+        },
+        redis::Value::Status(text) => Ok(CellValue::Text(text)),
+        redis::Value::Okay => Ok(CellValue::Text("OK".to_string())),
+        redis::Value::Bulk(items) => Ok(CellValue::Json(serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(redis_json_from_raw)
+                .collect::<Result<Vec<_>>>()?,
+        ))),
+        other => Ok(CellValue::Text(format!("{other:?}"))),
+    }
+}
+
+fn redis_json_from_raw(value: redis::Value) -> Result<serde_json::Value> {
+    match redis_cell_from_raw(value)? {
+        CellValue::Null => Ok(serde_json::Value::Null),
+        CellValue::Bool(value) => Ok(serde_json::Value::Bool(value)),
+        CellValue::Int(value) => Ok(serde_json::json!(value)),
+        CellValue::UInt(value) => Ok(serde_json::json!(value)),
+        CellValue::Float(value) => Ok(serde_json::json!(value)),
+        CellValue::Decimal(value) | CellValue::Text(value) => Ok(serde_json::Value::String(value)),
+        CellValue::Bytes(bytes) => Ok(serde_json::Value::String(base64::encode(bytes))),
+        CellValue::Date(value) => Ok(serde_json::Value::String(value.to_string())),
+        CellValue::Time(value) => Ok(serde_json::Value::String(value.to_string())),
+        CellValue::DateTime(value) => Ok(serde_json::Value::String(value.to_string())),
+        CellValue::Timestamp(value) => Ok(serde_json::Value::String(value.to_rfc3339())),
+        CellValue::Json(value) => Ok(value),
+    }
 }

@@ -261,6 +261,7 @@ impl eframe::App for DesktopApp {
         self.top_toolbar(ctx);
         self.left_tree(ctx);
         self.central_panel(ctx);
+        self.connection_windows(ctx);
         self.bottom_status(ctx);
         self.error_window(ctx);
     }
@@ -523,11 +524,21 @@ impl DesktopApp {
                         .set_status(format!("Import CSV to {}", table_name));
                 }
                 ObjectTreeAction::EditConnection(id) => {
+                    self.connection_manager_ui.edit_connection(id);
                     self.state.set_status(format!("Edit connection: {}", id));
                 }
                 ObjectTreeAction::DeleteConnection(id) => {
+                    self.connection_manager_ui.delete_connection_prompt(id);
                     self.state.set_status(format!("Delete connection: {}", id));
                 }
+            }
+        }
+    }
+
+    fn connection_windows(&mut self, ctx: &Context) {
+        if let Some(message) = self.connection_manager_ui.ui_window(ctx) {
+            if !message.is_empty() {
+                self.state.set_status(message);
             }
         }
     }
@@ -546,14 +557,16 @@ impl DesktopApp {
                             let row_count = payload.result.rows.len();
                             let table_name = payload.table.clone();
                             let conn_id = payload.connection_id;
-                            let editor = TableEditor::with_query_service(
-                                payload.schema.as_deref().unwrap_or(""),
+                            let editor = TableEditor::with_services(
+                                payload.schema.clone(),
                                 &payload.table,
                                 payload.columns,
                                 payload.result,
                                 payload.dialect,
                                 self.query_service.clone(),
+                                self.metadata_service.clone(),
                                 conn_id,
+                                payload.database,
                                 self.runtime.clone(),
                             );
                             self.table_editor = Some(editor);

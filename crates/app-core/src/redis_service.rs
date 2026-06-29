@@ -295,6 +295,16 @@ impl RedisService {
         )
         .await
     }
+
+    pub async fn execute_command(
+        &self,
+        connection_id: ConnectionId,
+        database: u8,
+        command: &str,
+    ) -> Result<RedisValue> {
+        let mut conn = self.get_connection(connection_id).await?;
+        db_redis::RedisConnectorWithAuth::execute_command(&mut conn, database, command).await
+    }
 }
 
 impl Clone for RedisService {
