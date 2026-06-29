@@ -1,17 +1,17 @@
 # Rust DB Client
 
-Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQL 的跨平台数据库客户端。
+Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQLite、PostgreSQL 的跨平台数据库客户端。
 
-当前仓库处于项目骨架阶段，已包含：
+当前仓库已经具备可构建、可测试的 workspace，以及可运行的桌面端主流程：
 
 - 开发计划：`dev.md`
 - 编码规范：`rule.md`
 - Rust workspace
 - egui/eframe 桌面入口和 UI 模块：`apps/desktop`
 - 通用模型和全局工具：`crates/db-common`
-- 应用服务骨架：`crates/app-core`
-- 数据库适配器占位 crate
-- 安全存储和导入导出占位 crate
+- 应用服务层：`crates/app-core`
+- 五类数据库适配 crate
+- 安全存储与导入导出 crate
 
 ## 第一阶段能力
 
@@ -29,7 +29,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 - 密码保存策略：`PasswordUpdate::Keep`、`Clear`、`Replace`
 - 默认不保存密码，只有 `ConnectionSecurity.save_password = true` 时才写入安全存储。
 
-桌面入口使用 egui/eframe，当前会初始化连接管理服务，并包含结果集展示和表数据编辑原型。
+桌面入口使用 egui/eframe，启动后会初始化连接管理、对象树、查询、Redis 管理、导入导出等服务。
 
 ## 第二阶段能力
 
@@ -53,8 +53,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 
 当前限制：
 
-- 没有实现前端对象树 UI。
-- 每次元数据请求会短连接数据库，查询会话和连接池放到后续阶段。
+- 元数据请求当前仍以短连接/短会话为主，长期会话与更细粒度缓存仍可继续优化。
 - Redis key 浏览默认每次扫描 500 个 key。
 
 ## 第三阶段能力
@@ -63,7 +62,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 
 - 查询执行服务：`app_core::query::QueryService`
 - MySQL、PostgreSQL、SQLite、DuckDB 查询执行适配器
-- egui 结果集表格原型：
+- egui 结果集表格：
   - 分页和虚拟滚动
   - 列宽调整
   - 复制单元格、复制行、复制带表头结果
@@ -73,8 +72,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 
 当前限制：
 
-- 查询编辑器和真实查询结果 UI 接入还在后续阶段。
-- 导出当前先复制到剪贴板，文件保存对话框后续补齐。
+- SQL 格式化与编辑体验仍是轻量实现，不是完整 SQL IDE。
 
 ## 第四阶段能力
 
@@ -86,7 +84,7 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 - `apps/desktop/src/ui/table_editor.rs`：表数据查看和编辑
 - `apps/desktop/src/ui/format.rs`：单元格展示、复制、比较格式化
 
-已实现表数据查看和编辑原型：
+已实现表数据查看和编辑：
 
 - 打开表数据视图
 - 分页浏览
@@ -101,8 +99,8 @@ Rust DB Client 是一个计划支持 Redis、MySQL、DuckDB、SQLite、PostgreSQ
 
 当前限制：
 
-- 表数据视图当前使用示例数据。
-- 提交动作先生成 SQL 预览，真实事务执行和刷新表数据后续接入 `QueryService`。
+- 表数据加载当前默认走 `SELECT * ... LIMIT 500`。
+- 更完整的事务控制、批量编辑保护和增量刷新仍可继续增强。
 
 可选环境变量：
 
@@ -113,17 +111,37 @@ RUST_DB_CLIENT_MASTER_KEY=change-this-master-key
 
 ## DuckDB 本地库
 
-当前仓库默认使用已下载到仓库内的 DuckDB 本地库，不再在构建时联网下载。
+当前仓库默认允许 `libduckdb-sys` 按当前构建目标自动复用或下载 DuckDB 运行库。
 
-- 本地库目录：`target/duckdb-download/x86_64-unknown-linux-gnu/1.5.4`
+- 本地库缓存目录示例：`target/duckdb-download/<target-triple>/1.5.4`
 - 项目级 Cargo 配置：`.cargo/config.toml`
 
-如果你更换了 DuckDB 版本、目标平台或删除了该目录，需要同步更新 `.cargo/config.toml` 中的：
+如果你更换了 DuckDB 版本、切换目标平台或删除了该目录，首次构建会重新准备对应平台的运行库。
 
-- `DUCKDB_LIB_DIR`
-- `DUCKDB_INCLUDE_DIR`
+如果你的环境不能联网，可以提前把对应目标平台的 DuckDB 动态库放到 `target/duckdb-download/<target-triple>/1.5.4`，后续构建会直接复用。
 
-如果本地库不存在，`db-duckdb`、`app-core` 和 `desktop` 的相关构建会失败；当前默认策略是不再回退到自动下载。
+## Windows 11 x64 打包
+
+当前桌面端可以作为普通 Windows 桌面程序构建，目标三元组建议使用：
+
+- `x86_64-pc-windows-msvc`
+
+基础步骤：
+
+```powershell
+rustup target add x86_64-pc-windows-msvc
+cargo build -p desktop --release --target x86_64-pc-windows-msvc
+```
+
+生成产物：
+
+- `target/x86_64-pc-windows-msvc/release/desktop.exe`
+
+首次为 Windows 目标构建时，DuckDB 运行库会进入：
+
+- `target/duckdb-download/x86_64-pc-windows-msvc/1.5.4`
+
+如果你要把程序拷贝到另一台 Windows 11 64 位机器使用，需要同时带上与目标构建匹配的 DuckDB 动态库文件。
 
 ## 常用命令
 
@@ -138,6 +156,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 - `cargo check --workspace`
 - `cargo test --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
 
 ## 目录
 

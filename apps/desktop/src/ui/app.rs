@@ -136,7 +136,7 @@ impl DesktopApp {
                 metadata_service.clone(),
                 runtime,
             ),
-            state: AppState::with_sample_workspace(),
+            state: AppState::default(),
             table_editor: None,
             table_structure: None,
             import_wizard: None,

@@ -1,7 +1,7 @@
 use db_common::{AppError, ErrorKind, Result};
 use std::sync::Arc;
 use tokio::{
-    runtime::Handle,
+    runtime::{Handle, Runtime},
     sync::{OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
 };
@@ -9,14 +9,26 @@ use tokio::{
 #[derive(Clone)]
 pub struct BlockingPool {
     runtime_handle: Handle,
+    _owned_runtime: Option<Arc<Runtime>>,
     semaphore: Arc<Semaphore>,
     max_concurrent: usize,
 }
 
 impl BlockingPool {
     pub fn new(max_concurrent: usize, _thread_name: &str) -> Self {
+        let (runtime_handle, owned_runtime) = match Handle::try_current() {
+            Ok(handle) => (handle, None),
+            Err(_) => {
+                let runtime = Arc::new(
+                    Runtime::new().expect("failed to create runtime for blocking pool"),
+                );
+                (runtime.handle().clone(), Some(runtime))
+            }
+        };
+
         Self {
-            runtime_handle: Handle::current(),
+            runtime_handle,
+            _owned_runtime: owned_runtime,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             max_concurrent,
         }

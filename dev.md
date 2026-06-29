@@ -42,16 +42,16 @@ apps/desktop/src/
     result_grid.rs        # 查询结果集展示
     table_editor.rs       # 表数据查看和编辑
     format.rs             # CellValue 展示、复制、排序格式化
-    samples.rs            # 当前阶段的 UI 示例数据
+    samples.rs            # UI 测试/演示数据辅助
 ```
 
 UI 模块只持有界面状态和用户操作状态，真实连接、查询、元数据和导出能力必须通过 `app-core`、`db-common` 和各数据库适配 crate 暴露的接口进入。
 
 ### 2.4 本地构建约束
 
-- DuckDB 通过仓库内缓存的本地动态库链接，当前路径固定为 `target/duckdb-download/x86_64-unknown-linux-gnu/1.5.4`。
-- 项目通过 `.cargo/config.toml` 设置 `DUCKDB_LIB_DIR` 和 `DUCKDB_INCLUDE_DIR`，默认不再联网下载 DuckDB 运行库。
-- 如果升级 DuckDB crate 版本、切换目标平台、或清理掉 `target/duckdb-download`，必须同步更新 Cargo 配置和 README。
+- DuckDB 运行库按当前构建目标自动复用或下载，缓存目录为 `target/duckdb-download/<target-triple>/1.5.4`。
+- 项目通过 `.cargo/config.toml` 设置 `DUCKDB_DOWNLOAD_LIB=1`，避免把仓库绑定到单一平台的动态库路径。
+- 如果升级 DuckDB crate 版本、切换目标平台、或清理掉 `target/duckdb-download`，需要同步检查 README 中的构建说明是否仍然正确。
 
 ## 3. 功能范围
 
@@ -838,7 +838,7 @@ Dialect:
 当前实现状态：
 
 - 已实现查询执行服务 `QueryService` 和多数据库查询执行适配器。
-- 已实现 egui 结果集展示原型，包含分页、虚拟滚动、列宽调整、复制、排序、NULL/二进制/日期时间格式化展示，以及 CSV/JSON/Excel 兼容格式导出到剪贴板。
+- 已实现 egui 结果集展示，包含分页、虚拟滚动、列宽调整、复制、排序、NULL/二进制/日期时间格式化展示，以及 CSV/JSON/Excel 兼容格式导出。
 - 查询编辑器、多结果集标签页和真实查询 UI 接入仍需继续完成。
 
 ### 里程碑 4：表数据编辑
@@ -857,7 +857,7 @@ Dialect:
 当前实现状态：
 
 - 已建立 egui 前端模块架构，`main.rs` 只负责启动和服务注入，具体视图拆分到 `apps/desktop/src/ui/`。
-- 已实现表数据查看和编辑 UI 原型 `TableEditor`，支持分页浏览、新增行、编辑单元格、删除行、回滚未提交变更、简单过滤和简单排序。
+- 已实现表数据查看和编辑 UI `TableEditor`，支持分页浏览、新增行、编辑单元格、删除行、回滚未提交变更、简单过滤和简单排序。
 - 已实现基于主键生成 UPDATE/DELETE SQL；无主键表默认只读，显式开启风险模式后按整行条件生成 UPDATE/DELETE。
 - 当前提交动作先生成 SQL 预览并清理 UI dirty 状态，真实数据库事务执行和刷新表数据需要接入 `QueryService` 与表元数据加载流程。
 

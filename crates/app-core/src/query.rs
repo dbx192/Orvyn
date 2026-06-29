@@ -18,7 +18,11 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use tokio::{sync::Mutex, task::AbortHandle};
+use tokio::{
+    runtime::{Handle, Runtime},
+    sync::Mutex,
+    task::AbortHandle,
+};
 use tracing::{info, instrument};
 
 pub const DEFAULT_HISTORY_LIMIT: usize = 500;
@@ -112,12 +116,11 @@ impl QueryService {
     }
 
     fn load_history_and_favorites(&self) -> Result<()> {
-        let handle = tokio::runtime::Handle::current();
         let history_store = self.history_store.clone();
         let favorite_store = self.favorite_store.clone();
         let state = self.state.clone();
 
-        handle.block_on(async move {
+        run_blocking_on_runtime(async move {
             if let Some(store) = history_store {
                 match store.list().await {
                     Ok(entries) => {
@@ -550,6 +553,18 @@ impl QueryService {
                 tracing::warn!("failed to write history entry: {}", e.message);
             }
         }
+    }
+}
+
+fn run_blocking_on_runtime<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    match Handle::try_current() {
+        Ok(handle) => handle.block_on(future),
+        Err(_) => Runtime::new()
+            .expect("failed to create runtime for query service initialization")
+            .block_on(future),
     }
 }
 
