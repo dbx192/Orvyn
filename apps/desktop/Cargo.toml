@@ -9,7 +9,11 @@ version.workspace = true
 app-core = { path = "../../crates/app-core" }
 chrono.workspace = true
 db-common.workspace = true
+db-duckdb = { path = "../../crates/db-duckdb" }
+db-mysql = { path = "../../crates/db-mysql" }
+db-postgres = { path = "../../crates/db-postgres" }
 db-redis = { path = "../../crates/db-redis" }
+db-sqlite = { path = "../../crates/db-sqlite" }
 eframe.workspace = true
 import-export = { path = "../../crates/import-export" }
 rfd.workspace = true

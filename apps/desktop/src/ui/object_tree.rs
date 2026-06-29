@@ -112,8 +112,19 @@ pub enum ObjectTreeAction {
         schema: Option<String>,
         table: String,
     },
+    ExportTableData {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    },
     EditConnection(ConnectionId),
     DeleteConnection(ConnectionId),
+    DeleteRedisKey {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        key: String,
+    },
 }
 
 pub struct ObjectTree {
@@ -126,7 +137,6 @@ pub struct ObjectTree {
     child_cache: BTreeMap<NodeKey, Vec<MetadataNode>>,
     expanded: BTreeSet<String>,
     search_query: String,
-    search_results: Option<Vec<(MetadataNode, usize)>>,
     selected_node: Option<NodeKey>,
     status: String,
     redis_pattern: BTreeMap<NodeKey, String>,
@@ -150,7 +160,6 @@ impl ObjectTree {
             child_cache: BTreeMap::new(),
             expanded: BTreeSet::new(),
             search_query: String::new(),
-            search_results: None,
             selected_node: None,
             status: String::new(),
             redis_pattern: BTreeMap::new(),
@@ -177,11 +186,7 @@ impl ObjectTree {
             .id_source("object_tree_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if self.search_results.is_some() {
-                    self.search_results_ui(ui, &mut message, &mut actions);
-                } else {
-                    self.tree_ui(ui, &mut message, &mut actions);
-                }
+                self.tree_ui(ui, &mut message, &mut actions);
             });
 
         (message, actions)
@@ -195,15 +200,9 @@ impl ObjectTree {
                     .hint_text(format!("Search object (min {SEARCH_MIN_CHARS} chars)..."))
                     .desired_width(180.0),
             );
-            if response.changed() {
-                self.search_results = None;
-                if self.search_query.chars().count() >= SEARCH_MIN_CHARS {
-                    self.perform_search();
-                }
-            }
+            let _ = response.changed();
             if ui.small_button("✕").clicked() {
                 self.search_query.clear();
-                self.search_results = None;
             }
         });
     }
@@ -239,6 +238,10 @@ impl ObjectTree {
                 None => continue,
             };
 
+            if self.search_active() && !self.connection_matches_search(&tree_node) {
+                continue;
+            }
+
             self.render_connection(ui, conn_id, &tree_node, status, message, actions);
             ui.add_space(2.0);
         }
@@ -255,12 +258,13 @@ impl ObjectTree {
     ) {
         let key = tree_node.key();
         let key_str = node_key_id(&key);
-        let expanded = self.expanded.contains(&key_str);
+        let expanded = self.expanded.contains(&key_str) || self.connection_force_expanded(tree_node);
         let status_color = connection_status_color(&status);
         let status_label = connection_status_label(&status);
 
         let node = tree_node.node.clone();
         let is_selected = self.selected_node == Some(key.clone());
+        let matched = self.node_matches_search(&node);
 
         Frame::group(ui.style())
             .fill(ui.style().visuals.faint_bg_color)
@@ -287,11 +291,13 @@ impl ObjectTree {
 
                     let label_text = format!("{}  ", node.label);
                     let label_resp = ui.add(
-                        Label::new(RichText::new(label_text).strong().color(if is_selected {
-                            ui.visuals().selection.bg_fill
-                        } else {
-                            Color32::default()
-                        }))
+                        Label::new(
+                            RichText::new(label_text).strong().color(node_label_color(
+                                ui,
+                                is_selected,
+                                matched,
+                            )),
+                        )
                         .sense(Sense::click()),
                     );
 
@@ -325,6 +331,11 @@ impl ObjectTree {
                                     );
                                 } else {
                                     for child in children {
+                                        if self.search_active()
+                                            && !self.node_or_descendant_matches(child)
+                                        {
+                                            continue;
+                                        }
                                         self.render_tree_node(ui, child, message, actions);
                                     }
                                 }
@@ -357,10 +368,11 @@ impl ObjectTree {
     ) {
         let key = NodeKey::from(&node.path);
         let key_str = node_key_id(&key);
-        let expanded = self.expanded.contains(&key_str);
+        let expanded = self.expanded.contains(&key_str) || self.force_expanded(node);
         let is_leaf = node.leaf;
         let is_selected = self.selected_node == Some(key.clone());
         let children = self.child_cache.get(&key).cloned();
+        let matched = self.node_matches_search(node);
 
         let node_clone = node.clone();
 
@@ -384,11 +396,9 @@ impl ObjectTree {
             ui.label(RichText::new(icon).size(12.0));
 
             let label_resp = ui.add(
-                Label::new(RichText::new(&node.label).color(if is_selected {
-                    ui.visuals().selection.bg_fill
-                } else {
-                    Color32::default()
-                }))
+                Label::new(
+                    RichText::new(&node.label).color(node_label_color(ui, is_selected, matched)),
+                )
                 .sense(Sense::click()),
             );
 
@@ -427,6 +437,9 @@ impl ObjectTree {
                 }
                 Some(list) => {
                     for child in &list {
+                        if self.search_active() && !self.node_or_descendant_matches(child) {
+                            continue;
+                        }
                         self.render_tree_node(ui, child, message, actions);
                     }
                 }
@@ -440,63 +453,6 @@ impl ObjectTree {
                     }
                 }
             });
-        }
-    }
-
-    fn search_results_ui(
-        &mut self,
-        ui: &mut Ui,
-        message: &mut Option<String>,
-        actions: &mut Vec<ObjectTreeAction>,
-    ) {
-        let results = self.search_results.clone();
-        if let Some(results) = &results {
-            if results.is_empty() {
-                ui.label(
-                    RichText::new("No results found")
-                        .color(Color32::GRAY)
-                        .italics(),
-                );
-                return;
-            }
-            ui.label(
-                RichText::new(format!("{} matches", results.len()))
-                    .color(Color32::GRAY)
-                    .small(),
-            );
-            for (result, depth) in results {
-                let key = NodeKey::from(&result.path);
-                let is_selected = self.selected_node == Some(key.clone());
-                let indent = (*depth as f32) * 14.0;
-
-                let result_clone = result.clone();
-                let label_text = format!("{} {}", node_kind_icon(result.kind), result.label);
-                let resp = ui.allocate_ui_with_layout(
-                    vec2(ui.available_width(), 20.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.add_space(indent);
-                        ui.add(
-                            Label::new(RichText::new(label_text).color(if is_selected {
-                                ui.visuals().selection.bg_fill
-                            } else {
-                                Color32::default()
-                            }))
-                            .sense(Sense::click()),
-                        )
-                    },
-                );
-                if resp.inner.clicked() {
-                    self.selected_node = Some(key);
-                    *message = Some(format!("Selected: {}", result.label));
-                }
-                if resp.inner.double_clicked() {
-                    self.activate_node(&result_clone, message, actions);
-                }
-
-                let path_desc = format!("    {}", result_path_description(result));
-                ui.label(RichText::new(path_desc).color(Color32::GRAY).size(10.0));
-            }
         }
     }
 
@@ -603,6 +559,19 @@ impl ObjectTree {
                     );
                     ui.close_menu();
                 }
+                if ui.button("Export Data").clicked() {
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, table| ObjectTreeAction::ExportTableData {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            table,
+                        },
+                        actions,
+                    );
+                    ui.close_menu();
+                }
                 if ui.button("New Query on Table").clicked() {
                     self.emit_table_action(
                         node,
@@ -696,6 +665,18 @@ impl ObjectTree {
                     self.emit_key_action(
                         node,
                         |conn_id, db, key| ObjectTreeAction::ViewKey {
+                            connection_id: conn_id,
+                            database: db,
+                            key,
+                        },
+                        actions,
+                    );
+                    ui.close_menu();
+                }
+                if ui.button("Delete Key").clicked() {
+                    self.emit_key_action(
+                        node,
+                        |conn_id, db, key| ObjectTreeAction::DeleteRedisKey {
                             connection_id: conn_id,
                             database: db,
                             key,
@@ -1012,41 +993,6 @@ impl ObjectTree {
         });
     }
 
-    fn perform_search(&mut self) {
-        let mut results = Vec::new();
-        let query = self.search_query.to_lowercase();
-
-        for (_, (tree_node, _)) in &self.connections {
-            if tree_node.node.label.to_lowercase().contains(&query) {
-                results.push((tree_node.node.clone(), 0));
-            }
-            if let Some(children) = &tree_node.children {
-                self.search_in_children(children, &query, 1, &mut results);
-            }
-        }
-
-        results.truncate(SEARCH_RESULT_LIMIT);
-        self.search_results = Some(results);
-    }
-
-    fn search_in_children(
-        &self,
-        children: &[MetadataNode],
-        query: &str,
-        depth: usize,
-        results: &mut Vec<(MetadataNode, usize)>,
-    ) {
-        for child in children {
-            if child.label.to_lowercase().contains(query) {
-                results.push((child.clone(), depth));
-            }
-            let key = NodeKey::from(&child.path);
-            if let Some(grandchildren) = self.child_cache.get(&key) {
-                self.search_in_children(grandchildren, query, depth + 1, results);
-            }
-        }
-    }
-
     fn maybe_poll_status(&mut self, ctx: &Context) {
         if self.connections.is_empty() {
             return;
@@ -1149,6 +1095,54 @@ impl ObjectTree {
                 }
             }
         }
+    }
+
+    fn search_active(&self) -> bool {
+        self.search_query.chars().count() >= SEARCH_MIN_CHARS
+    }
+
+    fn search_term(&self) -> Option<String> {
+        self.search_active()
+            .then(|| self.search_query.trim().to_lowercase())
+            .filter(|query| !query.is_empty())
+    }
+
+    fn node_matches_search(&self, node: &MetadataNode) -> bool {
+        let Some(query) = self.search_term() else {
+            return false;
+        };
+        fuzzy_matches(&node.label.to_lowercase(), &query)
+    }
+
+    fn node_or_descendant_matches(&self, node: &MetadataNode) -> bool {
+        if !self.search_active() {
+            return true;
+        }
+        if self.node_matches_search(node) {
+            return true;
+        }
+        let key = NodeKey::from(&node.path);
+        self.child_cache
+            .get(&key)
+            .map(|children| children.iter().any(|child| self.node_or_descendant_matches(child)))
+            .unwrap_or(false)
+    }
+
+    fn connection_matches_search(&self, tree_node: &TreeNode) -> bool {
+        self.node_matches_search(&tree_node.node)
+            || tree_node
+                .children
+                .as_ref()
+                .map(|children| children.iter().any(|child| self.node_or_descendant_matches(child)))
+                .unwrap_or(false)
+    }
+
+    fn force_expanded(&self, node: &MetadataNode) -> bool {
+        self.search_active() && self.node_or_descendant_matches(node) && !node.leaf
+    }
+
+    fn connection_force_expanded(&self, tree_node: &TreeNode) -> bool {
+        self.search_active() && self.connection_matches_search(tree_node)
     }
 }
 
@@ -1269,4 +1263,32 @@ fn build_full_path(node: &MetadataNode) -> String {
         parts.push(node.label.clone());
     }
     parts.join(".")
+}
+
+fn fuzzy_matches(label: &str, query: &str) -> bool {
+    if label.contains(query) {
+        return true;
+    }
+
+    let mut query_chars = query.chars();
+    let mut current = query_chars.next();
+    for ch in label.chars() {
+        if current == Some(ch) {
+            current = query_chars.next();
+            if current.is_none() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn node_label_color(ui: &Ui, selected: bool, matched: bool) -> Color32 {
+    if selected {
+        ui.visuals().selection.bg_fill
+    } else if matched {
+        Color32::from_rgb(255, 210, 90)
+    } else {
+        Color32::default()
+    }
 }

@@ -1,12 +1,18 @@
 use crate::ui::result_grid::ResultSetGrid;
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::{
-    AppError, ConnectionId, ConnectionProfile, DatabaseObject, QueryExecutionMode,
-    QueryExecutionReport, QueryExecutionRequest, QueryId, TextRange,
+    looks_like_unqualified_mutation, statement_at_offset, AppError, ConnectionId,
+    ConnectionProfile, DataSourceKind, DatabaseObject, QueryExecutionMode,
+    QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId, SqlHighlightToken,
+    SqlTokenKind, TextRange,
 };
-use eframe::egui::{Button, Color32, ComboBox, RichText, ScrollArea, TextEdit, Ui, Window};
+use eframe::egui::{
+    text::LayoutJob, Button, Color32, ComboBox, FontId, RichText, ScrollArea, TextEdit,
+    TextFormat, Ui, Window,
+};
 use std::{
     collections::BTreeMap,
+    sync::Arc,
     sync::mpsc::{self, Receiver, Sender},
 };
 use tokio::runtime::Handle;
@@ -25,7 +31,13 @@ enum QueryEditorEvent {
     ConnectionList(Vec<ConnectionProfile>),
     DatabaseList(QueryId, Vec<String>),
     SchemaList(QueryId, Vec<String>),
+    HistoryLoaded(Vec<QueryHistoryEntry>),
     MetadataLoadFailed(QueryId, String),
+}
+
+struct PendingDangerConfirm {
+    mode: QueryExecutionMode,
+    sql: String,
 }
 
 struct QueryEditorTab {
@@ -45,6 +57,7 @@ struct QueryEditorTab {
     execution_report: Option<QueryExecutionReport>,
     execution_running: bool,
     execution_error: Option<String>,
+    highlighted_sql: Vec<SqlHighlightToken>,
 }
 
 impl QueryEditorTab {
@@ -66,6 +79,7 @@ impl QueryEditorTab {
             execution_report: None,
             execution_running: false,
             execution_error: None,
+            highlighted_sql: Vec::new(),
         }
     }
 
@@ -86,8 +100,10 @@ pub struct QueryEditor {
     tabs: BTreeMap<QueryId, QueryEditorTab>,
     active_tab: Option<QueryId>,
     connections: Vec<ConnectionProfile>,
+    history_entries: Vec<QueryHistoryEntry>,
     show_close_confirm: Option<QueryId>,
     show_execute_all: bool,
+    pending_danger_confirm: Option<PendingDangerConfirm>,
     status: String,
 }
 
@@ -109,11 +125,14 @@ impl QueryEditor {
             tabs: BTreeMap::new(),
             active_tab: None,
             connections: Vec::new(),
+            history_entries: Vec::new(),
             show_close_confirm: None,
             show_execute_all: false,
+            pending_danger_confirm: None,
             status: String::new(),
         };
         editor.load_connections();
+        editor.load_history();
         editor
     }
 
@@ -141,6 +160,7 @@ impl QueryEditor {
         self.active_tab_panel(ui);
         self.close_confirm_dialog(ctx);
         self.execute_all_dialog(ctx);
+        self.dangerous_sql_dialog(ctx);
 
         Some(self.status.clone())
     }
@@ -451,39 +471,133 @@ impl QueryEditor {
         };
 
         let editor_height = (ui.available_height() * 0.42).max(180.0);
-        {
-            let Some(tab) = self.tabs.get_mut(&tab_id) else {
-                return;
-            };
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(300.0);
+                self.history_panel(ui, tab_id);
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                let Some(tab) = self.tabs.get_mut(&tab_id) else {
+                    return;
+                };
 
-            ScrollArea::vertical()
-                .id_source("query_editor_sql_scroll")
-                .max_height(editor_height)
-                .show(ui, |ui| {
-                    let output = TextEdit::multiline(&mut tab.sql)
-                        .font(eframe::egui::FontId::monospace(14.0))
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(14)
-                        .code_editor()
-                        .show(ui);
+                ScrollArea::vertical()
+                    .id_source("query_editor_sql_scroll")
+                    .max_height(editor_height)
+                    .show(ui, |ui| {
+                        let tokens = tab.highlighted_sql.clone();
+                        let dialect = connection_kind_for(&self.connections, tab.connection_id);
+                        let mut layouter =
+                            move |ui: &Ui, text: &str, wrap_width: f32| -> Arc<eframe::egui::Galley> {
+                                let mut job = highlight_layout_job(text, &tokens, dialect);
+                                job.wrap.max_width = wrap_width;
+                                ui.fonts(|fonts| fonts.layout_job(job))
+                            };
 
-                    if output.response.changed() {
-                        tab.dirty = true;
-                    }
+                        let output = TextEdit::multiline(&mut tab.sql)
+                            .font(FontId::monospace(14.0))
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(14)
+                            .code_editor()
+                            .layouter(&mut layouter)
+                            .show(ui);
 
-                    if let Some(range) = output.cursor_range {
-                        tab.cursor_offset = range.primary.ccursor.index;
-                        let selection = TextRange::new(
-                            range.primary.ccursor.index,
-                            range.secondary.ccursor.index,
-                        );
-                        tab.selection = (!selection.is_empty()).then_some(selection);
-                    }
-                });
-        }
+                        if output.response.changed() {
+                            tab.dirty = true;
+                            tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                        }
+
+                        if let Some(range) = output.cursor_range {
+                            tab.cursor_offset = range.primary.ccursor.index;
+                            let selection = TextRange::new(
+                                range.primary.ccursor.index,
+                                range.secondary.ccursor.index,
+                            );
+                            tab.selection = (!selection.is_empty()).then_some(selection);
+                        }
+                    });
+            });
+        });
 
         ui.separator();
         self.results_panel(ui, tab_id);
+    }
+
+    fn history_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("History").strong());
+            ui.label(
+                RichText::new(format!("{} entries", self.history_entries.len()))
+                    .small()
+                    .color(Color32::GRAY),
+            );
+        });
+        ui.add_space(4.0);
+
+        ScrollArea::vertical()
+            .id_source("query_history_panel")
+            .max_height(260.0)
+            .show(ui, |ui| {
+                if self.history_entries.is_empty() {
+                    ui.label(RichText::new("No history yet").italics().color(Color32::GRAY));
+                    return;
+                }
+
+                let mut picked_sql = None;
+                for entry in self.history_entries.iter().take(100) {
+                    let conn_name = self
+                        .connections
+                        .iter()
+                        .find(|conn| conn.id == entry.connection_id)
+                        .map(|conn| conn.name.as_str())
+                        .unwrap_or("Unknown");
+                    let success_color = if entry.success {
+                        Color32::from_rgb(70, 150, 70)
+                    } else {
+                        Color32::from_rgb(200, 80, 80)
+                    };
+
+                    eframe::egui::Frame::group(ui.style()).show(ui, |ui| {
+                        if ui
+                            .selectable_label(false, &entry.summary)
+                            .on_hover_text(&entry.sql)
+                            .clicked()
+                        {
+                            picked_sql = Some(entry.sql.clone());
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(conn_name).small().color(Color32::GRAY));
+                            ui.label(
+                                RichText::new(entry.executed_at.format("%Y-%m-%d %H:%M:%S").to_string())
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                            ui.label(
+                                RichText::new(format!("{} ms", entry.elapsed_ms))
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                            ui.label(
+                                RichText::new(format!("{} rows", entry.affected_rows))
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                            ui.label(RichText::new(if entry.success { "OK" } else { "ERR" }).small().color(success_color));
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+
+                if let Some(sql) = picked_sql {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.sql = sql;
+                        tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                        tab.dirty = true;
+                        self.status = "Loaded SQL from history".to_string();
+                    }
+                }
+            });
     }
 
     fn results_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
@@ -582,7 +696,7 @@ impl QueryEditor {
             return;
         };
 
-        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+        let Some(tab) = self.tabs.get(&tab_id) else {
             return;
         };
 
@@ -595,6 +709,28 @@ impl QueryEditor {
             self.status = "No selected SQL".to_string();
             return;
         }
+
+        let sql_to_check = selected_sql_for_mode(tab, mode).unwrap_or_else(|| tab.sql.clone());
+        if should_confirm_dangerous_sql(&sql_to_check) {
+            self.pending_danger_confirm = Some(PendingDangerConfirm {
+                mode,
+                sql: sql_to_check,
+            });
+            self.status = "Dangerous SQL requires confirmation".to_string();
+            return;
+        }
+
+        self.execute_active_confirmed(mode);
+    }
+
+    fn execute_active_confirmed(&mut self, mode: QueryExecutionMode) {
+        let Some(tab_id) = self.active_tab else {
+            return;
+        };
+
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return;
+        };
 
         tab.execution_running = true;
         tab.execution_error = None;
@@ -704,6 +840,15 @@ impl QueryEditor {
         });
     }
 
+    fn load_history(&mut self) {
+        let tx = self.tx.clone();
+        let service = self.query_service.clone();
+        self.runtime.spawn(async move {
+            let history = service.history().await;
+            let _ = tx.send(QueryEditorEvent::HistoryLoaded(history));
+        });
+    }
+
     fn load_databases_for_tab(&mut self, tab_id: QueryId) {
         let Some(tab) = self.tabs.get(&tab_id) else {
             return;
@@ -791,12 +936,16 @@ impl QueryEditor {
                             }
                         }
                     }
+                    self.load_history();
                 }
                 QueryEditorEvent::ConnectionList(profiles) => {
                     self.connections = profiles
                         .into_iter()
                         .filter(|profile| profile.kind.is_relational())
                         .collect();
+                }
+                QueryEditorEvent::HistoryLoaded(entries) => {
+                    self.history_entries = entries;
                 }
                 QueryEditorEvent::DatabaseList(tab_id, databases) => {
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
@@ -883,6 +1032,46 @@ impl QueryEditor {
             }
         }
     }
+
+    fn dangerous_sql_dialog(&mut self, ctx: &eframe::egui::Context) {
+        let Some(pending) = &self.pending_danger_confirm else {
+            return;
+        };
+
+        let mut open = true;
+        let mode = pending.mode;
+        let sql = pending.sql.clone();
+        Window::new("Confirm Dangerous SQL")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .min_width(640.0)
+            .show(ctx, |ui| {
+                ui.colored_label(
+                    Color32::from_rgb(220, 150, 60),
+                    "UPDATE/DELETE/TRUNCATE without WHERE detected. Review the full SQL before continuing.",
+                );
+                ui.add_space(8.0);
+                ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    ui.code(&sql);
+                });
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.pending_danger_confirm = None;
+                        self.status = "Dangerous SQL cancelled".to_string();
+                    }
+                    if ui.button("Execute Anyway").clicked() {
+                        self.pending_danger_confirm = None;
+                        self.execute_active_confirmed(mode);
+                    }
+                });
+            });
+
+        if !open {
+            self.pending_danger_confirm = None;
+        }
+    }
 }
 
 fn connection_label(profile: &ConnectionProfile) -> String {
@@ -895,4 +1084,86 @@ fn next_tab_title(connection_name: &str) -> String {
 
 fn database_names(objects: Vec<DatabaseObject>) -> Vec<String> {
     objects.into_iter().map(|object| object.name).collect()
+}
+
+fn connection_kind_for(
+    connections: &[ConnectionProfile],
+    connection_id: ConnectionId,
+) -> Option<DataSourceKind> {
+    connections
+        .iter()
+        .find(|conn| conn.id == connection_id)
+        .map(|conn| conn.kind)
+}
+
+fn selected_sql_for_mode(tab: &QueryEditorTab, mode: QueryExecutionMode) -> Option<String> {
+    match mode {
+        QueryExecutionMode::CurrentStatement => statement_at_offset(&tab.sql, tab.cursor_offset),
+        QueryExecutionMode::Selection => tab.selection.map(|selection| {
+            tab.sql
+                .get(selection.start..selection.end)
+                .unwrap_or("")
+                .to_string()
+        }),
+        QueryExecutionMode::All => Some(tab.sql.clone()),
+    }
+}
+
+fn should_confirm_dangerous_sql(sql: &str) -> bool {
+    let normalized = sql.trim().to_ascii_lowercase();
+    normalized.starts_with("truncate") || looks_like_unqualified_mutation(sql)
+}
+
+fn highlight_layout_job(
+    text: &str,
+    tokens: &[SqlHighlightToken],
+    dialect: Option<DataSourceKind>,
+) -> LayoutJob {
+    let default_format = TextFormat {
+        font_id: FontId::monospace(14.0),
+        color: Color32::from_rgb(220, 220, 220),
+        ..Default::default()
+    };
+
+    let mut job = LayoutJob::default();
+    let mut cursor = 0;
+    for token in tokens {
+        let start = token.range.start.min(text.len());
+        let end = token.range.end.min(text.len());
+        if start > cursor {
+            job.append(&text[cursor..start], 0.0, default_format.clone());
+        }
+        if start < end {
+            job.append(&text[start..end], 0.0, token_format(token.kind, dialect));
+        }
+        cursor = end;
+    }
+    if cursor < text.len() {
+        job.append(&text[cursor..], 0.0, default_format);
+    }
+    job
+}
+
+fn token_format(kind: SqlTokenKind, dialect: Option<DataSourceKind>) -> TextFormat {
+    let color = match kind {
+        SqlTokenKind::Keyword => Color32::from_rgb(86, 156, 214),
+        SqlTokenKind::Identifier => Color32::from_rgb(220, 220, 220),
+        SqlTokenKind::QuotedIdentifier => match dialect {
+            Some(DataSourceKind::MySql) => Color32::from_rgb(156, 220, 254),
+            Some(DataSourceKind::PostgreSql) => Color32::from_rgb(197, 134, 192),
+            _ => Color32::from_rgb(156, 220, 254),
+        },
+        SqlTokenKind::StringLiteral => Color32::from_rgb(206, 145, 120),
+        SqlTokenKind::Number => Color32::from_rgb(181, 206, 168),
+        SqlTokenKind::Comment => Color32::from_rgb(106, 153, 85),
+        SqlTokenKind::Parameter => Color32::from_rgb(78, 201, 176),
+        SqlTokenKind::Function => Color32::from_rgb(220, 220, 170),
+        SqlTokenKind::Operator | SqlTokenKind::Punctuation => Color32::from_rgb(212, 212, 212),
+    };
+
+    TextFormat {
+        font_id: FontId::monospace(14.0),
+        color,
+        ..Default::default()
+    }
 }

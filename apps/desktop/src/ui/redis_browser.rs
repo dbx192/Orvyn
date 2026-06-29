@@ -1409,6 +1409,13 @@ impl RedisBrowserUi {
         self.load_key_value(key_name, false);
     }
 
+    pub fn prompt_delete_key(&mut self, connection_id: ConnectionId, database: u8, key_name: String) {
+        self.connection_id = connection_id;
+        self.selected_database = database;
+        self.select_key(key_name.clone());
+        self.confirm_delete = Some(key_name);
+    }
+
     fn switch_database(&mut self, database: u8) {
         self.selected_database = database;
         self.keys.clear();

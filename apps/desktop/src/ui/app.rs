@@ -523,6 +523,20 @@ impl DesktopApp {
                     self.state
                         .set_status(format!("Import CSV to {}", table_name));
                 }
+                ObjectTreeAction::ExportTableData {
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                } => {
+                    self.state.set_status(format!(
+                        "Loading table {}.{} for export ...",
+                        schema.as_deref().unwrap_or(""),
+                        table
+                    ));
+                    self.spawn_table_data_load(connection_id, database, schema, table);
+                    self.active_panel = ActivePanel::TableEditor;
+                }
                 ObjectTreeAction::EditConnection(id) => {
                     self.connection_manager_ui.edit_connection(id);
                     self.state.set_status(format!("Edit connection: {}", id));
@@ -530,6 +544,20 @@ impl DesktopApp {
                 ObjectTreeAction::DeleteConnection(id) => {
                     self.connection_manager_ui.delete_connection_prompt(id);
                     self.state.set_status(format!("Delete connection: {}", id));
+                }
+                ObjectTreeAction::DeleteRedisKey {
+                    connection_id,
+                    database,
+                    key,
+                } => {
+                    let database_index = database
+                        .as_deref()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    self.redis_browser
+                        .prompt_delete_key(connection_id, database_index, key.clone());
+                    self.active_panel = ActivePanel::RedisBrowser;
+                    self.state.set_status(format!("Delete Redis key {}", key));
                 }
             }
         }

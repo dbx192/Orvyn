@@ -2,7 +2,10 @@ mod ui;
 
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
-    redis_service::RedisService, session::SessionManager, storage::FileConnectionProfileStore,
+    redis_service::RedisService, session::SessionManager,
+    storage::{
+        FileConnectionProfileStore, FileFavoriteQueryStore, FileQueryHistoryStore,
+    },
 };
 use eframe::NativeOptions;
 use secure_store::EncryptedFileStore;
@@ -20,7 +23,23 @@ fn main() -> eframe::Result<()> {
     let connection_manager = bootstrap_connection_manager(default_config_dir());
     let session_manager = SessionManager::with_default_testers(connection_manager.clone());
     let metadata_service = MetadataService::with_default_readers(connection_manager.clone());
-    let query_service = QueryService::with_default_executors(connection_manager.clone());
+    let query_service = QueryService::with_stores(
+        connection_manager.clone(),
+        vec![
+            Arc::new(db_mysql::MySqlQueryExecutor::new()),
+            Arc::new(db_postgres::PostgresQueryExecutor::new()),
+            Arc::new(db_sqlite::SqliteQueryExecutor::new()),
+            Arc::new(db_duckdb::DuckDbQueryExecutor::new()),
+        ],
+        db_common::ConnectionPoolConfig::default(),
+        app_core::task::TaskManager::default(),
+        Arc::new(FileQueryHistoryStore::new(
+            default_config_dir().join("query-history.json"),
+        )),
+        Arc::new(FileFavoriteQueryStore::new(
+            default_config_dir().join("favorite-queries.json"),
+        )),
+    );
     let redis_service = RedisService::new(connection_manager.clone());
     let native_options = NativeOptions::default();
     let runtime_handle = runtime.handle().clone();
