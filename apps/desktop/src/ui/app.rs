@@ -84,7 +84,6 @@ struct TableStructurePayload {
 
 struct TableExportRequest {
     connection_id: ConnectionId,
-    database: Option<String>,
     schema: Option<String>,
     table: String,
     format: ExportFormat,
@@ -94,7 +93,6 @@ struct TableExportPayload {
     table_name: String,
     path: std::path::PathBuf,
     format: ExportFormat,
-    result: QueryResult,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1042,7 +1040,6 @@ impl DesktopApp {
                                 table_name,
                                 path,
                                 format,
-                                result,
                             })
                     })
                     .await;

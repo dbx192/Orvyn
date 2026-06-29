@@ -2,14 +2,15 @@ use crate::ui::result_grid::ResultSetGrid;
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::{
     looks_like_unqualified_mutation, statement_at_offset, AppError, ConnectionId,
-    ConnectionProfile, DataSourceKind, DatabaseObject, QueryExecutionMode,
-    QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId, SqlHighlightToken,
-    SqlTokenKind, TextRange,
+    ConnectionProfile, DataSourceKind, DatabaseObject, ErrorKind, FavoriteQuery,
+    QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
+    SqlHighlightToken, SqlTokenKind, TextRange,
 };
 use eframe::egui::{
     text::LayoutJob, Button, Color32, ComboBox, FontId, RichText, ScrollArea, TextEdit,
     TextFormat, Ui, Window,
 };
+use import_export::{export_query_result_to_file, ExportFormat};
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -28,16 +29,26 @@ struct QueryResultView {
 
 enum QueryEditorEvent {
     ExecutionCompleted(QueryId, Result<QueryExecutionReport, AppError>),
+    StopCompleted(QueryId, Result<(), AppError>),
     ConnectionList(Vec<ConnectionProfile>),
     DatabaseList(QueryId, Vec<String>),
     SchemaList(QueryId, Vec<String>),
     HistoryLoaded(Vec<QueryHistoryEntry>),
+    FavoritesLoaded(Vec<FavoriteQuery>),
+    FavoriteSaved(Result<FavoriteQuery, AppError>),
+    FavoriteRemoved(Result<QueryId, AppError>),
     MetadataLoadFailed(QueryId, String),
 }
 
 struct PendingDangerConfirm {
     mode: QueryExecutionMode,
     sql: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuerySideTab {
+    History,
+    Favorites,
 }
 
 struct QueryEditorTab {
@@ -56,6 +67,7 @@ struct QueryEditorTab {
     selected_result: usize,
     execution_report: Option<QueryExecutionReport>,
     execution_running: bool,
+    execution_cancelling: bool,
     execution_error: Option<String>,
     highlighted_sql: Vec<SqlHighlightToken>,
 }
@@ -78,6 +90,7 @@ impl QueryEditorTab {
             selected_result: 0,
             execution_report: None,
             execution_running: false,
+            execution_cancelling: false,
             execution_error: None,
             highlighted_sql: Vec::new(),
         }
@@ -101,9 +114,12 @@ pub struct QueryEditor {
     active_tab: Option<QueryId>,
     connections: Vec<ConnectionProfile>,
     history_entries: Vec<QueryHistoryEntry>,
+    favorite_entries: Vec<FavoriteQuery>,
     show_close_confirm: Option<QueryId>,
     show_execute_all: bool,
     pending_danger_confirm: Option<PendingDangerConfirm>,
+    side_tab: QuerySideTab,
+    favorite_name_input: String,
     status: String,
 }
 
@@ -126,13 +142,17 @@ impl QueryEditor {
             active_tab: None,
             connections: Vec::new(),
             history_entries: Vec::new(),
+            favorite_entries: Vec::new(),
             show_close_confirm: None,
             show_execute_all: false,
             pending_danger_confirm: None,
+            side_tab: QuerySideTab::History,
+            favorite_name_input: String::new(),
             status: String::new(),
         };
         editor.load_connections();
         editor.load_history();
+        editor.load_favorites();
         editor
     }
 
@@ -238,16 +258,21 @@ impl QueryEditor {
             return;
         };
 
-        let service = self.query_service.clone();
-        self.runtime.spawn(async move {
-            let _ = service.stop_execution(tab_id).await;
-        });
-
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
-            tab.execution_running = false;
-            tab.execution_error = Some("Execution cancelled".to_string());
+            if !tab.execution_running || tab.execution_cancelling {
+                return;
+            }
+            tab.execution_cancelling = true;
+            tab.execution_error = None;
         }
-        self.status = "Execution stopped".to_string();
+
+        let service = self.query_service.clone();
+        let tx = self.tx.clone();
+        self.runtime.spawn(async move {
+            let result = service.stop_execution(tab_id).await;
+            let _ = tx.send(QueryEditorEvent::StopCompleted(tab_id, result));
+        });
+        self.status = "Cancelling execution...".to_string();
     }
 
     fn open_new_tab(&mut self, profile: ConnectionProfile) -> QueryId {
@@ -273,10 +298,16 @@ impl QueryEditor {
             ui.separator();
 
             let active_tab_id = self.active_tab;
-            let (is_running, has_selection) = active_tab_id
+            let (is_running, is_cancelling, has_selection) = active_tab_id
                 .and_then(|id| self.tabs.get(&id))
-                .map(|tab| (tab.execution_running, tab.has_selection()))
-                .unwrap_or((false, false));
+                .map(|tab| {
+                    (
+                        tab.execution_running,
+                        tab.execution_cancelling,
+                        tab.has_selection(),
+                    )
+                })
+                .unwrap_or((false, false, false));
 
             if !is_running {
                 if ui.button("Run Current").clicked() {
@@ -291,6 +322,14 @@ impl QueryEditor {
                 if ui.button("Run All").clicked() {
                     self.show_execute_all = true;
                 }
+                if ui.button("Explain").clicked() {
+                    self.execute_explain(false);
+                }
+                if ui.button("Explain Analyze").clicked() {
+                    self.execute_explain(true);
+                }
+            } else if is_cancelling {
+                ui.add_enabled(false, Button::new("Cancelling..."));
             } else if ui.button("Stop").clicked() {
                 self.stop_execution();
             }
@@ -298,7 +337,15 @@ impl QueryEditor {
             if let Some(tab) = active_tab_id.and_then(|id| self.tabs.get(&id)) {
                 ui.separator();
                 if tab.execution_running {
-                    ui.label(RichText::new("Running").color(Color32::YELLOW).strong());
+                    ui.label(
+                        RichText::new(if tab.execution_cancelling {
+                            "Cancelling..."
+                        } else {
+                            "Running"
+                        })
+                        .color(Color32::YELLOW)
+                        .strong(),
+                    );
                 } else if let Some(report) = &tab.execution_report {
                     ui.label(
                         RichText::new(format!("{} ms", report.elapsed_ms))
@@ -526,150 +573,106 @@ impl QueryEditor {
 
     fn history_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("History").strong());
-            ui.label(
-                RichText::new(format!("{} entries", self.history_entries.len()))
-                    .small()
-                    .color(Color32::GRAY),
-            );
+            ui.selectable_value(&mut self.side_tab, QuerySideTab::History, "History");
+            ui.selectable_value(&mut self.side_tab, QuerySideTab::Favorites, "Favorites");
         });
         ui.add_space(4.0);
 
-        ScrollArea::vertical()
-            .id_source("query_history_panel")
-            .max_height(260.0)
-            .show(ui, |ui| {
-                if self.history_entries.is_empty() {
-                    ui.label(RichText::new("No history yet").italics().color(Color32::GRAY));
-                    return;
-                }
-
-                let mut picked_sql = None;
-                for entry in self.history_entries.iter().take(100) {
-                    let conn_name = self
-                        .connections
-                        .iter()
-                        .find(|conn| conn.id == entry.connection_id)
-                        .map(|conn| conn.name.as_str())
-                        .unwrap_or("Unknown");
-                    let success_color = if entry.success {
-                        Color32::from_rgb(70, 150, 70)
-                    } else {
-                        Color32::from_rgb(200, 80, 80)
-                    };
-
-                    eframe::egui::Frame::group(ui.style()).show(ui, |ui| {
-                        if ui
-                            .selectable_label(false, &entry.summary)
-                            .on_hover_text(&entry.sql)
-                            .clicked()
-                        {
-                            picked_sql = Some(entry.sql.clone());
-                        }
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(conn_name).small().color(Color32::GRAY));
-                            ui.label(
-                                RichText::new(entry.executed_at.format("%Y-%m-%d %H:%M:%S").to_string())
-                                    .small()
-                                    .color(Color32::GRAY),
-                            );
-                            ui.label(
-                                RichText::new(format!("{} ms", entry.elapsed_ms))
-                                    .small()
-                                    .color(Color32::GRAY),
-                            );
-                            ui.label(
-                                RichText::new(format!("{} rows", entry.affected_rows))
-                                    .small()
-                                    .color(Color32::GRAY),
-                            );
-                            ui.label(RichText::new(if entry.success { "OK" } else { "ERR" }).small().color(success_color));
-                        });
-                    });
-                    ui.add_space(4.0);
-                }
-
-                if let Some(sql) = picked_sql {
-                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                        tab.sql = sql;
-                        tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
-                        tab.dirty = true;
-                        self.status = "Loaded SQL from history".to_string();
-                    }
-                }
-            });
+        match self.side_tab {
+            QuerySideTab::History => self.history_list(ui, tab_id),
+            QuerySideTab::Favorites => self.favorites_panel(ui, tab_id),
+        }
     }
 
     fn results_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
-        let Some(tab) = self.tabs.get_mut(&tab_id) else {
-            return;
-        };
+        let mut export_request = None;
+        {
+            let Some(tab) = self.tabs.get_mut(&tab_id) else {
+                return;
+            };
 
-        if tab.execution_running {
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    RichText::new("Executing...")
+            if tab.execution_running {
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        RichText::new(if tab.execution_cancelling {
+                            "Cancelling query..."
+                        } else {
+                            "Executing..."
+                        })
                         .color(Color32::YELLOW)
                         .strong(),
-                );
+                    );
+                });
+                return;
+            }
+
+            if let Some(error) = &tab.execution_error {
+                ui.colored_label(Color32::RED, error);
+                return;
+            }
+
+            if tab.results.is_empty() {
+                ui.label("No query executed yet");
+                return;
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                for (index, result) in tab.results.iter().enumerate() {
+                    let selected = tab.selected_result == index;
+                    if ui.selectable_label(selected, &result.summary).clicked() {
+                        tab.selected_result = index;
+                    }
+                }
             });
-            return;
-        }
+            ui.separator();
 
-        if let Some(error) = &tab.execution_error {
-            ui.colored_label(Color32::RED, error);
-            return;
-        }
+            let Some(result) = tab.results.get_mut(tab.selected_result) else {
+                return;
+            };
 
-        if tab.results.is_empty() {
-            ui.label("No query executed yet");
-            return;
-        }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("{} ms", result.elapsed_ms))
+                        .color(Color32::GREEN)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(format!("{} rows affected", result.affected_rows))
+                        .color(Color32::from_rgb(70, 110, 190))
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(result.statement.trim())
+                        .small()
+                        .color(Color32::GRAY),
+                );
+                ui.separator();
+                if ui.button("Export CSV").clicked() {
+                    export_request = Some((result.grid.as_ref().map(|grid| grid.result().clone()), ExportFormat::Csv));
+                }
+                if ui.button("Export JSON").clicked() {
+                    export_request =
+                        Some((result.grid.as_ref().map(|grid| grid.result().clone()), ExportFormat::Json));
+                }
+            });
 
-        ui.horizontal_wrapped(|ui| {
-            for (index, result) in tab.results.iter().enumerate() {
-                let selected = tab.selected_result == index;
-                if ui.selectable_label(selected, &result.summary).clicked() {
-                    tab.selected_result = index;
+            for notice in &result.notices {
+                ui.label(RichText::new(notice).small().color(Color32::LIGHT_BLUE));
+            }
+
+            ui.add_space(6.0);
+            match &mut result.grid {
+                Some(grid) => {
+                    let _ = grid.ui(ui);
+                }
+                None => {
+                    ui.label("Statement executed without a tabular result.");
                 }
             }
-        });
-        ui.separator();
-
-        let Some(result) = tab.results.get_mut(tab.selected_result) else {
-            return;
-        };
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(format!("{} ms", result.elapsed_ms))
-                    .color(Color32::GREEN)
-                    .strong(),
-            );
-            ui.label(
-                RichText::new(format!("{} rows affected", result.affected_rows))
-                    .color(Color32::from_rgb(70, 110, 190))
-                    .strong(),
-            );
-            ui.label(
-                RichText::new(result.statement.trim())
-                    .small()
-                    .color(Color32::GRAY),
-            );
-        });
-
-        for notice in &result.notices {
-            ui.label(RichText::new(notice).small().color(Color32::LIGHT_BLUE));
         }
 
-        ui.add_space(6.0);
-        match &mut result.grid {
-            Some(grid) => {
-                let _ = grid.ui(ui);
-            }
-            None => {
-                ui.label("Statement executed without a tabular result.");
-            }
+        if let Some((query_result, format)) = export_request {
+            self.export_query_result(query_result, format);
         }
     }
 
@@ -723,6 +726,28 @@ impl QueryEditor {
         self.execute_active_confirmed(mode);
     }
 
+    fn execute_explain(&mut self, analyze: bool) {
+        let Some(tab_id) = self.active_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
+        let Some(statement) =
+            selected_sql_for_mode(tab, if tab.has_selection() { QueryExecutionMode::Selection } else { QueryExecutionMode::CurrentStatement })
+        else {
+            self.status = "No statement available for EXPLAIN".to_string();
+            return;
+        };
+
+        let prefix = if analyze {
+            "EXPLAIN ANALYZE"
+        } else {
+            "EXPLAIN"
+        };
+        self.execute_custom_sql(tab_id, format!("{prefix} {}", statement.trim()), prefix);
+    }
+
     fn execute_active_confirmed(&mut self, mode: QueryExecutionMode) {
         let Some(tab_id) = self.active_tab else {
             return;
@@ -733,6 +758,7 @@ impl QueryEditor {
         };
 
         tab.execution_running = true;
+        tab.execution_cancelling = false;
         tab.execution_error = None;
         tab.results.clear();
         tab.execution_report = None;
@@ -759,6 +785,35 @@ impl QueryEditor {
             QueryExecutionMode::All => "Executing all statements...".to_string(),
         };
 
+        self.runtime.spawn(async move {
+            let result = service.execute(request, None).await;
+            let _ = tx.send(QueryEditorEvent::ExecutionCompleted(tab_id, result));
+        });
+    }
+
+    fn execute_custom_sql(&mut self, tab_id: QueryId, sql: String, label: &str) {
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return;
+        };
+
+        tab.execution_running = true;
+        tab.execution_cancelling = false;
+        tab.execution_error = None;
+        tab.results.clear();
+        tab.execution_report = None;
+
+        let tx = self.tx.clone();
+        let service = self.query_service.clone();
+        let request = QueryExecutionRequest {
+            tab_id,
+            connection_id: tab.connection_id,
+            sql,
+            mode: QueryExecutionMode::CurrentStatement,
+            cursor_offset: 0,
+            selection: None,
+            timeout_ms: 60_000,
+        };
+        self.status = format!("{label} running...");
         self.runtime.spawn(async move {
             let result = service.execute(request, None).await;
             let _ = tx.send(QueryEditorEvent::ExecutionCompleted(tab_id, result));
@@ -849,6 +904,15 @@ impl QueryEditor {
         });
     }
 
+    fn load_favorites(&mut self) {
+        let tx = self.tx.clone();
+        let service = self.query_service.clone();
+        self.runtime.spawn(async move {
+            let favorites = service.favorites().await;
+            let _ = tx.send(QueryEditorEvent::FavoritesLoaded(favorites));
+        });
+    }
+
     fn load_databases_for_tab(&mut self, tab_id: QueryId) {
         let Some(tab) = self.tabs.get(&tab_id) else {
             return;
@@ -903,6 +967,7 @@ impl QueryEditor {
                 QueryEditorEvent::ExecutionCompleted(tab_id, result) => {
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
                         tab.execution_running = false;
+                        tab.execution_cancelling = false;
                         match result {
                             Ok(report) => {
                                 let results = report
@@ -931,12 +996,28 @@ impl QueryEditor {
                                 );
                             }
                             Err(error) => {
-                                tab.execution_error = Some(error.message.clone());
-                                self.status = format!("Execution failed: {}", error.message);
+                                if error.kind == ErrorKind::Cancelled {
+                                    tab.execution_error = Some("Execution cancelled".to_string());
+                                    self.status = "Execution cancelled".to_string();
+                                } else {
+                                    tab.execution_error = Some(error.message.clone());
+                                    self.status = format!("Execution failed: {}", error.message);
+                                }
                             }
                         }
                     }
                     self.load_history();
+                }
+                QueryEditorEvent::StopCompleted(tab_id, result) => {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.execution_cancelling = false;
+                        if let Err(error) = result {
+                            tab.execution_error = Some(error.message.clone());
+                            self.status = format!("Stop failed: {}", error.message);
+                        } else {
+                            self.status = "Cancellation requested".to_string();
+                        }
+                    }
                 }
                 QueryEditorEvent::ConnectionList(profiles) => {
                     self.connections = profiles
@@ -947,6 +1028,28 @@ impl QueryEditor {
                 QueryEditorEvent::HistoryLoaded(entries) => {
                     self.history_entries = entries;
                 }
+                QueryEditorEvent::FavoritesLoaded(entries) => {
+                    self.favorite_entries = entries;
+                }
+                QueryEditorEvent::FavoriteSaved(result) => match result {
+                    Ok(favorite) => {
+                        upsert_favorite(&mut self.favorite_entries, favorite);
+                        self.favorite_name_input.clear();
+                        self.status = "Favorite saved".to_string();
+                    }
+                    Err(error) => {
+                        self.status = format!("Save favorite failed: {}", error.message);
+                    }
+                },
+                QueryEditorEvent::FavoriteRemoved(result) => match result {
+                    Ok(id) => {
+                        self.favorite_entries.retain(|entry| entry.id != id);
+                        self.status = "Favorite removed".to_string();
+                    }
+                    Err(error) => {
+                        self.status = format!("Remove favorite failed: {}", error.message);
+                    }
+                },
                 QueryEditorEvent::DatabaseList(tab_id, databases) => {
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
                         tab.available_databases = databases;
@@ -1072,6 +1175,212 @@ impl QueryEditor {
             self.pending_danger_confirm = None;
         }
     }
+
+    fn export_query_result(
+        &mut self,
+        query_result: Option<db_common::QueryResult>,
+        format: ExportFormat,
+    ) {
+        let Some(query_result) = query_result else {
+            self.status = "This result set cannot be exported".to_string();
+            return;
+        };
+
+        let (label, ext) = match format {
+            ExportFormat::Csv => ("CSV", "csv"),
+            ExportFormat::Json => ("JSON", "json"),
+            ExportFormat::ExcelCompatible => ("Excel", "tsv"),
+        };
+
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(&format!("Export {label}"))
+            .add_filter(label, &[ext])
+            .save_file()
+        else {
+            return;
+        };
+
+        let path_for_task = path.clone();
+        self.status = format!("{label} export started: {}", path.display());
+        self.runtime.spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || {
+                export_query_result_to_file(&query_result, format, &path_for_task)
+            })
+            .await;
+        });
+    }
+
+    fn history_list(&mut self, ui: &mut Ui, tab_id: QueryId) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("History").strong());
+            ui.label(
+                RichText::new(format!("{} entries", self.history_entries.len()))
+                    .small()
+                    .color(Color32::GRAY),
+            );
+        });
+        ScrollArea::vertical()
+            .id_source("query_history_panel")
+            .max_height(260.0)
+            .show(ui, |ui| {
+                if self.history_entries.is_empty() {
+                    ui.label(RichText::new("No history yet").italics().color(Color32::GRAY));
+                    return;
+                }
+
+                let mut picked_sql = None;
+                for entry in self.history_entries.iter().take(100) {
+                    let conn_name = self
+                        .connections
+                        .iter()
+                        .find(|conn| conn.id == entry.connection_id)
+                        .map(|conn| conn.name.as_str())
+                        .unwrap_or("Unknown");
+                    let success_color = if entry.success {
+                        Color32::from_rgb(70, 150, 70)
+                    } else {
+                        Color32::from_rgb(200, 80, 80)
+                    };
+
+                    eframe::egui::Frame::group(ui.style()).show(ui, |ui| {
+                        if ui
+                            .selectable_label(false, &entry.summary)
+                            .on_hover_text(&entry.sql)
+                            .clicked()
+                        {
+                            picked_sql = Some(entry.sql.clone());
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(conn_name).small().color(Color32::GRAY));
+                            ui.label(
+                                RichText::new(entry.executed_at.format("%Y-%m-%d %H:%M:%S").to_string())
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                            ui.label(
+                                RichText::new(format!("{} ms", entry.elapsed_ms))
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                            ui.label(
+                                RichText::new(format!("{} rows", entry.affected_rows))
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                            ui.label(RichText::new(if entry.success { "OK" } else { "ERR" }).small().color(success_color));
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+
+                if let Some(sql) = picked_sql {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.sql = sql;
+                        tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                        tab.dirty = true;
+                        self.status = "Loaded SQL from history".to_string();
+                    }
+                }
+            });
+    }
+
+    fn favorites_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Favorites").strong());
+            ui.label(
+                RichText::new(format!("{} saved", self.favorite_entries.len()))
+                    .small()
+                    .color(Color32::GRAY),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.add(
+                TextEdit::singleline(&mut self.favorite_name_input)
+                    .hint_text("Favorite name")
+                    .desired_width(180.0),
+            );
+            if ui.button("Save Current").clicked() {
+                self.save_current_as_favorite(tab_id);
+            }
+        });
+        ui.add_space(4.0);
+        ScrollArea::vertical()
+            .id_source("query_favorites_panel")
+            .max_height(260.0)
+            .show(ui, |ui| {
+                if self.favorite_entries.is_empty() {
+                    ui.label(RichText::new("No favorites yet").italics().color(Color32::GRAY));
+                    return;
+                }
+
+                let mut picked_sql = None;
+                let mut remove_id = None;
+                for entry in &self.favorite_entries {
+                    eframe::egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(false, &entry.title).clicked() {
+                                picked_sql = Some(entry.sql.clone());
+                            }
+                            if ui.small_button("Delete").clicked() {
+                                remove_id = Some(entry.id);
+                            }
+                        });
+                        ui.label(
+                            RichText::new(
+                                entry.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                            )
+                            .small()
+                            .color(Color32::GRAY),
+                        );
+                    });
+                    ui.add_space(4.0);
+                }
+
+                if let Some(sql) = picked_sql {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.sql = sql;
+                        tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                        tab.dirty = true;
+                        self.status = "Loaded SQL from favorites".to_string();
+                    }
+                }
+                if let Some(id) = remove_id {
+                    self.remove_favorite(id);
+                }
+            });
+    }
+
+    fn save_current_as_favorite(&mut self, tab_id: QueryId) {
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
+        if tab.sql.trim().is_empty() {
+            self.status = "No SQL to save".to_string();
+            return;
+        }
+        let title = if self.favorite_name_input.trim().is_empty() {
+            statement_title(&tab.sql)
+        } else {
+            self.favorite_name_input.trim().to_string()
+        };
+        let service = self.query_service.clone();
+        let tx = self.tx.clone();
+        let sql = tab.sql.clone();
+        let connection_id = Some(tab.connection_id);
+        self.runtime.spawn(async move {
+            let result = service.add_favorite(connection_id, title, sql).await;
+            let _ = tx.send(QueryEditorEvent::FavoriteSaved(result));
+        });
+    }
+
+    fn remove_favorite(&mut self, id: QueryId) {
+        let service = self.query_service.clone();
+        let tx = self.tx.clone();
+        self.runtime.spawn(async move {
+            let result = service.remove_favorite(id).await.map(|_| id);
+            let _ = tx.send(QueryEditorEvent::FavoriteRemoved(result));
+        });
+    }
 }
 
 fn connection_label(profile: &ConnectionProfile) -> String {
@@ -1080,6 +1389,17 @@ fn connection_label(profile: &ConnectionProfile) -> String {
 
 fn next_tab_title(connection_name: &str) -> String {
     format!("Query · {}", connection_name)
+}
+
+fn statement_title(sql: &str) -> String {
+    let trimmed = sql.trim();
+    let preview = trimmed.lines().next().unwrap_or("SQL");
+    let short = preview.chars().take(48).collect::<String>();
+    if short.is_empty() {
+        "SQL".to_string()
+    } else {
+        short
+    }
 }
 
 fn database_names(objects: Vec<DatabaseObject>) -> Vec<String> {
@@ -1165,5 +1485,14 @@ fn token_format(kind: SqlTokenKind, dialect: Option<DataSourceKind>) -> TextForm
         font_id: FontId::monospace(14.0),
         color,
         ..Default::default()
+    }
+}
+
+fn upsert_favorite(favorites: &mut Vec<FavoriteQuery>, favorite: FavoriteQuery) {
+    if let Some(existing) = favorites.iter_mut().find(|entry| entry.id == favorite.id) {
+        *existing = favorite;
+    } else {
+        favorites.push(favorite);
+        favorites.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     }
 }

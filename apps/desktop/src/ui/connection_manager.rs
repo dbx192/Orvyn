@@ -31,6 +31,8 @@ struct ConnectionForm {
     database: String,
     file_path: String,
     save_password: bool,
+    has_stored_password: bool,
+    password_modified: bool,
     read_only: bool,
     ssl_mode: SslMode,
 }
@@ -50,6 +52,8 @@ impl ConnectionForm {
             database: String::new(),
             file_path: String::new(),
             save_password: false,
+            has_stored_password: false,
+            password_modified: false,
             read_only: false,
             ssl_mode: SslMode::Prefer,
         }
@@ -70,6 +74,8 @@ impl ConnectionForm {
             database: profile.database.clone().unwrap_or_default(),
             file_path: profile.file_path.clone().unwrap_or_default(),
             save_password: profile.security.save_password,
+            has_stored_password: profile.password_ref.is_some() && profile.security.save_password,
+            password_modified: false,
             read_only: profile.security.read_only,
             ssl_mode: profile.security.ssl_mode,
         }
@@ -222,6 +228,7 @@ impl ConnectionManagerUi {
         message.or_else(|| (!self.status.is_empty()).then(|| self.status.clone()))
     }
 
+    #[allow(dead_code)]
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
         self.drain_events();
         let mut message = None;
@@ -239,6 +246,7 @@ impl ConnectionManagerUi {
         message
     }
 
+    #[allow(dead_code)]
     fn list_panel(&mut self, ui: &mut Ui) {
         ui.heading("Connections");
         ui.horizontal(|ui| {
@@ -359,11 +367,19 @@ impl ConnectionManagerUi {
 
                 if !self.form.kind.is_file_based() {
                     ui.label("Password");
-                    ui.add(
+                    let response = ui.add(
                         TextEdit::singleline(&mut self.form.password)
                             .password(true)
+                            .hint_text(if self.form.has_stored_password && !self.form.password_modified {
+                                "Saved password"
+                            } else {
+                                ""
+                            })
                             .desired_width(260.0),
                     );
+                    if response.changed() {
+                        self.form.password_modified = true;
+                    }
                     ui.end_row();
                 }
 
@@ -480,7 +496,13 @@ impl ConnectionManagerUi {
         self.error = None;
         let profile = self.form.to_profile();
         let password = if self.form.save_password {
-            PasswordUpdate::Replace(self.form.password.clone())
+            if self.form.password_modified {
+                PasswordUpdate::Replace(self.form.password.clone())
+            } else if self.form.has_stored_password {
+                PasswordUpdate::Keep
+            } else {
+                PasswordUpdate::Replace(String::new())
+            }
         } else {
             PasswordUpdate::Clear
         };
@@ -619,6 +641,7 @@ impl ConnectionManagerUi {
         self.recent.truncate(8);
     }
 
+    #[allow(dead_code)]
     fn grouped_profiles(&self) -> BTreeMap<String, Vec<ConnectionId>> {
         let mut groups = BTreeMap::<String, Vec<ConnectionId>>::new();
         for profile in &self.profiles {

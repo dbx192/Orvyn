@@ -1,12 +1,12 @@
 //! CSV import wizard: step-by-step guide to import CSV data into a database table.
 
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
-use db_common::dialect::{BacktickDialect, DoubleQuoteDialect};
+use db_common::dialect::DoubleQuoteDialect;
 use db_common::{
-    ConnectionId, DataSourceKind, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest,
-    QueryId, Result, TableColumn,
+    ConnectionId, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest, QueryId,
+    Result, TableColumn,
 };
-use eframe::egui::{Button, Color32, ComboBox, Frame, RichText, ScrollArea, Ui, Window};
+use eframe::egui::{Button, Color32, ComboBox, Frame, RichText, ScrollArea, Ui};
 use import_export::import_csv::{
     auto_map_fields, generate_insert_batches, parse_csv_preview, validate_types, CsvImportOptions,
     CsvPreview, FieldMapping, ValidationReport,
@@ -65,7 +65,6 @@ pub struct ImportWizard {
     // Services
     metadata_service: MetadataService,
     query_service: QueryService,
-    connection_manager: ConnectionManager,
     runtime: Handle,
 
     // Async pending
@@ -87,7 +86,7 @@ impl ImportWizard {
         table: String,
         metadata_service: MetadataService,
         query_service: QueryService,
-        connection_manager: ConnectionManager,
+        _connection_manager: ConnectionManager,
         runtime: Handle,
     ) -> Self {
         Self {
@@ -107,7 +106,6 @@ impl ImportWizard {
             import_result: None,
             metadata_service,
             query_service,
-            connection_manager,
             runtime,
             pending_preview: None,
             pending_validation: None,
@@ -194,7 +192,7 @@ impl ImportWizard {
 
     // ── Step 1: File Selection ──
 
-    fn step_select_file(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+    fn step_select_file(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
         ui.label("Choose a CSV file to import:");
         ui.add_space(8.0);
 
@@ -225,7 +223,7 @@ impl ImportWizard {
                     b'\t' => "Tab",
                     b';' => "Semicolon (;)",
                     b'|' => "Pipe (|)",
-                    other => "Custom",
+                    _other => "Custom",
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.csv_options.delimiter, b',', "Comma (,)");
@@ -279,7 +277,7 @@ impl ImportWizard {
 
     // ── Step 2: Preview ──
 
-    fn step_preview(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+    fn step_preview(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
         if let Some(ref preview) = self.preview {
             ui.label(format!(
                 "Found {} columns, ~{} data rows in {}",
@@ -498,7 +496,7 @@ impl ImportWizard {
 
     // ── Step 4: Validate ──
 
-    fn step_validate(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+    fn step_validate(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
         if let Some(ref report) = self.validation_report {
             if report.issues.is_empty() {
                 ui.label(RichText::new("✅ All rows passed validation!").color(Color32::GREEN));
@@ -566,7 +564,7 @@ impl ImportWizard {
 
     // ── Step 5: Execute ──
 
-    fn step_execute(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+    fn step_execute(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
         if let Some(ref result) = self.import_result {
             // Show completed result
             ui.label(

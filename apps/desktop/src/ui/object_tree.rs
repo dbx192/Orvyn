@@ -3,8 +3,7 @@ use db_common::{
     AppError, ConnectionId, ConnectionStatus, MetadataNode, MetadataNodeKind, MetadataPath,
 };
 use eframe::egui::{
-    vec2, Align, Button, Color32, Context, Frame, Label, Layout, RichText, ScrollArea, Sense,
-    TextEdit, Ui,
+    Button, Color32, Context, Frame, Label, RichText, ScrollArea, Sense, TextEdit, Ui,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -13,8 +12,9 @@ use std::{
 use tokio::runtime::Handle;
 
 const SEARCH_MIN_CHARS: usize = 2;
-const SEARCH_RESULT_LIMIT: usize = 100;
 const STATUS_POLL_INTERVAL_MS: u64 = 1500;
+const RECONNECT_BASE_DELAY_MS: u64 = 3000;
+const MAX_RECONNECT_ATTEMPTS: u8 = 3;
 
 #[derive(Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 struct NodeKey {
@@ -81,6 +81,13 @@ enum TreeEvent {
     StatusPolled(Vec<(ConnectionId, ConnectionStatus)>),
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ReconnectState {
+    attempts: u8,
+    next_retry_ms: u64,
+    in_flight: bool,
+}
+
 /// Action surfaced to the parent app when a node is activated from the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectTreeAction {
@@ -141,6 +148,8 @@ pub struct ObjectTree {
     status: String,
     redis_pattern: BTreeMap<NodeKey, String>,
     last_status_poll_ms: u64,
+    reconnects: BTreeMap<ConnectionId, ReconnectState>,
+    reconnect_suppressed: BTreeSet<ConnectionId>,
 }
 
 impl ObjectTree {
@@ -164,6 +173,8 @@ impl ObjectTree {
             status: String::new(),
             redis_pattern: BTreeMap::new(),
             last_status_poll_ms: 0,
+            reconnects: BTreeMap::new(),
+            reconnect_suppressed: BTreeSet::new(),
         };
         ui.load_root();
         ui
@@ -175,6 +186,7 @@ impl ObjectTree {
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) -> (Option<String>, Vec<ObjectTreeAction>) {
         self.drain_events(ctx);
         self.maybe_poll_status(ctx);
+        self.maybe_retry_reconnects(ctx);
 
         self.search_bar(ui);
         ui.separator();
@@ -971,6 +983,7 @@ impl ObjectTree {
     }
 
     fn connect(&mut self, connection_id: ConnectionId) {
+        self.reconnect_suppressed.remove(&connection_id);
         if let Some((_, status)) = self.connections.get_mut(&connection_id) {
             *status = ConnectionStatus::Connecting;
         }
@@ -984,6 +997,8 @@ impl ObjectTree {
     }
 
     fn disconnect(&mut self, connection_id: ConnectionId) {
+        self.reconnect_suppressed.insert(connection_id);
+        self.reconnects.remove(&connection_id);
         if let Some((_, status)) = self.connections.get_mut(&connection_id) {
             *status = ConnectionStatus::Disconnected;
         }
@@ -1013,6 +1028,26 @@ impl ObjectTree {
             }
             let _ = tx.send(TreeEvent::StatusPolled(updates));
         });
+    }
+
+    fn maybe_retry_reconnects(&mut self, ctx: &Context) {
+        let now_ms = (ctx.input(|i| i.time) * 1000.0) as u64;
+        let retry_ids = self
+            .reconnects
+            .iter()
+            .filter_map(|(id, state)| {
+                (!state.in_flight && state.attempts < MAX_RECONNECT_ATTEMPTS && now_ms >= state.next_retry_ms)
+                    .then_some(*id)
+            })
+            .collect::<Vec<_>>();
+
+        for connection_id in retry_ids {
+            if let Some(state) = self.reconnects.get_mut(&connection_id) {
+                state.in_flight = true;
+            }
+            self.connect(connection_id);
+            self.status = format!("Reconnecting {}...", connection_id.as_uuid());
+        }
     }
 
     fn drain_events(&mut self, _ctx: &Context) {
@@ -1072,9 +1107,16 @@ impl ObjectTree {
                             Err(_) => ConnectionStatus::Failed,
                         };
                     }
-                    self.status = match result {
-                        Ok(_) => "Connected".to_string(),
-                        Err(e) => format!("Connection failed: {}", e.message),
+                    match result {
+                        Ok(_) => {
+                            self.reconnects.remove(&id);
+                            self.refresh_connection(id);
+                            self.status = "Connected".to_string();
+                        }
+                        Err(e) => {
+                            self.schedule_reconnect(id, ConnectionStatus::Failed, _ctx);
+                            self.status = format!("Connection failed: {}", e.message);
+                        }
                     };
                 }
                 TreeEvent::StatusPolled(updates) => {
@@ -1087,8 +1129,19 @@ impl ObjectTree {
                                 | ConnectionStatus::Disconnected
                                 | ConnectionStatus::NotConnected
                         ) {
+                            let previous = self.connections.get(&id).map(|(_, status)| *status);
                             if let Some((_, status)) = self.connections.get_mut(&id) {
                                 *status = new_status;
+                            }
+                            if matches!(new_status, ConnectionStatus::Connected) {
+                                self.reconnects.remove(&id);
+                                self.reconnect_suppressed.remove(&id);
+                            } else if matches!(
+                                new_status,
+                                ConnectionStatus::Disconnected | ConnectionStatus::Failed
+                            ) && previous != Some(new_status)
+                            {
+                                self.schedule_reconnect(id, new_status, _ctx);
                             }
                         }
                     }
@@ -1143,6 +1196,37 @@ impl ObjectTree {
 
     fn connection_force_expanded(&self, tree_node: &TreeNode) -> bool {
         self.search_active() && self.connection_matches_search(tree_node)
+    }
+
+    fn schedule_reconnect(
+        &mut self,
+        connection_id: ConnectionId,
+        status: ConnectionStatus,
+        ctx: &Context,
+    ) {
+        if self.reconnect_suppressed.contains(&connection_id)
+            || !matches!(status, ConnectionStatus::Disconnected | ConnectionStatus::Failed)
+        {
+            return;
+        }
+
+        let now_ms = (ctx.input(|i| i.time) * 1000.0) as u64;
+        let state = self.reconnects.entry(connection_id).or_insert(ReconnectState {
+            attempts: 0,
+            next_retry_ms: now_ms + RECONNECT_BASE_DELAY_MS,
+            in_flight: false,
+        });
+
+        if state.attempts >= MAX_RECONNECT_ATTEMPTS || state.in_flight {
+            return;
+        }
+
+        if state.attempts == 0 || state.next_retry_ms <= now_ms {
+            state.next_retry_ms =
+                now_ms + RECONNECT_BASE_DELAY_MS * u64::from(state.attempts.saturating_add(1));
+        }
+        state.attempts = state.attempts.saturating_add(1);
+        state.in_flight = false;
     }
 }
 
@@ -1209,43 +1293,6 @@ fn connection_status_label(status: &ConnectionStatus) -> &'static str {
         ConnectionStatus::Connected => "Connected",
         ConnectionStatus::Failed => "Connection failed",
         ConnectionStatus::Disconnected => "Disconnected",
-    }
-}
-
-fn result_path_description(node: &MetadataNode) -> String {
-    let mut parts = Vec::new();
-    if let Some(db) = &node.path.database {
-        parts.push(db.clone());
-    }
-    if let Some(schema) = &node.path.schema {
-        parts.push(schema.clone());
-    }
-    let kind = match node.kind {
-        MetadataNodeKind::Table => "Table",
-        MetadataNodeKind::View => "View",
-        MetadataNodeKind::Column => "Column",
-        MetadataNodeKind::Index => "Index",
-        MetadataNodeKind::Schema => "Schema",
-        MetadataNodeKind::Database => "Database",
-        MetadataNodeKind::RedisKey => "Redis Key",
-        MetadataNodeKind::RedisDatabase => "Redis DB",
-        MetadataNodeKind::RedisKeysFolder => "Keys",
-        MetadataNodeKind::TablesFolder => "Tables",
-        MetadataNodeKind::ViewsFolder => "Views",
-        MetadataNodeKind::ColumnsFolder => "Columns",
-        MetadataNodeKind::IndexesFolder => "Indexes",
-        MetadataNodeKind::ForeignKeysFolder => "Foreign Keys",
-        MetadataNodeKind::TriggersFolder => "Triggers",
-        MetadataNodeKind::FunctionsFolder => "Functions",
-        MetadataNodeKind::Connection => "Connection",
-        MetadataNodeKind::ForeignKey => "Foreign Key",
-        MetadataNodeKind::Trigger => "Trigger",
-        MetadataNodeKind::Function => "Function",
-    };
-    if parts.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{} - {}", kind, parts.join("."))
     }
 }
 

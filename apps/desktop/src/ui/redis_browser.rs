@@ -1577,7 +1577,7 @@ impl RedisBrowserUi {
         });
     }
 
-    fn load_key_value(&mut self, key_name: String, force_full: bool) {
+    fn load_key_value(&mut self, key_name: String, _force_full: bool) {
         self.value_display = ValueDisplay::Loading;
         let tx = self.response_tx.clone();
         let manager = self.connection_manager.clone();
@@ -1657,17 +1657,12 @@ impl RedisBrowserUi {
                             )
                             .await
                             {
-                                Ok(size) => {
-                                    if let Some(entry) = tx
-                                        .send(BrowserResponse::KeysScanned {
-                                            cursor: 0,
-                                            keys: vec![],
-                                            has_more: false,
-                                        })
-                                        .ok()
-                                    {
-                                        // Update the key entry's size
-                                    }
+                                Ok(_size) => {
+                                    let _ = tx.send(BrowserResponse::KeysScanned {
+                                        cursor: 0,
+                                        keys: vec![],
+                                        has_more: false,
+                                    });
                                 }
                                 Err(_) => {}
                             }
