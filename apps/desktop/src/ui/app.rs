@@ -13,8 +13,10 @@ use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
     redis_service::RedisService, session::SessionManager,
 };
+use import_export::{export_query_result_to_file, ExportFormat};
 use db_common::DatabaseFunction;
 use db_common::{
+    AppError,
     dialect::{BacktickDialect, DoubleQuoteDialect},
     ConnectionId, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest, QueryId,
     QueryResult, TableColumn, TableForeignKey, TableIndex, TableTrigger,
@@ -44,6 +46,10 @@ pub struct DesktopApp {
     /// Pending async load for table structure.
     pending_structure_load:
         Option<Arc<Mutex<Option<Result<TableStructurePayload, db_common::AppError>>>>>,
+    /// Pending async export query load and file write.
+    pending_table_export:
+        Option<Arc<Mutex<Option<Result<TableExportPayload, db_common::AppError>>>>>,
+    export_request: Option<TableExportRequest>,
     // Cloned service handles for spawning async loads.
     connection_manager: ConnectionManager,
     metadata_service: MetadataService,
@@ -74,6 +80,21 @@ struct TableStructurePayload {
     triggers: Vec<TableTrigger>,
     functions: Vec<DatabaseFunction>,
     create_sql: String,
+}
+
+struct TableExportRequest {
+    connection_id: ConnectionId,
+    database: Option<String>,
+    schema: Option<String>,
+    table: String,
+    format: ExportFormat,
+}
+
+struct TableExportPayload {
+    table_name: String,
+    path: std::path::PathBuf,
+    format: ExportFormat,
+    result: QueryResult,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +155,8 @@ impl DesktopApp {
             active_panel: ActivePanel::QueryEditor,
             pending_table_load: None,
             pending_structure_load: None,
+            pending_table_export: None,
+            export_request: None,
             connection_manager: cm,
             metadata_service: ms,
             query_service: qs,
@@ -262,6 +285,7 @@ impl eframe::App for DesktopApp {
         self.left_tree(ctx);
         self.central_panel(ctx);
         self.connection_windows(ctx);
+        self.table_export_window(ctx);
         self.bottom_status(ctx);
         self.error_window(ctx);
     }
@@ -652,6 +676,39 @@ impl DesktopApp {
                 self.pending_structure_load = Some(cell);
             }
         }
+
+        // ── Table export ──
+        let export_cell = self.pending_table_export.take();
+        if let Some(cell) = export_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            let format_label = match payload.format {
+                                ExportFormat::Csv => "CSV",
+                                ExportFormat::Json => "JSON",
+                                ExportFormat::ExcelCompatible => "Excel",
+                            };
+                            self.state.set_status(format!(
+                                "{} export completed: {} -> {}",
+                                format_label,
+                                payload.table_name,
+                                payload.path.display()
+                            ));
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Export failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_table_export = Some(cell);
+            }
+        }
     }
 
     /// Spawn an async task to load table data (columns + paginated SELECT).
@@ -831,6 +888,177 @@ impl DesktopApp {
 
             *cell.lock().unwrap() = Some(result);
         });
+    }
+
+    fn table_export_window(&mut self, ctx: &Context) {
+        let Some(request) = self.export_request.as_mut() else {
+            return;
+        };
+
+        let mut open = true;
+        let table_name = match request.schema.as_deref().filter(|value| !value.is_empty()) {
+            Some(schema) => format!("{}.{}", schema, request.table),
+            None => request.table.clone(),
+        };
+        let table_file_name = request.table.clone();
+        let mut submit_export = None;
+        let mut cancel_export = false;
+
+        Window::new("Export Table Data")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("Table: {}", table_name));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Format");
+                    eframe::egui::ComboBox::from_id_source("table_export_format")
+                        .selected_text(match request.format {
+                            ExportFormat::Csv => "CSV",
+                            ExportFormat::Json => "JSON",
+                            ExportFormat::ExcelCompatible => "Excel",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut request.format, ExportFormat::Csv, "CSV");
+                            ui.selectable_value(&mut request.format, ExportFormat::Json, "JSON");
+                        });
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Export runs in the background and writes directly to file.")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel_export = true;
+                    }
+                    if ui.button("Export").clicked() {
+                        let format = request.format;
+                        let ext = match format {
+                            ExportFormat::Csv => "csv",
+                            ExportFormat::Json => "json",
+                            ExportFormat::ExcelCompatible => "tsv",
+                        };
+                        let path = rfd::FileDialog::new()
+                            .set_title("Export Table Data")
+                            .set_file_name(&format!("{}.{}", table_file_name, ext))
+                            .add_filter(
+                                match format {
+                                    ExportFormat::Csv => "CSV",
+                                    ExportFormat::Json => "JSON",
+                                    ExportFormat::ExcelCompatible => "Excel",
+                                },
+                                &[ext],
+                            )
+                            .save_file();
+
+                        if let Some(path) = path {
+                            submit_export = Some(path);
+                        }
+                    }
+                });
+            });
+
+        if let Some(path) = submit_export {
+            if let Some(export_request) = self.export_request.take() {
+                self.spawn_table_export(export_request, path);
+            }
+        }
+
+        if cancel_export {
+            self.export_request = None;
+        }
+
+        if !open {
+            self.export_request = None;
+        }
+    }
+
+    fn spawn_table_export(&mut self, request: TableExportRequest, path: std::path::PathBuf) {
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: Arc<Mutex<Option<Result<TableExportPayload, AppError>>>> =
+            Arc::new(Mutex::new(None));
+        self.pending_table_export = Some(cell.clone());
+
+        runtime.spawn(async move {
+            let dialect: Box<dyn Dialect> =
+                match connection_manager.get_profile(request.connection_id).await {
+                    Ok(Some(profile)) => match profile.kind {
+                        DataSourceKind::MySql => Box::new(BacktickDialect),
+                        _ => Box::new(DoubleQuoteDialect),
+                    },
+                    _ => Box::new(DoubleQuoteDialect),
+                };
+
+            let qualified = match request.schema.as_deref().filter(|value| !value.is_empty()) {
+                Some(schema) => format!(
+                    "{}.{}",
+                    dialect.quote_identifier(&db_common::Identifier::new(schema).unwrap()),
+                    dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap()),
+                ),
+                None => dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap()),
+            };
+            let sql = format!("SELECT * FROM {}", qualified);
+            let execute_result = query_service
+                .execute(
+                    QueryExecutionRequest {
+                        tab_id: QueryId::new(),
+                        connection_id: request.connection_id,
+                        sql,
+                        mode: QueryExecutionMode::All,
+                        cursor_offset: 0,
+                        selection: None,
+                        timeout_ms: 60_000,
+                    },
+                    None,
+                )
+                .await;
+
+            let result = match execute_result {
+                Ok(report) => {
+                    let result = report
+                        .results
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| QueryResult::empty(""));
+                    let path_for_write = path.clone();
+                    let format = request.format;
+                    let table_name = match request
+                        .schema
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                    {
+                        Some(schema) => format!("{}.{}", schema, request.table),
+                        None => request.table.clone(),
+                    };
+                    let write_result = tokio::task::spawn_blocking(move || {
+                        export_query_result_to_file(&result, format, &path_for_write)
+                            .map(|_| TableExportPayload {
+                                table_name,
+                                path,
+                                format,
+                                result,
+                            })
+                    })
+                    .await;
+
+                    match write_result {
+                        Ok(payload) => payload,
+                        Err(error) => Err(AppError::internal(error.to_string())),
+                    }
+                }
+                Err(error) => Err(error),
+            };
+
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status("Table export started");
     }
 
     fn bottom_status(&mut self, ctx: &Context) {

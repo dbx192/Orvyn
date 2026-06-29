@@ -2,7 +2,7 @@ use crate::ui::format::{
     cell_rich_text, compare_cell_values, copy_cell_value, copy_to_clipboard, display_cell_value,
     hover_cell_value,
 };
-use db_common::{Column, QueryResult};
+use db_common::{CellValue, Column, QueryResult};
 use eframe::egui::{
     Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Slider,
     Stroke, Ui, Vec2,
