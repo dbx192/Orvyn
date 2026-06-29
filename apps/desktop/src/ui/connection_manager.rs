@@ -62,7 +62,9 @@ impl ConnectionForm {
             group: profile.group.clone().unwrap_or_default(),
             kind: profile.kind,
             host: profile.host.clone().unwrap_or_default(),
-            port: profile.port.unwrap_or_else(|| profile.kind.default_port().unwrap_or(0)),
+            port: profile
+                .port
+                .unwrap_or_else(|| profile.kind.default_port().unwrap_or(0)),
             username: profile.username.clone().unwrap_or_default(),
             password: String::new(),
             database: profile.database.clone().unwrap_or_default(),
@@ -210,7 +212,10 @@ impl ConnectionManagerUi {
             ui.label(RichText::new("Recent").strong());
             for id in self.recent.clone() {
                 if let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) {
-                    if ui.button(format!("{} ({})", profile.name, profile.kind.as_str())).clicked() {
+                    if ui
+                        .button(format!("{} ({})", profile.name, profile.kind.as_str()))
+                        .clicked()
+                    {
                         self.select_profile(id);
                     }
                 }
@@ -224,7 +229,9 @@ impl ConnectionManagerUi {
                     .default_open(true)
                     .show(ui, |ui| {
                         for id in ids {
-                            let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
+                            let Some(profile) =
+                                self.profiles.iter().find(|profile| profile.id == id)
+                            else {
                                 continue;
                             };
                             let selected = self.selected == Some(id);
@@ -295,7 +302,10 @@ impl ConnectionManagerUi {
                     ui.end_row();
                 }
 
-                if matches!(self.form.kind, DataSourceKind::MySql | DataSourceKind::PostgreSql) {
+                if matches!(
+                    self.form.kind,
+                    DataSourceKind::MySql | DataSourceKind::PostgreSql
+                ) {
                     ui.label("Username");
                     ui.add(TextEdit::singleline(&mut self.form.username).desired_width(260.0));
                     ui.end_row();
@@ -336,10 +346,7 @@ impl ConnectionManagerUi {
                 ui.label("Options");
                 ui.horizontal(|ui| {
                     ui.add(Checkbox::new(&mut self.form.read_only, "Read only"));
-                    ui.add(Checkbox::new(
-                        &mut self.form.save_password,
-                        "Save password",
-                    ));
+                    ui.add(Checkbox::new(&mut self.form.save_password, "Save password"));
                 });
                 ui.end_row();
             });
@@ -480,7 +487,13 @@ impl ConnectionManagerUi {
                         self.profiles = profiles;
                         self.status = format!("Loaded {} connections", self.profiles.len());
                     }
-                    Err(error) => self.error = Some(actionable_error("Load connections failed", error, &self.form.password)),
+                    Err(error) => {
+                        self.error = Some(actionable_error(
+                            "Load connections failed",
+                            error,
+                            &self.form.password,
+                        ))
+                    }
                 },
                 ConnectionEvent::Saved(result) => match result {
                     Ok(profile) => {
@@ -491,7 +504,13 @@ impl ConnectionManagerUi {
                         self.remember_recent(id);
                         self.status = "Connection saved".to_string();
                     }
-                    Err(error) => self.error = Some(actionable_error("Save connection failed", error, &self.form.password)),
+                    Err(error) => {
+                        self.error = Some(actionable_error(
+                            "Save connection failed",
+                            error,
+                            &self.form.password,
+                        ))
+                    }
                 },
                 ConnectionEvent::Deleted(result) => match result {
                     Ok(id) => {
@@ -501,7 +520,13 @@ impl ConnectionManagerUi {
                         self.form = ConnectionForm::new();
                         self.status = "Connection deleted".to_string();
                     }
-                    Err(error) => self.error = Some(actionable_error("Delete connection failed", error, &self.form.password)),
+                    Err(error) => {
+                        self.error = Some(actionable_error(
+                            "Delete connection failed",
+                            error,
+                            &self.form.password,
+                        ))
+                    }
                 },
                 ConnectionEvent::Tested(result) => match result {
                     Ok(report) => {
@@ -512,7 +537,13 @@ impl ConnectionManagerUi {
                         };
                         self.test_report = Some(report);
                     }
-                    Err(error) => self.error = Some(actionable_error("Test connection failed", error, &self.form.password)),
+                    Err(error) => {
+                        self.error = Some(actionable_error(
+                            "Test connection failed",
+                            error,
+                            &self.form.password,
+                        ))
+                    }
                 },
             }
         }
@@ -538,7 +569,12 @@ impl ConnectionManagerUi {
         let mut groups = BTreeMap::<String, Vec<ConnectionId>>::new();
         for profile in &self.profiles {
             groups
-                .entry(profile.group.clone().unwrap_or_else(|| "Ungrouped".to_string()))
+                .entry(
+                    profile
+                        .group
+                        .clone()
+                        .unwrap_or_else(|| "Ungrouped".to_string()),
+                )
                 .or_default()
                 .push(profile.id);
         }
@@ -547,7 +583,10 @@ impl ConnectionManagerUi {
 }
 
 fn upsert_profile(profiles: &mut Vec<ConnectionProfile>, profile: ConnectionProfile) {
-    if let Some(existing) = profiles.iter_mut().find(|existing| existing.id == profile.id) {
+    if let Some(existing) = profiles
+        .iter_mut()
+        .find(|existing| existing.id == profile.id)
+    {
         *existing = profile;
     } else {
         profiles.push(profile);

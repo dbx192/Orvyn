@@ -192,9 +192,7 @@ impl ObjectTree {
             ui.label(RichText::new("🔍").color(Color32::GRAY));
             let response = ui.add(
                 TextEdit::singleline(&mut self.search_query)
-                    .hint_text(format!(
-                        "Search object (min {SEARCH_MIN_CHARS} chars)..."
-                    ))
+                    .hint_text(format!("Search object (min {SEARCH_MIN_CHARS} chars)..."))
                     .desired_width(180.0),
             );
             if response.changed() {
@@ -279,13 +277,8 @@ impl ObjectTree {
 
                     let dot_resp = ui
                         .add(
-                            Label::new(
-                                RichText::new("●")
-                                    .color(status_color)
-                                    .size(11.0)
-                                    .strong(),
-                            )
-                            .sense(Sense::click()),
+                            Label::new(RichText::new("●").color(status_color).size(11.0).strong())
+                                .sense(Sense::click()),
                         )
                         .on_hover_text(status_label);
                     if dot_resp.clicked() {
@@ -294,15 +287,11 @@ impl ObjectTree {
 
                     let label_text = format!("{}  ", node.label);
                     let label_resp = ui.add(
-                        Label::new(
-                            RichText::new(label_text)
-                                .strong()
-                                .color(if is_selected {
-                                    ui.visuals().selection.bg_fill
-                                } else {
-                                    Color32::default()
-                                }),
-                        )
+                        Label::new(RichText::new(label_text).strong().color(if is_selected {
+                            ui.visuals().selection.bg_fill
+                        } else {
+                            Color32::default()
+                        }))
                         .sense(Sense::click()),
                     );
 
@@ -332,9 +321,7 @@ impl ObjectTree {
                             (Some(children), _) => {
                                 if children.is_empty() {
                                     ui.label(
-                                        RichText::new("(empty)")
-                                            .color(Color32::GRAY)
-                                            .italics(),
+                                        RichText::new("(empty)").color(Color32::GRAY).italics(),
                                     );
                                 } else {
                                     for child in children {
@@ -344,17 +331,12 @@ impl ObjectTree {
                             }
                             (None, true) => {
                                 ui.label(
-                                    RichText::new("Loading...")
-                                        .color(Color32::GRAY)
-                                        .italics(),
+                                    RichText::new("Loading...").color(Color32::GRAY).italics(),
                                 );
                             }
                             (None, false) => {
                                 if let Some(error) = &tree_node.load_error {
-                                    ui.colored_label(
-                                        Color32::RED,
-                                        format!("Error: {}", error),
-                                    );
+                                    ui.colored_label(Color32::RED, format!("Error: {}", error));
                                     if ui.button("Retry").clicked() {
                                         self.refresh_connection(connection_id);
                                     }
@@ -402,13 +384,11 @@ impl ObjectTree {
             ui.label(RichText::new(icon).size(12.0));
 
             let label_resp = ui.add(
-                Label::new(
-                    RichText::new(&node.label).color(if is_selected {
-                        ui.visuals().selection.bg_fill
-                    } else {
-                        Color32::default()
-                    }),
-                )
+                Label::new(RichText::new(&node.label).color(if is_selected {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    Color32::default()
+                }))
                 .sense(Sense::click()),
             );
 
@@ -441,34 +421,22 @@ impl ObjectTree {
         });
 
         if expanded && !is_leaf {
-            ui.indent("node_children", |ui| {
-                match children {
-                    Some(list) if list.is_empty() => {
-                        ui.label(RichText::new("(empty)").color(Color32::GRAY).italics());
+            ui.indent("node_children", |ui| match children {
+                Some(list) if list.is_empty() => {
+                    ui.label(RichText::new("(empty)").color(Color32::GRAY).italics());
+                }
+                Some(list) => {
+                    for child in &list {
+                        self.render_tree_node(ui, child, message, actions);
                     }
-                    Some(list) => {
-                        for child in &list {
-                            self.render_tree_node(ui, child, message, actions);
-                        }
-                    }
-                    None => {
-                        if matches!(
-                            node.kind,
-                            MetadataNodeKind::RedisKeysFolder
-                        ) && self.redis_pattern.contains_key(&key)
-                        {
-                            ui.label(
-                                RichText::new("Loading...")
-                                    .color(Color32::GRAY)
-                                    .italics(),
-                            );
-                        } else {
-                            ui.label(
-                                RichText::new("Loading...")
-                                    .color(Color32::GRAY)
-                                    .italics(),
-                            );
-                        }
+                }
+                None => {
+                    if matches!(node.kind, MetadataNodeKind::RedisKeysFolder)
+                        && self.redis_pattern.contains_key(&key)
+                    {
+                        ui.label(RichText::new("Loading...").color(Color32::GRAY).italics());
+                    } else {
+                        ui.label(RichText::new("Loading...").color(Color32::GRAY).italics());
                     }
                 }
             });
@@ -485,7 +453,9 @@ impl ObjectTree {
         if let Some(results) = &results {
             if results.is_empty() {
                 ui.label(
-                    RichText::new("No results found").color(Color32::GRAY).italics(),
+                    RichText::new("No results found")
+                        .color(Color32::GRAY)
+                        .italics(),
                 );
                 return;
             }
@@ -500,11 +470,7 @@ impl ObjectTree {
                 let indent = (*depth as f32) * 14.0;
 
                 let result_clone = result.clone();
-                let label_text = format!(
-                    "{} {}",
-                    node_kind_icon(result.kind),
-                    result.label
-                );
+                let label_text = format!("{} {}", node_kind_icon(result.kind), result.label);
                 let resp = ui.allocate_ui_with_layout(
                     vec2(ui.available_width(), 20.0),
                     Layout::left_to_right(Align::Center),
@@ -529,11 +495,7 @@ impl ObjectTree {
                 }
 
                 let path_desc = format!("    {}", result_path_description(result));
-                ui.label(
-                    RichText::new(path_desc)
-                        .color(Color32::GRAY)
-                        .size(10.0),
-                );
+                ui.label(RichText::new(path_desc).color(Color32::GRAY).size(10.0));
             }
         }
     }
@@ -616,53 +578,90 @@ impl ObjectTree {
         match node.kind {
             MetadataNodeKind::Table => {
                 if ui.button("Open Table Data").clicked() {
-                    self.emit_table_action(node, |conn_id, db, schema, table| {
-                        ObjectTreeAction::OpenTableData { connection_id: conn_id, database: db, schema, table }
-                    }, actions);
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, table| ObjectTreeAction::OpenTableData {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            table,
+                        },
+                        actions,
+                    );
                     ui.close_menu();
                 }
                 if ui.button("View Structure").clicked() {
-                    self.emit_table_action(node, |conn_id, db, schema, table| {
-                        ObjectTreeAction::ViewStructure { connection_id: conn_id, database: db, schema, table }
-                    }, actions);
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, table| ObjectTreeAction::ViewStructure {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            table,
+                        },
+                        actions,
+                    );
                     ui.close_menu();
                 }
                 if ui.button("New Query on Table").clicked() {
-                    self.emit_table_action(node, |conn_id, db, schema, _table| {
-                        ObjectTreeAction::OpenQuery { connection_id: conn_id, database: db, schema }
-                    }, actions);
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, _table| ObjectTreeAction::OpenQuery {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                        },
+                        actions,
+                    );
                     ui.close_menu();
                 }
                 if ui.button("Import CSV...").clicked() {
-                    self.emit_table_action(node, |conn_id, db, schema, table| {
-                        ObjectTreeAction::ImportCsv { connection_id: conn_id, database: db, schema, table }
-                    }, actions);
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, table| ObjectTreeAction::ImportCsv {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            table,
+                        },
+                        actions,
+                    );
                     ui.close_menu();
                 }
                 ui.separator();
             }
             MetadataNodeKind::View => {
                 if ui.button("Open View Data").clicked() {
-                    self.emit_table_action(node, |conn_id, db, schema, table| {
-                        ObjectTreeAction::OpenTableData { connection_id: conn_id, database: db, schema, table }
-                    }, actions);
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, table| ObjectTreeAction::OpenTableData {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            table,
+                        },
+                        actions,
+                    );
                     ui.close_menu();
                 }
                 if ui.button("View Structure").clicked() {
-                    self.emit_table_action(node, |conn_id, db, schema, table| {
-                        ObjectTreeAction::ViewStructure { connection_id: conn_id, database: db, schema, table }
-                    }, actions);
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, table| ObjectTreeAction::ViewStructure {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            table,
+                        },
+                        actions,
+                    );
                     ui.close_menu();
                 }
                 ui.separator();
             }
             MetadataNodeKind::RedisKeysFolder => {
                 let key = NodeKey::from(&node.path);
-                let current = self
-                    .redis_pattern
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_default();
+                let current = self.redis_pattern.get(&key).cloned().unwrap_or_default();
                 let mut input = current.clone();
                 ui.label("Pattern (glob):");
                 let resp = ui.add(
@@ -671,10 +670,10 @@ impl ObjectTree {
                         .desired_width(180.0),
                 );
                 if resp.lost_focus() && input != current {
-                    self.apply_redis_pattern(key.clone(), input);
+                    self.apply_redis_pattern(key.clone(), input.clone());
                 }
                 if resp.changed() {
-                    self.redis_pattern.insert(key.clone(), input);
+                    self.redis_pattern.insert(key.clone(), input.clone());
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Apply").clicked() {
@@ -694,9 +693,15 @@ impl ObjectTree {
             }
             MetadataNodeKind::RedisKey => {
                 if ui.button("View Key").clicked() {
-                    self.emit_key_action(node, |conn_id, db, key| {
-                        ObjectTreeAction::ViewKey { connection_id: conn_id, database: db, key }
-                    }, actions);
+                    self.emit_key_action(
+                        node,
+                        |conn_id, db, key| ObjectTreeAction::ViewKey {
+                            connection_id: conn_id,
+                            database: db,
+                            key,
+                        },
+                        actions,
+                    );
                     ui.close_menu();
                 }
                 ui.separator();
@@ -735,21 +740,41 @@ impl ObjectTree {
     ) {
         match node.kind {
             MetadataNodeKind::Table => {
-                self.emit_table_action(node, |conn_id, db, schema, table| {
-                    ObjectTreeAction::OpenTableData { connection_id: conn_id, database: db, schema, table }
-                }, actions);
+                self.emit_table_action(
+                    node,
+                    |conn_id, db, schema, table| ObjectTreeAction::OpenTableData {
+                        connection_id: conn_id,
+                        database: db,
+                        schema,
+                        table,
+                    },
+                    actions,
+                );
                 *message = Some(format!("Opening {}", node.label));
             }
             MetadataNodeKind::View => {
-                self.emit_table_action(node, |conn_id, db, schema, table| {
-                    ObjectTreeAction::OpenTableData { connection_id: conn_id, database: db, schema, table }
-                }, actions);
+                self.emit_table_action(
+                    node,
+                    |conn_id, db, schema, table| ObjectTreeAction::OpenTableData {
+                        connection_id: conn_id,
+                        database: db,
+                        schema,
+                        table,
+                    },
+                    actions,
+                );
                 *message = Some(format!("Opening view {}", node.label));
             }
             MetadataNodeKind::RedisKey => {
-                self.emit_key_action(node, |conn_id, db, key| {
-                    ObjectTreeAction::ViewKey { connection_id: conn_id, database: db, key }
-                }, actions);
+                self.emit_key_action(
+                    node,
+                    |conn_id, db, key| ObjectTreeAction::ViewKey {
+                        connection_id: conn_id,
+                        database: db,
+                        key,
+                    },
+                    actions,
+                );
                 *message = Some(format!("Viewing key {}", node.label));
             }
             _ => {
@@ -842,7 +867,7 @@ impl ObjectTree {
         if is_empty {
             self.redis_pattern.remove(&key);
         } else {
-            self.redis_pattern.insert(key, pattern);
+            self.redis_pattern.insert(key.clone(), pattern);
         }
         // Invalidate and re-fetch with the new pattern.
         self.child_cache.remove(&key);
@@ -1089,8 +1114,7 @@ impl ObjectTree {
                                     tree_node.load_error = Some(error.message.clone());
                                 }
                             } else {
-                                self.status =
-                                    format!("Failed to load children: {}", error.message);
+                                self.status = format!("Failed to load children: {}", error.message);
                             }
                         }
                     }

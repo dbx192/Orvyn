@@ -728,8 +728,15 @@ async fn pg_get_create_table(client: &Client, schema: &str, table: &str) -> Resu
 
     if !pk_rows.is_empty() {
         let pk_name: String = pk_rows[0].get(0);
-        let pk_cols: Vec<String> = pk_rows.iter().map(|r| format!("\"{}\"", r.get::<_, String>(1))).collect();
-        col_defs.push(format!("    CONSTRAINT \"{}\" PRIMARY KEY ({})", pk_name, pk_cols.join(", ")));
+        let pk_cols: Vec<String> = pk_rows
+            .iter()
+            .map(|r| format!("\"{}\"", r.get::<_, String>(1)))
+            .collect();
+        col_defs.push(format!(
+            "    CONSTRAINT \"{}\" PRIMARY KEY ({})",
+            pk_name,
+            pk_cols.join(", ")
+        ));
     }
 
     let fk_rows = client
@@ -759,7 +766,11 @@ async fn pg_get_create_table(client: &Client, schema: &str, table: &str) -> Resu
     let fks = group_postgres_foreign_keys(fk_rows);
     for fk in &fks {
         let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
-        let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("\"{}\"", c)).collect();
+        let ref_cols: Vec<String> = fk
+            .referenced_columns
+            .iter()
+            .map(|c| format!("\"{}\"", c))
+            .collect();
         let mut fk_def = format!(
             "    CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
             fk.name,

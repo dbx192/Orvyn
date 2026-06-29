@@ -161,12 +161,10 @@ mod tests {
 
     #[test]
     fn datetime_renders_in_iso() {
-        let text = display_cell_value(&CellValue::DateTime(
-            NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
-                NaiveTime::from_hms_opt(3, 4, 5).unwrap(),
-            ),
-        ));
+        let text = display_cell_value(&CellValue::DateTime(NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            NaiveTime::from_hms_opt(3, 4, 5).unwrap(),
+        )));
         assert_eq!(text, "2024-01-02 03:04:05");
     }
 }

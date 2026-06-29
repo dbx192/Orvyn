@@ -5,8 +5,8 @@ use db_common::{
     is_result_set_statement, redact_connection_url, AppError, CellValue, Column, ConnectionId,
     ConnectionPoolConfig, ConnectionPoolStats, ConnectionProfile, ConnectionTestReport,
     ConnectionTester, DataSourceKind, DatabaseFunction, DatabaseObject, DatabaseObjectKind,
-    ErrorKind, LogicalType, QueryResult, RelationalMetadataReader, RelationalQueryExecutor,
-    Result, Row, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+    ErrorKind, LogicalType, QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result,
+    Row, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
 use sqlx::{mysql::MySqlPoolOptions, Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};

@@ -742,8 +742,14 @@ mod tests {
     #[test]
     fn handles_double_quoted_strings() {
         assert_eq!(split_statements(r#"select "a";"#), vec![r#"select "a""#]);
-        assert_eq!(split_statements(r#"select "a;b";"#), vec![r#"select "a;b""#]);
-        assert_eq!(split_statements(r#"select "a""b";"#), vec![r#"select "a""b""#]);
+        assert_eq!(
+            split_statements(r#"select "a;b";"#),
+            vec![r#"select "a;b""#]
+        );
+        assert_eq!(
+            split_statements(r#"select "a""b";"#),
+            vec![r#"select "a""b""#]
+        );
         assert_eq!(split_statements(r#"select ";";"#), vec![r#"select ";"#]);
     }
 
@@ -751,7 +757,11 @@ mod tests {
     fn handles_mixed_quotes_and_comments() {
         assert_eq!(
             split_statements("select 'a'; /* comment */ select \"b\"; -- comment\nselect 3"),
-            vec!["select 'a'", "/* comment */ select \"b\"", "-- comment select 3"]
+            vec![
+                "select 'a'",
+                "/* comment */ select \"b\"",
+                "-- comment select 3"
+            ]
         );
     }
 
@@ -759,7 +769,10 @@ mod tests {
     fn handles_statement_at_offset_with_comments() {
         let sql = "-- comment\nselect 1;\n/* comment */\nselect 2;";
         assert_eq!(statement_at_offset(sql, 20).as_deref(), Some("select 1"));
-        assert_eq!(statement_at_offset(sql, 40).as_deref(), Some("/* comment */ select 2"));
+        assert_eq!(
+            statement_at_offset(sql, 40).as_deref(),
+            Some("/* comment */ select 2")
+        );
     }
 
     #[test]
@@ -777,8 +790,14 @@ mod tests {
 
     #[test]
     fn handles_whitespace_around_semicolons() {
-        assert_eq!(split_statements("select 1 ; select 2"), vec!["select 1", "select 2"]);
-        assert_eq!(split_statements("select 1 \n ; \n select 2"), vec!["select 1", "select 2"]);
+        assert_eq!(
+            split_statements("select 1 ; select 2"),
+            vec!["select 1", "select 2"]
+        );
+        assert_eq!(
+            split_statements("select 1 \n ; \n select 2"),
+            vec!["select 1", "select 2"]
+        );
     }
 
     #[test]

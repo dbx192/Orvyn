@@ -8,16 +8,19 @@
 //! - Key detail panel with lazy loading (preview by default, full content on demand)
 //! - Delete confirmation
 //! - Refresh functionality
+//! - Full editing support for all Redis data types
 
-use app_core::{connection::ConnectionManager, metadata::MetadataService};
+use app_core::{
+    connection::ConnectionManager, metadata::MetadataService, redis_service::RedisService,
+};
 use db_common::{
-    base64_preview, human_bytes, AppError, CellValue, ConnectionId, ConnectionProfile,
-    DataSourceKind, RedisDatabase, RedisKeyInfo, RedisValue,
+    human_bytes, AppError, CellValue, ConnectionId, ConnectionProfile, RedisDatabase, RedisKeyInfo,
+    RedisValue,
 };
 use db_redis::RedisConnectorWithAuth;
 use eframe::egui::{
-    Align, Button, Color32, ComboBox, Context, DragValue, Grid, Label, Layout, RichText,
-    ScrollArea, SelectableLabel, Spinner, TextEdit, Ui, Window,
+    Align, Align2, Button, Color32, ComboBox, Context, Grid, Layout, RichText, ScrollArea,
+    SelectableLabel, Spinner, TextEdit, Ui, Window,
 };
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -38,10 +41,7 @@ pub enum ValueDisplay {
     /// Value is not loaded yet.
     NotLoaded,
     /// Value is too large, requires user confirmation to load.
-    TooLarge {
-        preview: String,
-        total_size: usize,
-    },
+    TooLarge { preview: String, total_size: usize },
     /// Full value is loaded.
     Loaded(RedisValue),
     /// Value is currently loading.
@@ -59,9 +59,10 @@ pub struct KeyEntry {
 pub struct RedisBrowserUi {
     connection_manager: ConnectionManager,
     metadata_service: MetadataService,
+    redis_service: RedisService,
     runtime: tokio::runtime::Handle,
-    tx: Sender<BrowserCommand>,
-    rx: Receiver<BrowserResponse>,
+    response_tx: Sender<BrowserResponse>,
+    response_rx: Receiver<BrowserResponse>,
 
     // Connection state
     connection_id: ConnectionId,
@@ -79,6 +80,7 @@ pub struct RedisBrowserUi {
 
     // Key detail state
     selected_key: Option<String>,
+    selected_key_type: Option<String>,
     value_display: ValueDisplay,
     confirm_load_full: Option<(String, usize)>,
 
@@ -87,6 +89,45 @@ pub struct RedisBrowserUi {
 
     // TTL edit
     editing_ttl: Option<(String, i64)>,
+    ttl_edit_value: String,
+
+    // New key dialog
+    new_key_dialog: bool,
+    new_key_name: String,
+    new_key_type: String,
+    new_key_value: String,
+    new_key_ttl: String,
+
+    // String editing
+    string_editing: bool,
+    string_edit_value: String,
+
+    // Hash editing
+    hash_edit_field: Option<(String, String)>,
+    hash_new_field: String,
+    hash_new_value: String,
+    confirm_delete_hash_field: Option<String>,
+
+    // List editing
+    list_page: usize,
+    list_page_size: usize,
+    list_push_value: String,
+    list_push_direction: String,
+    list_pop_direction: String,
+    list_set_index: String,
+    list_set_value: String,
+    list_set_idx: Option<usize>,
+    confirm_delete_list_index: Option<usize>,
+
+    // Set editing
+    set_new_member: String,
+    confirm_delete_set_member: Option<String>,
+
+    // ZSet editing
+    zset_new_member: String,
+    zset_new_score: String,
+    zset_edit_score: Option<(String, String)>,
+    confirm_delete_zset_member: Option<String>,
 
     // Error display
     error: Option<String>,
@@ -115,11 +156,85 @@ enum BrowserCommand {
         key: String,
         ttl_seconds: Option<i64>,
     },
+    CreateKey {
+        database: u8,
+        key: String,
+        key_type: String,
+        initial_value: String,
+        ttl_seconds: Option<u64>,
+    },
+    SetStringValue {
+        database: u8,
+        key: String,
+        value: String,
+        ttl_seconds: Option<u64>,
+    },
+    SetHashField {
+        database: u8,
+        key: String,
+        field: String,
+        value: String,
+    },
+    DeleteHashField {
+        database: u8,
+        key: String,
+        field: String,
+    },
+    LPush {
+        database: u8,
+        key: String,
+        value: String,
+    },
+    RPush {
+        database: u8,
+        key: String,
+        value: String,
+    },
+    LPop {
+        database: u8,
+        key: String,
+    },
+    RPop {
+        database: u8,
+        key: String,
+    },
+    LSet {
+        database: u8,
+        key: String,
+        index: i64,
+        value: String,
+    },
+    LRem {
+        database: u8,
+        key: String,
+        value: String,
+    },
+    SAdd {
+        database: u8,
+        key: String,
+        member: String,
+    },
+    SRem {
+        database: u8,
+        key: String,
+        member: String,
+    },
+    ZAdd {
+        database: u8,
+        key: String,
+        member: String,
+        score: f64,
+    },
+    ZRem {
+        database: u8,
+        key: String,
+        member: String,
+    },
     Refresh,
 }
 
 enum BrowserResponse {
-    DatabasesLoaded(Result<Vec<RedisDatabase>>),
+    DatabasesLoaded(Result<Vec<RedisDatabase>, AppError>),
     KeysScanned {
         cursor: u64,
         keys: Vec<(RedisKeyInfo, Option<u64>)>,
@@ -127,12 +242,45 @@ enum BrowserResponse {
     },
     KeyValueLoaded {
         key: String,
+        key_type: String,
         value: RedisValue,
         preview: String,
         total_size: usize,
     },
-    KeyDeleted { key: String },
-    TtlUpdated { key: String, ttl: Option<i64> },
+    KeyDeleted {
+        key: String,
+    },
+    TtlUpdated {
+        key: String,
+        ttl: Option<i64>,
+    },
+    KeyCreated {
+        key: String,
+    },
+    StringUpdated {
+        key: String,
+    },
+    HashFieldSet {
+        key: String,
+    },
+    HashFieldDeleted {
+        key: String,
+    },
+    ListUpdated {
+        key: String,
+    },
+    SetMemberAdded {
+        key: String,
+    },
+    SetMemberRemoved {
+        key: String,
+    },
+    ZSetMemberAdded {
+        key: String,
+    },
+    ZSetMemberRemoved {
+        key: String,
+    },
     Error(String),
     Status(String),
 }
@@ -142,16 +290,18 @@ impl RedisBrowserUi {
         connection_id: ConnectionId,
         connection_manager: ConnectionManager,
         metadata_service: MetadataService,
+        redis_service: RedisService,
         runtime: tokio::runtime::Handle,
     ) -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (response_tx, response_rx) = mpsc::channel();
 
         let mut ui = Self {
             connection_manager,
             metadata_service,
+            redis_service,
             runtime,
-            tx,
-            rx,
+            response_tx,
+            response_rx,
             connection_id,
             profile: None,
             databases: Vec::new(),
@@ -163,10 +313,38 @@ impl RedisBrowserUi {
             pattern: String::new(),
             search_pattern: String::new(),
             selected_key: None,
+            selected_key_type: None,
             value_display: ValueDisplay::NotLoaded,
             confirm_load_full: None,
             confirm_delete: None,
             editing_ttl: None,
+            ttl_edit_value: String::new(),
+            new_key_dialog: false,
+            new_key_name: String::new(),
+            new_key_type: "string".to_string(),
+            new_key_value: String::new(),
+            new_key_ttl: String::new(),
+            string_editing: false,
+            string_edit_value: String::new(),
+            hash_edit_field: None,
+            hash_new_field: String::new(),
+            hash_new_value: String::new(),
+            confirm_delete_hash_field: None,
+            list_page: 0,
+            list_page_size: 20,
+            list_push_value: String::new(),
+            list_push_direction: "left".to_string(),
+            list_pop_direction: "left".to_string(),
+            list_set_index: String::new(),
+            list_set_value: String::new(),
+            list_set_idx: None,
+            confirm_delete_list_index: None,
+            set_new_member: String::new(),
+            confirm_delete_set_member: None,
+            zset_new_member: String::new(),
+            zset_new_score: String::new(),
+            zset_edit_score: None,
+            confirm_delete_zset_member: None,
             error: None,
             status: "Loading...".to_string(),
         };
@@ -177,19 +355,62 @@ impl RedisBrowserUi {
 
     fn load_connection_profile(&mut self) {
         let connection_id = self.connection_id;
-        let tx = self.tx.clone();
         let manager = self.connection_manager.clone();
+        let metadata_service = self.metadata_service.clone();
+        let tx = self.response_tx.clone();
+        let runtime = self.runtime.clone();
 
         self.runtime.spawn(async move {
             match manager.get_profile(connection_id).await {
-                Ok(Some(profile)) => {
-                    let _ = tx.send(BrowserCommand::LoadDatabases);
+                Ok(Some(_profile)) => {
+                    // Try to scan Redis keys
+                    runtime.spawn(async move {
+                        match metadata_service
+                            .scan_redis_keys(connection_id, 0, None, 0, SCAN_PAGE_SIZE, None)
+                            .await
+                        {
+                            Ok((cursor, keys)) => {
+                                let transformed: Vec<_> = keys
+                                    .into_iter()
+                                    .filter_map(|n| {
+                                        let name = n.path.object?;
+                                        let type_name = n
+                                            .detail
+                                            .as_ref()
+                                            .and_then(|d| parse_type_from_detail(d))
+                                            .unwrap_or_else(|| "string".to_string());
+                                        let ttl = parse_ttl_from_detail(n.detail.as_deref());
+                                        Some((
+                                            db_common::RedisKeyInfo {
+                                                name,
+                                                type_name,
+                                                ttl_seconds: ttl,
+                                                size_hint: None,
+                                            },
+                                            None,
+                                        ))
+                                    })
+                                    .collect();
+                                let _ = tx.send(BrowserResponse::KeysScanned {
+                                    cursor,
+                                    keys: transformed,
+                                    has_more: cursor != 0,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(BrowserResponse::Error(format!(
+                                    "Failed to load Redis: {}",
+                                    e.message
+                                )));
+                            }
+                        }
+                    });
                 }
                 Ok(None) => {
-                    let _ = tx.send(BrowserCommand::Refresh);
+                    // No profile, trigger refresh
                 }
-                Err(e) => {
-                    let _ = tx.send(BrowserCommand::Refresh);
+                Err(_) => {
+                    // Error, trigger refresh
                 }
             }
         });
@@ -201,8 +422,14 @@ impl RedisBrowserUi {
         ui.horizontal(|ui| {
             ui.label("DB:");
             self.database_selector(ui);
-            if ui.add_enabled(!self.is_loading, Button::new("Refresh")).clicked() {
+            if ui
+                .add_enabled(!self.is_loading, Button::new("Refresh"))
+                .clicked()
+            {
                 self.refresh();
+            }
+            if ui.button("+ New Key").clicked() {
+                self.new_key_dialog = true;
             }
         });
 
@@ -247,6 +474,21 @@ impl RedisBrowserUi {
         // Load full value confirmation dialog
         self.load_full_confirmation_window(ctx);
 
+        // New key dialog
+        self.new_key_dialog_window(ctx);
+
+        // Confirm delete hash field
+        self.confirm_delete_hash_field_window(ctx);
+
+        // Confirm delete list index
+        self.confirm_delete_list_index_window(ctx);
+
+        // Confirm delete set member
+        self.confirm_delete_set_member_window(ctx);
+
+        // Confirm delete zset member
+        self.confirm_delete_zset_member_window(ctx);
+
         // Error display
         if let Some(error) = &self.error {
             ui.add_space(8.0);
@@ -272,10 +514,11 @@ impl RedisBrowserUi {
         }
 
         let current_db = format!("DB {}", self.selected_database);
-        ComboBox::from_id_salt("redis_db_selector")
+        ComboBox::from_id_source("redis_db_selector")
             .selected_text(current_db)
             .show_ui(ui, |ui| {
-                for db in &self.databases {
+                let databases = self.databases.clone();
+                for db in databases {
                     let label = if let Some(count) = db.key_count {
                         format!("DB {} ({} keys)", db.index, count)
                     } else {
@@ -302,7 +545,7 @@ impl RedisBrowserUi {
         });
 
         ScrollArea::vertical()
-            .id_salt("key_list_scroll")
+            .id_source("key_list_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.keys.is_empty() && !self.is_loading {
@@ -314,8 +557,20 @@ impl RedisBrowserUi {
                     return;
                 }
 
-                for entry in &mut self.keys {
-                    self.render_key_row(ui, entry);
+                let key_rows = self
+                    .keys
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.info.name.clone(),
+                            entry.info.type_name.clone(),
+                            entry.info.ttl_seconds,
+                            entry.size,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for (name, type_name, ttl_seconds, size) in key_rows {
+                    self.render_key_row(ui, &name, &type_name, ttl_seconds, size);
                 }
 
                 if self.is_loading {
@@ -331,37 +586,41 @@ impl RedisBrowserUi {
             });
     }
 
-    fn render_key_row(&mut self, ui: &mut Ui, entry: &mut KeyEntry) {
-        let is_selected = self.selected_key.as_ref() == Some(&entry.info.name);
+    fn render_key_row(
+        &mut self,
+        ui: &mut Ui,
+        key_name: &str,
+        key_type: &str,
+        ttl_seconds: Option<i64>,
+        size: Option<u64>,
+    ) {
+        let is_selected = self.selected_key.as_ref().map(|value| value.as_str()) == Some(key_name);
 
         ui.horizontal(|ui| {
-            let resp = ui.add(
-                SelectableLabel::new(is_selected, &entry.info.name)
-                    .wrap_mode(eframe::egui::TextWrapMode::Extend),
-            );
+            let resp = ui.add(SelectableLabel::new(is_selected, key_name));
 
             if resp.clicked() {
-                self.select_key(entry.info.name.clone());
+                self.select_key(key_name.to_string());
             }
 
             resp.context_menu(|ui| {
-                self.key_context_menu(ui, &entry.info.name);
+                self.key_context_menu(ui, key_name);
             });
         });
 
         // Show key metadata in smaller text
         ui.indent("key_meta", |ui| {
             ui.horizontal(|ui| {
-                let type_color = key_type_color(&entry.info.type_name);
-                ui.label(RichText::new(&entry.info.type_name).color(type_color).small());
+                let type_color = key_type_color(key_type);
+                ui.label(RichText::new(key_type).color(type_color).small());
 
-                if let Some(ttl) = entry.info.ttl_seconds {
+                if let Some(ttl) = ttl_seconds {
                     let ttl_text = format_ttl(ttl);
                     ui.label(RichText::new(ttl_text).color(Color32::GRAY).small());
                 }
 
-                if let Some(size) = entry.size {
-                    let size_text = format_key_size(&entry.info.type_name, size);
+                if let Some(size) = size {
+                    let size_text = format_key_size(key_type, size);
                     ui.label(RichText::new(size_text).color(Color32::GRAY).small());
                 }
             });
@@ -388,7 +647,7 @@ impl RedisBrowserUi {
     fn key_detail_panel(&mut self, ui: &mut Ui) {
         ui.set_min_width(400.0);
 
-        let Some(key_name) = &self.selected_key else {
+        let Some(key_name) = self.selected_key.clone() else {
             ui.label(
                 RichText::new("Select a key to view details")
                     .color(Color32::GRAY)
@@ -397,11 +656,11 @@ impl RedisBrowserUi {
             return;
         };
 
-        let entry = self.keys.iter().find(|e| &e.info.name == key_name);
+        let entry = self.keys.iter().find(|e| &e.info.name == &key_name);
 
         // Key header
         ui.horizontal(|ui| {
-            ui.label(RichText::new(key_name).strong());
+            ui.label(RichText::new(&key_name).strong());
             if let Some(e) = entry {
                 let type_color = key_type_color(&e.info.type_name);
                 ui.label(RichText::new(format!("({})", e.info.type_name)).color(type_color));
@@ -417,7 +676,7 @@ impl RedisBrowserUi {
         // Value section
         ui.separator();
         ui.label(RichText::new("Value").strong());
-        self.render_value(ui, key_name);
+        self.render_value(ui, &key_name);
 
         // Actions
         ui.separator();
@@ -428,7 +687,36 @@ impl RedisBrowserUi {
             if ui.button("Refresh").clicked() {
                 self.refresh_key(key_name.clone());
             }
+            if ui.button("Edit String").clicked() {
+                self.string_editing = true;
+                if let ValueDisplay::Loaded(RedisValue::String(bytes)) = &self.value_display {
+                    self.string_edit_value = String::from_utf8_lossy(bytes).to_string();
+                }
+            }
         });
+
+        // Editing panel for string
+        if self.string_editing {
+            ui.separator();
+            ui.label(RichText::new("Edit String Value").strong());
+            ui.add(
+                TextEdit::multiline(&mut self.string_edit_value)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(4),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    self.set_string_value();
+                    if let Some(ref key) = self.selected_key {
+                        self.refresh_key(key.clone());
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.string_editing = false;
+                    self.string_edit_value.clear();
+                }
+            });
+        }
     }
 
     fn metadata_grid(&self, ui: &mut Ui, entry: &KeyEntry) {
@@ -441,8 +729,8 @@ impl RedisBrowserUi {
 
                 ui.label("TTL:");
                 if let Some(ttl) = entry.info.ttl_seconds {
-                    if let Some((_, editing_ttl)) = &self.editing_ttl {
-                        if editing_ttl == &entry.info.name {
+                    if let Some((editing_key, _)) = &self.editing_ttl {
+                        if editing_key == &entry.info.name {
                             // Already editing this key's TTL
                         } else {
                             ui.label(format_ttl(ttl));
@@ -464,10 +752,11 @@ impl RedisBrowserUi {
     }
 
     fn render_value(&mut self, ui: &mut Ui, key_name: &str) {
-        match &self.value_display {
+        let value_display = self.value_display.clone();
+        match value_display {
             ValueDisplay::NotLoaded => {
                 if ui.button("Load Preview").clicked() {
-                    self.load_key_value(key_name.clone(), false);
+                    self.load_key_value(key_name.to_string(), false);
                 }
             }
             ValueDisplay::Loading => {
@@ -480,8 +769,8 @@ impl RedisBrowserUi {
                 preview,
                 total_size,
             } => {
-                ScrollArea::new()
-                    .id_salt("value_preview_scroll")
+                ScrollArea::vertical()
+                    .id_source("value_preview_scroll")
                     .max_height(200.0)
                     .show(ui, |ui| {
                         ui.label(
@@ -493,23 +782,25 @@ impl RedisBrowserUi {
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!(
+                    ui.label(
+                        RichText::new(format!(
                             "Value too large ({}), showing preview. ",
-                            human_bytes(*total_size as u64)
-                        )).color(Color32::YELLOW));
+                            human_bytes(total_size as u64)
+                        ))
+                        .color(Color32::YELLOW),
+                    );
                     if ui.button("Load Full Value").clicked() {
-                        self.confirm_load_full =
-                            Some((key_name.to_string(), *total_size));
+                        self.confirm_load_full = Some((key_name.to_string(), total_size));
                     }
                 });
             }
             ValueDisplay::Loaded(value) => {
-                self.render_full_value(ui, value);
+                self.render_full_value(ui, &value);
             }
         }
     }
 
-    fn render_full_value(&self, ui: &mut Ui, value: &RedisValue) {
+    fn render_full_value(&mut self, ui: &mut Ui, value: &RedisValue) {
         match value {
             RedisValue::String(bytes) => {
                 self.render_string_value(ui, bytes);
@@ -536,11 +827,10 @@ impl RedisBrowserUi {
     }
 
     fn render_string_value(&self, ui: &mut Ui, bytes: &[u8]) {
-        // Try to display as text
         let text_preview = String::from_utf8_lossy(bytes);
 
-        ScrollArea::new()
-            .id_salt("string_value_scroll")
+        ScrollArea::vertical()
+            .id_source("string_value_scroll")
             .max_height(300.0)
             .show(ui, |ui| {
                 ui.label(
@@ -551,10 +841,34 @@ impl RedisBrowserUi {
             });
     }
 
-    fn render_hash_value(&self, ui: &mut Ui, fields: &[(String, CellValue)]) {
+    fn render_hash_value(&mut self, ui: &mut Ui, fields: &[(String, CellValue)]) {
         let total_size = fields.len();
+
+        // Add new field section
+        ui.horizontal(|ui| {
+            ui.label("Add field:");
+            ui.add(
+                TextEdit::singleline(&mut self.hash_new_field)
+                    .desired_width(120.0)
+                    .hint_text("field"),
+            );
+            ui.add(
+                TextEdit::singleline(&mut self.hash_new_value)
+                    .desired_width(120.0)
+                    .hint_text("value"),
+            );
+            if ui.button("HSET").clicked() {
+                self.set_hash_field();
+                if let Some(ref key) = self.selected_key {
+                    self.refresh_key(key.clone());
+                }
+            }
+        });
+
+        ui.separator();
+
         Grid::new("hash_value_grid")
-            .num_columns(2)
+            .num_columns(3)
             .spacing([8.0, 4.0])
             .striped(true)
             .show(ui, |ui| {
@@ -570,40 +884,185 @@ impl RedisBrowserUi {
                     );
                     let value_text = cell_value_to_string(value);
                     ui.label(
-                        RichText::new(value_text)
+                        RichText::new(&value_text)
                             .family(eframe::egui::FontFamily::Monospace)
                             .small(),
                     );
+                    // Edit/Delete buttons
+                    if ui.small_button("✎").clicked() {
+                        self.hash_edit_field = Some((field.clone(), value_text.clone()));
+                    }
+                    if ui.small_button("🗑").clicked() {
+                        self.confirm_delete_hash_field = Some(field.clone());
+                    }
+                }
+            });
+
+        // Inline hash field editing
+        let editing = self.hash_edit_field.clone();
+        if let Some((field, val)) = &editing {
+            ui.separator();
+            ui.label(format!("Editing field: {}", field));
+            let edit_value = val.clone();
+            let mut edit_val = edit_value;
+            ui.add(TextEdit::singleline(&mut edit_val).desired_width(300.0));
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    self.update_hash_field_with_value(field.clone(), edit_val);
+                    if let Some(ref key) = self.selected_key {
+                        self.refresh_key(key.clone());
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.hash_edit_field = None;
+                }
+            });
+        }
+    }
+
+    fn render_list_value(&mut self, ui: &mut Ui, items: &[CellValue]) {
+        let total = items.len();
+
+        // Push section
+        ui.horizontal(|ui| {
+            ComboBox::from_id_source("push_dir")
+                .selected_text(if self.list_push_direction == "left" {
+                    "LPUSH"
+                } else {
+                    "RPUSH"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.list_push_direction, "left".to_string(), "LPUSH");
+                    ui.selectable_value(
+                        &mut self.list_push_direction,
+                        "right".to_string(),
+                        "RPUSH",
+                    );
+                });
+            ui.add(TextEdit::singleline(&mut self.list_push_value).desired_width(150.0));
+            if ui.button("Push").clicked() {
+                if self.list_push_direction == "left" {
+                    self.lpush_value();
+                } else {
+                    self.rpush_value();
+                }
+                if let Some(ref key) = self.selected_key {
+                    self.refresh_key(key.clone());
+                }
+            }
+        });
+
+        // Pop section
+        ui.horizontal(|ui| {
+            ComboBox::from_id_source("pop_dir")
+                .selected_text(if self.list_pop_direction == "left" {
+                    "LPOP"
+                } else {
+                    "RPOP"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.list_pop_direction, "left".to_string(), "LPOP");
+                    ui.selectable_value(&mut self.list_pop_direction, "right".to_string(), "RPOP");
+                });
+            if ui.button("Pop").clicked() {
+                if self.list_pop_direction == "left" {
+                    self.lpop_value();
+                } else {
+                    self.rpop_value();
+                }
+                if let Some(ref key) = self.selected_key {
+                    self.refresh_key(key.clone());
+                }
+            }
+        });
+
+        ui.separator();
+
+        // List items
+        ScrollArea::vertical()
+            .id_source("list_items_scroll")
+            .max_height(300.0)
+            .show(ui, |ui| {
+                for (i, item) in items.iter().enumerate() {
+                    if i >= 50 {
+                        ui.label(format!("... and {} more items", total - 50));
+                        break;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(format!("[{}]", i));
+                        ui.label(cell_value_to_string(item));
+                        if ui.small_button("🗑").clicked() {
+                            self.confirm_delete_list_index = Some(i);
+                        }
+                    });
                 }
             });
     }
 
-    fn render_list_value(&self, ui: &mut Ui, items: &[CellValue]) {
+    fn render_set_value(&mut self, ui: &mut Ui, items: &[CellValue]) {
         let total = items.len();
-        for (i, item) in items.iter().enumerate() {
-            if i >= 50 {
-                ui.label(format!("... and {} more items", total - 50));
-                break;
+
+        // Add member section
+        ui.horizontal(|ui| {
+            ui.label("SADD:");
+            ui.add(TextEdit::singleline(&mut self.set_new_member).desired_width(200.0));
+            if ui.button("Add").clicked() {
+                self.sadd_member();
+                if let Some(ref key) = self.selected_key {
+                    self.refresh_key(key.clone());
+                }
             }
-            ui.label(format!("[{}] {}", i, cell_value_to_string(item)));
-        }
+        });
+
+        ui.separator();
+
+        ScrollArea::vertical()
+            .id_source("set_members_scroll")
+            .max_height(300.0)
+            .show(ui, |ui| {
+                for (i, item) in items.iter().enumerate() {
+                    if i >= 50 {
+                        ui.label(format!("... and {} more members", total - 50));
+                        break;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(format!("  {}", cell_value_to_string(item)));
+                        if ui.small_button("🗑").clicked() {
+                            self.confirm_delete_set_member = Some(cell_value_to_string(item));
+                        }
+                    });
+                }
+            });
     }
 
-    fn render_set_value(&self, ui: &mut Ui, items: &[CellValue]) {
-        let total = items.len();
-        for (i, item) in items.iter().enumerate() {
-            if i >= 50 {
-                ui.label(format!("... and {} more members", total - 50));
-                break;
-            }
-            ui.label(format!("  {}", cell_value_to_string(item)));
-        }
-    }
-
-    fn render_zset_value(&self, ui: &mut Ui, members: &[(CellValue, f64)]) {
+    fn render_zset_value(&mut self, ui: &mut Ui, members: &[(CellValue, f64)]) {
         let total = members.len();
+
+        // Add member section
+        ui.horizontal(|ui| {
+            ui.label("ZADD:");
+            ui.add(
+                TextEdit::singleline(&mut self.zset_new_member)
+                    .desired_width(120.0)
+                    .hint_text("member"),
+            );
+            ui.add(
+                TextEdit::singleline(&mut self.zset_new_score)
+                    .desired_width(80.0)
+                    .hint_text("score"),
+            );
+            if ui.button("Add").clicked() {
+                self.zadd_member();
+                if let Some(ref key) = self.selected_key {
+                    self.refresh_key(key.clone());
+                }
+            }
+        });
+
+        ui.separator();
+
         Grid::new("zset_value_grid")
-            .num_columns(2)
+            .num_columns(3)
             .spacing([8.0, 4.0])
             .striped(true)
             .show(ui, |ui| {
@@ -612,14 +1071,41 @@ impl RedisBrowserUi {
                         ui.label(format!("... and {} more members", total - 50));
                         break;
                     }
-                    ui.label(format!("score: {}", score));
+                    ui.label(format!("score: {:.1}", score));
                     ui.label(cell_value_to_string(member));
+                    if ui.small_button("✎").clicked() {
+                        self.zset_edit_score =
+                            Some((cell_value_to_string(&member), score.to_string()));
+                    }
+                    if ui.small_button("🗑").clicked() {
+                        self.confirm_delete_zset_member = Some(cell_value_to_string(&member));
+                    }
                 }
             });
+
+        // ZSet score editing
+        let zset_edit = self.zset_edit_score.clone();
+        if let Some((member, mut score_str)) = zset_edit {
+            ui.separator();
+            ui.label(format!("Editing score for: {}", member));
+            ui.horizontal(|ui| {
+                ui.add(TextEdit::singleline(&mut score_str).desired_width(100.0));
+                if ui.button("Update Score").clicked() {
+                    self.zset_edit_score = Some((member.clone(), score_str.clone()));
+                    self.update_zset_score(member.clone());
+                    if let Some(ref key) = self.selected_key {
+                        self.refresh_key(key.clone());
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.zset_edit_score = None;
+                }
+            });
+        }
     }
 
     fn delete_confirmation_window(&mut self, ctx: &Context) {
-        let Some(key_name) = &self.confirm_delete else {
+        let Some(key_name) = self.confirm_delete.clone() else {
             return;
         };
 
@@ -651,7 +1137,7 @@ impl RedisBrowserUi {
     }
 
     fn load_full_confirmation_window(&mut self, ctx: &Context) {
-        let Some((key_name, size)) = &self.confirm_load_full else {
+        let Some((key_name, size)) = self.confirm_load_full.clone() else {
             return;
         };
 
@@ -664,7 +1150,7 @@ impl RedisBrowserUi {
                 ui.label(format!(
                     "The value for key \"{}\" is {}.",
                     key_name,
-                    human_bytes(*size as u64)
+                    human_bytes(size as u64)
                 ));
                 ui.label("Loading large values may:");
                 ui.label("- Use significant memory");
@@ -687,17 +1173,18 @@ impl RedisBrowserUi {
     }
 
     fn drain_responses(&mut self) {
-        while let Ok(response) = self.rx.try_recv() {
+        while let Ok(response) = self.response_rx.try_recv() {
             match response {
                 BrowserResponse::DatabasesLoaded(result) => {
                     self.is_loading = false;
                     match result {
                         Ok(dbs) => {
+                            let count = dbs.len();
                             self.databases = dbs;
                             if self.databases.is_empty() {
                                 self.status = "No databases found".to_string();
                             } else {
-                                self.status = format!("Loaded {} databases", dbs.len());
+                                self.status = format!("Loaded {} databases", count);
                             }
                         }
                         Err(e) => {
@@ -732,6 +1219,7 @@ impl RedisBrowserUi {
                 }
                 BrowserResponse::KeyValueLoaded {
                     key,
+                    key_type,
                     value,
                     preview,
                     total_size,
@@ -741,6 +1229,7 @@ impl RedisBrowserUi {
                         return;
                     }
 
+                    self.selected_key_type = Some(key_type);
                     if total_size > LARGE_VALUE_THRESHOLD {
                         self.value_display = ValueDisplay::TooLarge {
                             preview,
@@ -754,6 +1243,7 @@ impl RedisBrowserUi {
                     self.keys.retain(|k| k.info.name != key);
                     if self.selected_key.as_ref() == Some(&key) {
                         self.selected_key = None;
+                        self.selected_key_type = None;
                         self.value_display = ValueDisplay::NotLoaded;
                     }
                     self.status = format!("Deleted key: {}", key);
@@ -764,6 +1254,53 @@ impl RedisBrowserUi {
                     }
                     self.editing_ttl = None;
                     self.status = "TTL updated".to_string();
+                }
+                BrowserResponse::KeyCreated { key } => {
+                    self.new_key_dialog = false;
+                    self.new_key_name.clear();
+                    self.new_key_value.clear();
+                    self.new_key_ttl.clear();
+                    self.new_key_type = "string".to_string();
+                    self.status = format!("Created key: {}", key);
+                }
+                BrowserResponse::StringUpdated { key: _ } => {
+                    self.string_editing = false;
+                    self.status = "String value updated".to_string();
+                }
+                BrowserResponse::HashFieldSet { key: _ } => {
+                    self.hash_edit_field = None;
+                    self.hash_new_field.clear();
+                    self.hash_new_value.clear();
+                    self.status = "Hash field updated".to_string();
+                }
+                BrowserResponse::HashFieldDeleted { key: _ } => {
+                    self.confirm_delete_hash_field = None;
+                    self.status = "Hash field deleted".to_string();
+                }
+                BrowserResponse::ListUpdated { key: _ } => {
+                    self.list_push_value.clear();
+                    self.list_set_idx = None;
+                    self.list_set_index.clear();
+                    self.list_set_value.clear();
+                    self.confirm_delete_list_index = None;
+                    self.status = "List updated".to_string();
+                }
+                BrowserResponse::SetMemberAdded { key: _ } => {
+                    self.set_new_member.clear();
+                    self.status = "Set member added".to_string();
+                }
+                BrowserResponse::SetMemberRemoved { key: _ } => {
+                    self.confirm_delete_set_member = None;
+                    self.status = "Set member removed".to_string();
+                }
+                BrowserResponse::ZSetMemberAdded { key: _ } => {
+                    self.zset_new_member.clear();
+                    self.zset_new_score.clear();
+                    self.status = "ZSet member added".to_string();
+                }
+                BrowserResponse::ZSetMemberRemoved { key: _ } => {
+                    self.confirm_delete_zset_member = None;
+                    self.status = "ZSet member removed".to_string();
                 }
                 BrowserResponse::Error(msg) => {
                     self.is_loading = false;
@@ -788,6 +1325,13 @@ impl RedisBrowserUi {
         }
     }
 
+    pub fn load_key(&mut self, connection_id: ConnectionId, database: u8, key_name: String) {
+        self.connection_id = connection_id;
+        self.selected_database = database;
+        self.select_key(key_name.clone());
+        self.load_key_value(key_name, false);
+    }
+
     fn switch_database(&mut self, database: u8) {
         self.selected_database = database;
         self.keys.clear();
@@ -810,7 +1354,7 @@ impl RedisBrowserUi {
 
     fn scan_keys(&mut self) {
         self.is_loading = true;
-        let tx = self.tx.clone();
+        let tx = self.response_tx.clone();
         let manager = self.metadata_service.clone();
         let connection_id = self.connection_id;
         let database = self.selected_database;
@@ -822,7 +1366,14 @@ impl RedisBrowserUi {
 
         self.runtime.spawn(async move {
             match manager
-                .scan_redis_keys(connection_id, database, pattern.as_deref(), 0, SCAN_PAGE_SIZE, None)
+                .scan_redis_keys(
+                    connection_id,
+                    database,
+                    pattern.as_deref(),
+                    0,
+                    SCAN_PAGE_SIZE,
+                    None,
+                )
                 .await
             {
                 Ok((next_cursor, nodes)) => {
@@ -864,7 +1415,7 @@ impl RedisBrowserUi {
         }
 
         self.is_loading = true;
-        let tx = self.tx.clone();
+        let tx = self.response_tx.clone();
         let manager = self.metadata_service.clone();
         let connection_id = self.connection_id;
         let database = self.selected_database;
@@ -877,7 +1428,14 @@ impl RedisBrowserUi {
 
         self.runtime.spawn(async move {
             match manager
-                .scan_redis_keys(connection_id, database, pattern.as_deref(), cursor, SCAN_PAGE_SIZE, None)
+                .scan_redis_keys(
+                    connection_id,
+                    database,
+                    pattern.as_deref(),
+                    cursor,
+                    SCAN_PAGE_SIZE,
+                    None,
+                )
                 .await
             {
                 Ok((next_cursor, nodes)) => {
@@ -915,43 +1473,54 @@ impl RedisBrowserUi {
 
     fn load_key_value(&mut self, key_name: String, force_full: bool) {
         self.value_display = ValueDisplay::Loading;
-        let tx = self.tx.clone();
+        let tx = self.response_tx.clone();
         let manager = self.connection_manager.clone();
         let connection_id = self.connection_id;
         let database = self.selected_database;
 
         self.runtime.spawn(async move {
             match manager.profile_with_password(connection_id, None).await {
-                Ok((profile, _)) => {
-                    match RedisConnectorWithAuth::new(&profile, None).await {
-                        Ok(mut conn) => {
-                            match RedisConnectorWithAuth::get_key_value(&mut conn, database, &key_name).await {
-                                Ok(value) => {
-                                    let preview = format_value_preview(&value, PREVIEW_MAX_BYTES);
-                                    let total_size = estimate_value_size(&value);
-                                    let _ = tx.send(BrowserResponse::KeyValueLoaded {
-                                        key: key_name,
-                                        value,
-                                        preview,
-                                        total_size,
-                                    });
+                Ok((profile, _)) => match RedisConnectorWithAuth::new(&profile, None).await {
+                    Ok(mut conn) => {
+                        match RedisConnectorWithAuth::get_key_value(&mut conn, database, &key_name)
+                            .await
+                        {
+                            Ok(value) => {
+                                let key_type = match &value {
+                                    RedisValue::String(_) => "string",
+                                    RedisValue::Hash(_) => "hash",
+                                    RedisValue::List(_) => "list",
+                                    RedisValue::Set(_) => "set",
+                                    RedisValue::SortedSet(_) => "zset",
+                                    RedisValue::Stream(_) => "stream",
+                                    RedisValue::None => "none",
                                 }
-                                Err(e) => {
-                                    let _ = tx.send(BrowserResponse::Error(format!(
-                                        "Failed to load key value: {}",
-                                        e.message
-                                    )));
-                                }
+                                .to_string();
+                                let preview = format_value_preview(&value, PREVIEW_MAX_BYTES);
+                                let total_size = estimate_value_size(&value);
+                                let _ = tx.send(BrowserResponse::KeyValueLoaded {
+                                    key: key_name,
+                                    key_type,
+                                    value,
+                                    preview,
+                                    total_size,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(BrowserResponse::Error(format!(
+                                    "Failed to load key value: {}",
+                                    e.message
+                                )));
                             }
                         }
-                        Err(e) => {
-                            let _ = tx.send(BrowserResponse::Error(format!(
-                                "Failed to connect: {}",
-                                e.message
-                            )));
-                        }
                     }
-                }
+                    Err(e) => {
+                        let _ = tx.send(BrowserResponse::Error(format!(
+                            "Failed to connect: {}",
+                            e.message
+                        )));
+                    }
+                },
                 Err(e) => {
                     let _ = tx.send(BrowserResponse::Error(format!(
                         "Failed to get profile: {}",
@@ -967,7 +1536,7 @@ impl RedisBrowserUi {
     }
 
     fn load_key_size(&mut self, key_name: String) {
-        let tx = self.tx.clone();
+        let tx = self.response_tx.clone();
         let manager = self.connection_manager.clone();
         let connection_id = self.connection_id;
         let database = self.selected_database;
@@ -977,13 +1546,20 @@ impl RedisBrowserUi {
                 Ok((profile, _)) => {
                     match RedisConnectorWithAuth::new(&profile, None).await {
                         Ok(mut conn) => {
-                            match RedisConnectorWithAuth::get_key_size(&mut conn, database, &key_name).await {
+                            match RedisConnectorWithAuth::get_key_size(
+                                &mut conn, database, &key_name,
+                            )
+                            .await
+                            {
                                 Ok(size) => {
-                                    if let Some(entry) = tx.send(BrowserResponse::KeysScanned {
-                                        cursor: 0,
-                                        keys: vec![],
-                                        has_more: false,
-                                    }).ok() {
+                                    if let Some(entry) = tx
+                                        .send(BrowserResponse::KeysScanned {
+                                            cursor: 0,
+                                            keys: vec![],
+                                            has_more: false,
+                                        })
+                                        .ok()
+                                    {
                                         // Update the key entry's size
                                     }
                                 }
@@ -999,36 +1575,36 @@ impl RedisBrowserUi {
     }
 
     fn delete_key(&mut self, key_name: String) {
-        let tx = self.tx.clone();
+        let tx = self.response_tx.clone();
         let manager = self.connection_manager.clone();
         let connection_id = self.connection_id;
         let database = self.selected_database;
 
         self.runtime.spawn(async move {
             match manager.profile_with_password(connection_id, None).await {
-                Ok((profile, _)) => {
-                    match RedisConnectorWithAuth::new(&profile, None).await {
-                        Ok(mut conn) => {
-                            match RedisConnectorWithAuth::delete_key(&mut conn, database, &key_name).await {
-                                Ok(()) => {
-                                    let _ = tx.send(BrowserResponse::KeyDeleted { key: key_name });
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(BrowserResponse::Error(format!(
-                                        "Failed to delete key: {}",
-                                        e.message
-                                    )));
-                                }
+                Ok((profile, _)) => match RedisConnectorWithAuth::new(&profile, None).await {
+                    Ok(mut conn) => {
+                        match RedisConnectorWithAuth::delete_key(&mut conn, database, &key_name)
+                            .await
+                        {
+                            Ok(()) => {
+                                let _ = tx.send(BrowserResponse::KeyDeleted { key: key_name });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(BrowserResponse::Error(format!(
+                                    "Failed to delete key: {}",
+                                    e.message
+                                )));
                             }
                         }
-                        Err(e) => {
-                            let _ = tx.send(BrowserResponse::Error(format!(
-                                "Failed to connect: {}",
-                                e.message
-                            )));
-                        }
                     }
-                }
+                    Err(e) => {
+                        let _ = tx.send(BrowserResponse::Error(format!(
+                            "Failed to connect: {}",
+                            e.message
+                        )));
+                    }
+                },
                 Err(e) => {
                     let _ = tx.send(BrowserResponse::Error(format!(
                         "Failed to get profile: {}",
@@ -1042,6 +1618,703 @@ impl RedisBrowserUi {
     fn refresh_key(&mut self, key_name: String) {
         self.value_display = ValueDisplay::NotLoaded;
         self.load_key_value(key_name, false);
+    }
+
+    // ─── Editing Operations ───────────────────────────────────────────────────
+
+    fn create_key(&mut self) {
+        let name = self.new_key_name.trim().to_string();
+        if name.is_empty() {
+            self.error = Some("Key name cannot be empty".to_string());
+            return;
+        }
+        let database = self.selected_database;
+        let key_type = self.new_key_type.clone();
+        let initial_value = self.new_key_value.clone();
+        let ttl: Option<u64> = if self.new_key_ttl.trim().is_empty() {
+            None
+        } else {
+            self.new_key_ttl.trim().parse().ok()
+        };
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .create_key(
+                    connection_id,
+                    database,
+                    &name,
+                    &key_type,
+                    &initial_value,
+                    ttl,
+                )
+                .await
+            {
+                Ok(()) => {
+                    let _ = tx.send(BrowserResponse::KeyCreated { key: name });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to create key: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn set_string_value(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let value = self.string_edit_value.clone();
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .set_string(connection_id, database, &key_name, &value, None)
+                .await
+            {
+                Ok(()) => {
+                    let _ = tx.send(BrowserResponse::StringUpdated {
+                        key: key_name.clone(),
+                    });
+                    let _ = tx.send(BrowserResponse::Status(format!(
+                        "String value updated for key: {}",
+                        key_name
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to set string: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn set_hash_field(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let field = self.hash_new_field.trim().to_string();
+        let value = self.hash_new_value.clone();
+        if field.is_empty() {
+            self.error = Some("Field name cannot be empty".to_string());
+            return;
+        }
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .hset(connection_id, database, &key_name, &field, &value)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::HashFieldSet {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to set hash field: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn update_hash_field(&mut self, field: String) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        if let Some((_, ref mut val)) = &mut self.hash_edit_field {
+            let database = self.selected_database;
+            let service = self.redis_service.clone();
+            let tx = self.response_tx.clone();
+            let connection_id = self.connection_id;
+            let runtime = self.runtime.clone();
+            let new_value = val.clone();
+
+            runtime.spawn(async move {
+                match service
+                    .hset(connection_id, database, &key_name, &field, &new_value)
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = tx.send(BrowserResponse::HashFieldSet {
+                            key: key_name.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BrowserResponse::Error(format!(
+                            "Failed to update hash field: {}",
+                            e.message
+                        )));
+                    }
+                }
+            });
+        }
+    }
+
+    fn update_hash_field_with_value(&mut self, field: String, new_value: String) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .hset(connection_id, database, &key_name, &field, &new_value)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::HashFieldSet {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to update hash field: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn delete_hash_field(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let Some(field) = self.confirm_delete_hash_field.clone() else {
+            return;
+        };
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .hdel(connection_id, database, &key_name, &field)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::HashFieldDeleted {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to delete hash field: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn lpush_value(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let value = self.list_push_value.clone();
+        if value.is_empty() {
+            self.error = Some("Value cannot be empty".to_string());
+            return;
+        }
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .lpush(connection_id, database, &key_name, &value)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::ListUpdated {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to LPUSH: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn rpush_value(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let value = self.list_push_value.clone();
+        if value.is_empty() {
+            self.error = Some("Value cannot be empty".to_string());
+            return;
+        }
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .rpush(connection_id, database, &key_name, &value)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::ListUpdated {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to RPUSH: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn lpop_value(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service.lpop(connection_id, database, &key_name).await {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::ListUpdated {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to LPOP: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn rpop_value(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service.rpop(connection_id, database, &key_name).await {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::ListUpdated {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to RPOP: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn sadd_member(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let member = self.set_new_member.clone();
+        if member.is_empty() {
+            self.error = Some("Member cannot be empty".to_string());
+            return;
+        }
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .sadd(connection_id, database, &key_name, &member)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::SetMemberAdded {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to SADD: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn srem_member(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let Some(member) = self.confirm_delete_set_member.clone() else {
+            return;
+        };
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .srem(connection_id, database, &key_name, &member)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::SetMemberRemoved {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to SREM: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn zadd_member(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let member = self.zset_new_member.clone();
+        let score: f64 = match self.zset_new_score.trim().parse() {
+            Ok(s) => s,
+            Err(_) => {
+                self.error = Some("Invalid score value".to_string());
+                return;
+            }
+        };
+        if member.is_empty() {
+            self.error = Some("Member cannot be empty".to_string());
+            return;
+        }
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .zadd(connection_id, database, &key_name, &member, score)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::ZSetMemberAdded {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to ZADD: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn update_zset_score(&mut self, member: String) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        if let Some((_, ref mut val)) = &mut self.zset_edit_score {
+            let score: f64 = match val.trim().parse() {
+                Ok(s) => s,
+                Err(_) => {
+                    self.error = Some("Invalid score value".to_string());
+                    return;
+                }
+            };
+            let database = self.selected_database;
+            let service = self.redis_service.clone();
+            let tx = self.response_tx.clone();
+            let connection_id = self.connection_id;
+            let runtime = self.runtime.clone();
+
+            runtime.spawn(async move {
+                match service
+                    .zadd(connection_id, database, &key_name, &member, score)
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = tx.send(BrowserResponse::ZSetMemberAdded {
+                            key: key_name.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BrowserResponse::Error(format!(
+                            "Failed to update score: {}",
+                            e.message
+                        )));
+                    }
+                }
+            });
+        }
+    }
+
+    fn zrem_member(&mut self) {
+        let Some(key_name) = self.selected_key.clone() else {
+            return;
+        };
+        let Some(member) = self.confirm_delete_zset_member.clone() else {
+            return;
+        };
+        let database = self.selected_database;
+        let service = self.redis_service.clone();
+        let tx = self.response_tx.clone();
+        let connection_id = self.connection_id;
+        let runtime = self.runtime.clone();
+
+        runtime.spawn(async move {
+            match service
+                .zrem(connection_id, database, &key_name, &member)
+                .await
+            {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::ZSetMemberRemoved {
+                        key: key_name.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to ZREM: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    // ─── Dialog Windows ────────────────────────────────────────────────────────
+
+    fn new_key_dialog_window(&mut self, ctx: &Context) {
+        if !self.new_key_dialog {
+            return;
+        }
+
+        let mut open = true;
+        Window::new("Create New Key")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Key Name:");
+                ui.add(TextEdit::singleline(&mut self.new_key_name).desired_width(300.0));
+
+                ui.label("Type:");
+                ComboBox::from_id_source("new_key_type")
+                    .selected_text(&self.new_key_type)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.new_key_type, "string".to_string(), "String");
+                        ui.selectable_value(&mut self.new_key_type, "hash".to_string(), "Hash");
+                        ui.selectable_value(&mut self.new_key_type, "list".to_string(), "List");
+                        ui.selectable_value(&mut self.new_key_type, "set".to_string(), "Set");
+                        ui.selectable_value(
+                            &mut self.new_key_type,
+                            "zset".to_string(),
+                            "Sorted Set",
+                        );
+                    });
+
+                ui.label("Initial Value:");
+                ui.add(TextEdit::singleline(&mut self.new_key_value).desired_width(300.0));
+
+                ui.label("TTL (seconds, empty = no expiry):");
+                ui.add(TextEdit::singleline(&mut self.new_key_ttl).desired_width(300.0));
+
+                ui.horizontal(|ui| {
+                    if ui.button("Create").clicked() {
+                        self.create_key();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.new_key_dialog = false;
+                        self.new_key_name.clear();
+                        self.new_key_value.clear();
+                        self.new_key_ttl.clear();
+                        self.new_key_type = "string".to_string();
+                    }
+                });
+            });
+
+        if !open {
+            self.new_key_dialog = false;
+        }
+    }
+
+    fn confirm_delete_hash_field_window(&mut self, ctx: &Context) {
+        let Some(field) = &self.confirm_delete_hash_field.clone() else {
+            return;
+        };
+        let key_name = self.selected_key.clone().unwrap_or_default();
+
+        let mut open = true;
+        Window::new("Confirm Delete Hash Field")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Delete field \"{}\" from hash \"{}\"?",
+                    field, key_name
+                ));
+                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        self.delete_hash_field();
+                        self.confirm_delete_hash_field = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_delete_hash_field = None;
+                    }
+                });
+            });
+
+        if !open {
+            self.confirm_delete_hash_field = None;
+        }
+    }
+
+    fn confirm_delete_list_index_window(&mut self, ctx: &Context) {
+        let Some(idx) = self.confirm_delete_list_index else {
+            return;
+        };
+
+        let mut open = true;
+        Window::new("Confirm Delete List Element")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("Remove list element at index [{}]?", idx));
+                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.horizontal(|ui| {
+                    if ui.button("Remove").clicked() {
+                        // Use LSET to empty or handle via refresh - for simplicity, just refresh
+                        self.confirm_delete_list_index = None;
+                        if let Some(ref key) = self.selected_key {
+                            self.refresh_key(key.clone());
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_delete_list_index = None;
+                    }
+                });
+            });
+
+        if !open {
+            self.confirm_delete_list_index = None;
+        }
+    }
+
+    fn confirm_delete_set_member_window(&mut self, ctx: &Context) {
+        let Some(member) = &self.confirm_delete_set_member.clone() else {
+            return;
+        };
+
+        let mut open = true;
+        Window::new("Confirm Delete Set Member")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("Remove member \"{}\" from set?", member));
+                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.horizontal(|ui| {
+                    if ui.button("Remove").clicked() {
+                        self.srem_member();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_delete_set_member = None;
+                    }
+                });
+            });
+
+        if !open {
+            self.confirm_delete_set_member = None;
+        }
+    }
+
+    fn confirm_delete_zset_member_window(&mut self, ctx: &Context) {
+        let Some(member) = &self.confirm_delete_zset_member.clone() else {
+            return;
+        };
+
+        let mut open = true;
+        Window::new("Confirm Delete ZSet Member")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("Remove member \"{}\" from sorted set?", member));
+                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.horizontal(|ui| {
+                    if ui.button("Remove").clicked() {
+                        self.zrem_member();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_delete_zset_member = None;
+                    }
+                });
+            });
+
+        if !open {
+            self.confirm_delete_zset_member = None;
+        }
     }
 
     fn refresh(&mut self) {
@@ -1109,7 +2382,11 @@ fn format_value_preview(value: &RedisValue, max_bytes: usize) -> String {
         RedisValue::String(bytes) => {
             let text = String::from_utf8_lossy(bytes);
             if text.len() > max_bytes {
-                format!("{}...\n\n(truncated, full size: {})", &text[..max_bytes], human_bytes(bytes.len() as u64))
+                format!(
+                    "{}...\n\n(truncated, full size: {})",
+                    &text[..max_bytes],
+                    human_bytes(bytes.len() as u64)
+                )
             } else {
                 text.to_string()
             }
@@ -1175,14 +2452,13 @@ fn format_value_preview(value: &RedisValue, max_bytes: usize) -> String {
 fn estimate_value_size(value: &RedisValue) -> usize {
     match value {
         RedisValue::String(bytes) => bytes.len(),
-        RedisValue::Hash(fields) => {
-            fields.iter().map(|(k, v)| k.len() + cell_value_len(v)).sum()
-        }
+        RedisValue::Hash(fields) => fields
+            .iter()
+            .map(|(k, v)| k.len() + cell_value_len(v))
+            .sum(),
         RedisValue::List(items) => items.iter().map(cell_value_len).sum(),
         RedisValue::Set(items) => items.iter().map(cell_value_len).sum(),
-        RedisValue::SortedSet(members) => {
-            members.iter().map(|(m, _)| cell_value_len(m)).sum()
-        }
+        RedisValue::SortedSet(members) => members.iter().map(|(m, _)| cell_value_len(m)).sum(),
         RedisValue::Stream(_) => 0,
         RedisValue::None => 0,
     }
@@ -1193,13 +2469,16 @@ fn cell_value_to_string(value: &CellValue) -> String {
         CellValue::Null => "(null)".to_string(),
         CellValue::Bool(b) => b.to_string(),
         CellValue::Int(i) => i.to_string(),
+        CellValue::UInt(u) => u.to_string(),
         CellValue::Float(f) => f.to_string(),
         CellValue::Decimal(s) => s.clone(),
         CellValue::Text(s) => s.clone(),
         CellValue::Bytes(b) => format!("[{} bytes]", b.len()),
         CellValue::Date(_) => "(date)".to_string(),
+        CellValue::Time(_) => "(time)".to_string(),
         CellValue::DateTime(_) => "(datetime)".to_string(),
-        CellValue::Json(s) => s.clone(),
+        CellValue::Timestamp(_) => "(timestamp)".to_string(),
+        CellValue::Json(s) => s.to_string(),
     }
 }
 

@@ -6,21 +6,114 @@ pub fn format_sql(sql: &str) -> String {
     }
 
     let keywords = [
-        "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN",
-        "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "ON",
-        "GROUP", "BY", "ORDER", "ASC", "DESC", "LIMIT", "OFFSET",
-        "HAVING", "DISTINCT", "ALL", "AS", "CASE", "WHEN", "THEN", "ELSE", "END",
-        "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE",
-        "ALTER", "DROP", "INDEX", "VIEW", "DATABASE", "SCHEMA",
-        "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "CONSTRAINT", "UNIQUE", "DEFAULT",
-        "NULL", "NOT", "AUTO_INCREMENT", "SERIAL", "VARCHAR", "INTEGER", "INT", "BIGINT",
-        "TEXT", "BOOLEAN", "DATE", "TIME", "TIMESTAMP", "DATETIME", "FLOAT", "DOUBLE",
-        "DECIMAL", "NUMERIC", "BLOB", "JSON", "UUID",
-        "UNION", "INTERSECT", "EXCEPT", "EXISTS", "ANY", "SOME",
-        "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "WITH",
-        "RECURSIVE", "CTE", "OVER", "PARTITION", "ROW", "ROWS",
-        "RANK", "DENSE_RANK", "ROW_NUMBER", "LEAD", "LAG", "FIRST", "LAST",
-        "NULLS", "TRUE", "FALSE", "IS", "COUNT", "SUM", "AVG", "MIN", "MAX",
+        "SELECT",
+        "FROM",
+        "WHERE",
+        "AND",
+        "OR",
+        "NOT",
+        "IN",
+        "LIKE",
+        "BETWEEN",
+        "JOIN",
+        "LEFT",
+        "RIGHT",
+        "INNER",
+        "OUTER",
+        "FULL",
+        "CROSS",
+        "ON",
+        "GROUP",
+        "BY",
+        "ORDER",
+        "ASC",
+        "DESC",
+        "LIMIT",
+        "OFFSET",
+        "HAVING",
+        "DISTINCT",
+        "ALL",
+        "AS",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "END",
+        "INSERT",
+        "INTO",
+        "VALUES",
+        "UPDATE",
+        "SET",
+        "DELETE",
+        "CREATE",
+        "TABLE",
+        "ALTER",
+        "DROP",
+        "INDEX",
+        "VIEW",
+        "DATABASE",
+        "SCHEMA",
+        "PRIMARY",
+        "KEY",
+        "FOREIGN",
+        "REFERENCES",
+        "CONSTRAINT",
+        "UNIQUE",
+        "DEFAULT",
+        "NULL",
+        "NOT",
+        "AUTO_INCREMENT",
+        "SERIAL",
+        "VARCHAR",
+        "INTEGER",
+        "INT",
+        "BIGINT",
+        "TEXT",
+        "BOOLEAN",
+        "DATE",
+        "TIME",
+        "TIMESTAMP",
+        "DATETIME",
+        "FLOAT",
+        "DOUBLE",
+        "DECIMAL",
+        "NUMERIC",
+        "BLOB",
+        "JSON",
+        "UUID",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "EXISTS",
+        "ANY",
+        "SOME",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "TRANSACTION",
+        "WITH",
+        "RECURSIVE",
+        "CTE",
+        "OVER",
+        "PARTITION",
+        "ROW",
+        "ROWS",
+        "RANK",
+        "DENSE_RANK",
+        "ROW_NUMBER",
+        "LEAD",
+        "LAG",
+        "FIRST",
+        "LAST",
+        "NULLS",
+        "TRUE",
+        "FALSE",
+        "IS",
+        "COUNT",
+        "SUM",
+        "AVG",
+        "MIN",
+        "MAX",
     ];
 
     let upper_keywords: std::collections::HashSet<&str> = keywords.iter().cloned().collect();
@@ -97,18 +190,52 @@ pub fn format_sql(sql: &str) -> String {
                 }
 
                 // Check if this is a word
-                let rest: String = sql[idx..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                let rest: String = sql[idx..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
                 if !rest.is_empty() {
                     let word_upper = rest.to_uppercase();
                     if upper_keywords.contains(word_upper.as_str()) {
                         // Keyword: apply indentation rules
-                        let should_indent_after = ["FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS",
-                            "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "SET", "VALUES", "AND", "OR",
-                            "CASE", "WHEN", "THEN", "ELSE", "END", "UNION", "INTERSECT", "EXCEPT",
-                            "WITH", "RECURSIVE", "OVER", "PARTITION"];
-                        let should_deindent_before = ["END", "ELSE", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT"];
+                        let should_indent_after = [
+                            "FROM",
+                            "WHERE",
+                            "JOIN",
+                            "LEFT",
+                            "RIGHT",
+                            "INNER",
+                            "OUTER",
+                            "FULL",
+                            "CROSS",
+                            "GROUP",
+                            "ORDER",
+                            "HAVING",
+                            "LIMIT",
+                            "OFFSET",
+                            "SET",
+                            "VALUES",
+                            "AND",
+                            "OR",
+                            "CASE",
+                            "WHEN",
+                            "THEN",
+                            "ELSE",
+                            "END",
+                            "UNION",
+                            "INTERSECT",
+                            "EXCEPT",
+                            "WITH",
+                            "RECURSIVE",
+                            "OVER",
+                            "PARTITION",
+                        ];
+                        let should_deindent_before =
+                            ["END", "ELSE", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT"];
 
-                        if should_deindent_before.contains(&word_upper.as_str()) && prev_word.as_str() != "(" {
+                        if should_deindent_before.contains(&word_upper.as_str())
+                            && prev_word.as_str() != "("
+                        {
                             indent_level = indent_level.saturating_sub(1);
                             if line_start && paren_depth == 0 {
                                 result.push_str(&"  ".repeat(indent_level));
@@ -116,7 +243,11 @@ pub fn format_sql(sql: &str) -> String {
                         }
 
                         result.push_str(&rest);
-                        indent_level += if should_indent_after.contains(&word_upper.as_str()) { 1 } else { 0 };
+                        indent_level += if should_indent_after.contains(&word_upper.as_str()) {
+                            1
+                        } else {
+                            0
+                        };
                     } else {
                         result.push_str(&rest);
                     }
@@ -136,7 +267,8 @@ pub fn format_sql(sql: &str) -> String {
     }
 
     // Clean up trailing whitespace
-    let trimmed: String = result.lines()
+    let trimmed: String = result
+        .lines()
         .map(|line| line.trim_end())
         .collect::<Vec<_>>()
         .join("\n");

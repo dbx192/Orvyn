@@ -687,7 +687,11 @@ fn duckdb_create_table_sql(path: PathBuf, schema: &str, table: &str) -> Result<S
             let unique = if idx.unique { " UNIQUE" } else { "" };
             ddl.push_str(&format!(
                 "\nCREATE{} INDEX \"{}\" ON \"{}\".\"{}\" ({});",
-                unique, idx.name, schema, table, cols.join(", ")
+                unique,
+                idx.name,
+                schema,
+                table,
+                cols.join(", ")
             ));
         }
     }

@@ -258,10 +258,7 @@ impl TableStructureView {
                     ui.label(&trg.name);
                     ui.label(&trg.event);
                     ui.label(&trg.timing);
-                    let stmt = trg
-                        .statement
-                        .as_deref()
-                        .unwrap_or("");
+                    let stmt = trg.statement.as_deref().unwrap_or("");
                     let preview = if stmt.len() > 80 {
                         format!("{}...", &stmt[..80])
                     } else {

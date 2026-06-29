@@ -9,6 +9,7 @@ version.workspace = true
 app-core = { path = "../../crates/app-core" }
 chrono.workspace = true
 db-common.workspace = true
+db-redis = { path = "../../crates/db-redis" }
 eframe.workspace = true
 import-export = { path = "../../crates/import-export" }
 rfd.workspace = true

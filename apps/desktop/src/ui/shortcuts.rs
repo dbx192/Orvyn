@@ -1,4 +1,4 @@
-use eframe::egui::{InputState, Modifiers, Key};
+use eframe::egui::{InputState, Key, Modifiers};
 
 /// Represents a keyboard shortcut with optional modifiers and a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

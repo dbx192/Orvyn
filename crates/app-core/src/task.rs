@@ -244,7 +244,8 @@ impl TaskManager {
     }
 
     pub async fn cleanup_completed(&self, older_than: Duration) {
-        let cutoff: DateTime<Utc> = Utc::now() - chrono::Duration::from_std(older_than).unwrap_or_default();
+        let cutoff: DateTime<Utc> =
+            Utc::now() - chrono::Duration::from_std(older_than).unwrap_or_default();
         let mut tasks = self.tasks.write().await;
 
         tasks.retain(|_, t| {
@@ -271,7 +272,10 @@ mod tests {
         let task_id = task.id;
 
         assert!(manager.get_task(task_id).await.is_some());
-        assert_eq!(manager.get_task(task_id).await.unwrap().status, TaskStatus::Pending);
+        assert_eq!(
+            manager.get_task(task_id).await.unwrap().status,
+            TaskStatus::Pending
+        );
 
         let _ = manager.spawn(task, async { Ok(42) }).await;
 
@@ -333,10 +337,14 @@ mod tests {
         let task_id = task.id;
 
         let _ = manager
-            .spawn_blocking_with_timeout(task, || {
-                std::thread::sleep(Duration::from_millis(500));
-                Ok(42)
-            }, 100)
+            .spawn_blocking_with_timeout(
+                task,
+                || {
+                    std::thread::sleep(Duration::from_millis(500));
+                    Ok(42)
+                },
+                100,
+            )
             .await;
 
         tokio::time::sleep(Duration::from_millis(150)).await;

@@ -83,7 +83,14 @@ impl QueryService {
         pool_config: ConnectionPoolConfig,
         task_manager: TaskManager,
     ) -> Self {
-        Self::new(connections, executors, pool_config, task_manager, None, None)
+        Self::new(
+            connections,
+            executors,
+            pool_config,
+            task_manager,
+            None,
+            None,
+        )
     }
 
     pub fn with_stores(
@@ -94,7 +101,14 @@ impl QueryService {
         history_store: Arc<dyn QueryHistoryStore>,
         favorite_store: Arc<dyn FavoriteQueryStore>,
     ) -> Self {
-        Self::new(connections, executors, pool_config, task_manager, Some(history_store), Some(favorite_store))
+        Self::new(
+            connections,
+            executors,
+            pool_config,
+            task_manager,
+            Some(history_store),
+            Some(favorite_store),
+        )
     }
 
     fn load_history_and_favorites(&self) -> Result<()> {

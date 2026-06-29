@@ -36,14 +36,12 @@ pub use query::{
 };
 pub use redaction::{mask_secret, redact_connection_url, SecretString};
 pub use result_set::{CellValue, Column, LogicalType, QueryResult, Row};
+pub use session::{SessionInfo, SessionState, TaskInfo, TaskKind, TaskProgress, TaskStatus};
 pub use sql::{
     highlight_sql, is_result_set_statement, looks_like_unqualified_mutation, split_statements,
     statement_at_offset, statement_summary, trim_sql,
 };
 pub use time::{elapsed_ms, now_utc};
-pub use session::{
-    SessionInfo, SessionState, TaskInfo, TaskKind, TaskProgress, TaskStatus,
-};
 pub use traits::{
     ConnectionTester, DatabaseFunction, DatabaseObject, DatabaseObjectKind, MetadataNode,
     MetadataNodeKind, MetadataPath, RedisConnector, RedisDatabase, RedisKeyInfo, RedisKeyScan,

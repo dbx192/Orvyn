@@ -1,8 +1,8 @@
 use crate::connection::ConnectionManager;
 use db_common::{
-    AppError, ConnectionId, ConnectionProfile, ConnectionStatus, ConnectionTestReport,
-    ConnectionTester, DataSourceKind, ErrorKind, Result, SessionInfo, SessionState,
-    unsupported_kind,
+    unsupported_kind, AppError, ConnectionId, ConnectionProfile, ConnectionStatus,
+    ConnectionTestReport, ConnectionTester, DataSourceKind, ErrorKind, Result, SessionInfo,
+    SessionState,
 };
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::RwLock;
@@ -16,10 +16,7 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(
-        connections: ConnectionManager,
-        testers: Vec<Arc<dyn ConnectionTester>>,
-    ) -> Self {
+    pub fn new(connections: ConnectionManager, testers: Vec<Arc<dyn ConnectionTester>>) -> Self {
         let testers = testers
             .into_iter()
             .map(|tester| (tester.kind(), tester))
@@ -75,10 +72,7 @@ impl SessionManager {
                     info!(connection_id = %id, "connection established");
                     Ok(session)
                 } else {
-                    session.mark_broken(AppError::new(
-                        ErrorKind::Connection,
-                        &report.message,
-                    ));
+                    session.mark_broken(AppError::new(ErrorKind::Connection, &report.message));
                     self.update_session(session.clone()).await;
                     Err(AppError::new(ErrorKind::Connection, &report.message))
                 }
@@ -93,9 +87,10 @@ impl SessionManager {
 
     #[instrument(skip(self), fields(connection_id = %id))]
     pub async fn disconnect(&self, id: ConnectionId) -> Result<()> {
-        let mut session = self.get_session(id).await?.ok_or_else(|| {
-            AppError::new(ErrorKind::Validation, "session not found")
-        })?;
+        let mut session = self
+            .get_session(id)
+            .await?
+            .ok_or_else(|| AppError::new(ErrorKind::Validation, "session not found"))?;
 
         if !session.state.is_connected() && !session.state.is_connecting() {
             return Ok(());
@@ -113,9 +108,10 @@ impl SessionManager {
         id: ConnectionId,
         runtime_password: Option<&str>,
     ) -> Result<SessionInfo> {
-        let mut session = self.get_session(id).await?.ok_or_else(|| {
-            AppError::new(ErrorKind::Validation, "session not found")
-        })?;
+        let mut session = self
+            .get_session(id)
+            .await?
+            .ok_or_else(|| AppError::new(ErrorKind::Validation, "session not found"))?;
 
         if !session.can_reconnect() {
             return Err(AppError::new(
@@ -141,7 +137,10 @@ impl SessionManager {
 
     pub async fn get_or_create_session(&self, id: ConnectionId) -> SessionInfo {
         let mut sessions = self.sessions.write().await;
-        sessions.entry(id).or_insert_with(|| SessionInfo::new(id)).clone()
+        sessions
+            .entry(id)
+            .or_insert_with(|| SessionInfo::new(id))
+            .clone()
     }
 
     pub async fn update_session(&self, session: SessionInfo) {
@@ -158,7 +157,9 @@ impl SessionManager {
         match self.get_session(id).await {
             Ok(Some(session)) => match session.state {
                 SessionState::Disconnected => ConnectionStatus::NotConnected,
-                SessionState::Connecting | SessionState::Reconnecting => ConnectionStatus::Connecting,
+                SessionState::Connecting | SessionState::Reconnecting => {
+                    ConnectionStatus::Connecting
+                }
                 SessionState::Connected => ConnectionStatus::Connected,
                 SessionState::Broken => ConnectionStatus::Failed,
             },
@@ -236,10 +237,16 @@ mod tests {
             .build()
             .expect("profile");
 
-        assert_eq!(manager.status_for(profile.id).await, ConnectionStatus::NotConnected);
+        assert_eq!(
+            manager.status_for(profile.id).await,
+            ConnectionStatus::NotConnected
+        );
 
         let _ = manager.connect(profile.id, None).await;
-        assert_eq!(manager.status_for(profile.id).await, ConnectionStatus::Failed);
+        assert_eq!(
+            manager.status_for(profile.id).await,
+            ConnectionStatus::Failed
+        );
     }
 
     fn test_session_manager() -> SessionManager {
@@ -248,7 +255,10 @@ mod tests {
             Arc::new(MemorySecureStore::default()),
             vec![Arc::new(db_postgres::PostgreSqlConnectionTester)],
         );
-        SessionManager::new(connection_manager, vec![Arc::new(db_postgres::PostgreSqlConnectionTester)])
+        SessionManager::new(
+            connection_manager,
+            vec![Arc::new(db_postgres::PostgreSqlConnectionTester)],
+        )
     }
 
     #[derive(Default)]

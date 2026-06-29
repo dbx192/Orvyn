@@ -1,7 +1,5 @@
 use crate::connection::ConnectionManager;
-use db_common::{
-    CellValue, ConnectionId, RedisKeyInfo, RedisValue, Result,
-};
+use db_common::{CellValue, ConnectionId, RedisKeyInfo, RedisValue, Result};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -15,7 +13,11 @@ pub struct RedisKeyLoad {
 
 pub struct RedisService {
     connections: ConnectionManager,
-    connections_cache: Arc<Mutex<std::collections::BTreeMap<ConnectionId, db_redis::redis::aio::MultiplexedConnection>>>,
+    connections_cache: Arc<
+        Mutex<
+            std::collections::BTreeMap<ConnectionId, db_redis::redis::aio::MultiplexedConnection>,
+        >,
+    >,
 }
 
 impl RedisService {
@@ -117,7 +119,14 @@ impl RedisService {
         ttl_seconds: Option<u64>,
     ) -> Result<()> {
         let mut conn = self.get_connection(connection_id).await?;
-        db_redis::RedisConnectorWithAuth::set_string_value(&mut conn, database, key, value, ttl_seconds).await
+        db_redis::RedisConnectorWithAuth::set_string_value(
+            &mut conn,
+            database,
+            key,
+            value,
+            ttl_seconds,
+        )
+        .await
     }
 
     pub async fn hset(

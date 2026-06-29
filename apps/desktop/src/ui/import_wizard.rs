@@ -1,11 +1,11 @@
 //! CSV import wizard: step-by-step guide to import CSV data into a database table.
 
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
+use db_common::dialect::{BacktickDialect, DoubleQuoteDialect};
 use db_common::{
     ConnectionId, DataSourceKind, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest,
     QueryId, Result, TableColumn,
 };
-use db_common::dialect::{BacktickDialect, DoubleQuoteDialect};
 use eframe::egui::{Button, Color32, ComboBox, Frame, RichText, ScrollArea, Ui, Window};
 use import_export::import_csv::{
     auto_map_fields, generate_insert_batches, parse_csv_preview, validate_types, CsvImportOptions,
@@ -268,7 +268,11 @@ impl ImportWizard {
         rt.spawn(async move {
             let result = tokio::task::spawn_blocking(move || parse_csv_preview(&path, &options))
                 .await
-                .unwrap_or_else(|e| Err(db_common::AppError::validation(format!("Task panicked: {e}"))));
+                .unwrap_or_else(|e| {
+                    Err(db_common::AppError::validation(format!(
+                        "Task panicked: {e}"
+                    )))
+                });
             *cell.lock().unwrap() = Some(result);
         });
     }
@@ -354,11 +358,13 @@ impl ImportWizard {
                             self.table_columns = cols;
                             // Auto-map fields
                             if let Some(ref preview) = self.preview {
-                                self.mapping = Some(auto_map_fields(&preview.headers, &self.table_columns));
+                                self.mapping =
+                                    Some(auto_map_fields(&preview.headers, &self.table_columns));
                             }
                         }
                         Err(e) => {
-                            self.error = Some(format!("Failed to load table columns: {}", e.message));
+                            self.error =
+                                Some(format!("Failed to load table columns: {}", e.message));
                         }
                     }
                     self.loading = false;
@@ -409,11 +415,21 @@ impl ImportWizard {
                         .selected_text(&selected_text)
                         .width(180.0)
                         .show_ui(ui, |ui| {
-                            if ui.selectable_value(&mut selected_text, "-- skip --".to_string(), "-- skip --").clicked() {
+                            if ui
+                                .selectable_value(
+                                    &mut selected_text,
+                                    "-- skip --".to_string(),
+                                    "-- skip --",
+                                )
+                                .clicked()
+                            {
                                 mapping.mappings[col_idx] = None;
                             }
                             for (csv_idx, header) in preview.headers.iter().enumerate() {
-                                if ui.selectable_value(&mut selected_text, header.clone(), header).clicked() {
+                                if ui
+                                    .selectable_value(&mut selected_text, header.clone(), header)
+                                    .clicked()
+                                {
                                     mapping.mappings[col_idx] = Some(csv_idx);
                                 }
                             }
@@ -471,7 +487,11 @@ impl ImportWizard {
                 ))
             })
             .await
-            .unwrap_or_else(|e| Err(db_common::AppError::validation(format!("Task panicked: {e}"))));
+            .unwrap_or_else(|e| {
+                Err(db_common::AppError::validation(format!(
+                    "Task panicked: {e}"
+                )))
+            });
             *cell.lock().unwrap() = Some(result);
         });
     }
@@ -483,11 +503,14 @@ impl ImportWizard {
             if report.issues.is_empty() {
                 ui.label(RichText::new("✅ All rows passed validation!").color(Color32::GREEN));
             } else {
-                ui.label(RichText::new(format!(
-                    "⚠ {} type issues found in {} checked rows:",
-                    report.issues.len(),
-                    report.total_rows_checked
-                )).color(Color32::YELLOW));
+                ui.label(
+                    RichText::new(format!(
+                        "⚠ {} type issues found in {} checked rows:",
+                        report.issues.len(),
+                        report.total_rows_checked
+                    ))
+                    .color(Color32::YELLOW),
+                );
 
                 ui.add_space(8.0);
                 ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
@@ -546,12 +569,18 @@ impl ImportWizard {
     fn step_execute(&mut self, ui: &mut Ui, message: &mut Option<String>) {
         if let Some(ref result) = self.import_result {
             // Show completed result
-            ui.label(RichText::new("✅ Import complete!").color(Color32::GREEN).size(18.0));
+            ui.label(
+                RichText::new("✅ Import complete!")
+                    .color(Color32::GREEN)
+                    .size(18.0),
+            );
             ui.add_space(8.0);
             ui.label(format!("Total rows: {}", result.total_rows));
             ui.label(format!("Successful: {}", result.success_rows));
             if result.failed_rows > 0 {
-                ui.label(RichText::new(format!("Failed: {}", result.failed_rows)).color(Color32::RED));
+                ui.label(
+                    RichText::new(format!("Failed: {}", result.failed_rows)).color(Color32::RED),
+                );
             }
             ui.label(format!("Time: {:.1}s", result.elapsed_secs));
 
@@ -564,7 +593,11 @@ impl ImportWizard {
                 });
             }
         } else if self.loading {
-            ui.label(RichText::new("⏳ Import running...").color(Color32::YELLOW).size(16.0));
+            ui.label(
+                RichText::new("⏳ Import running...")
+                    .color(Color32::YELLOW)
+                    .size(16.0),
+            );
             ui.add_space(8.0);
             ui.label("Executing batch INSERT statements in the background.");
         } else {
@@ -661,25 +694,30 @@ impl ImportWizard {
             ) {
                 Ok(batches) => {
                     for (i, batch_sql) in batches.iter().enumerate() {
-                        match query_service.execute(
-                            QueryExecutionRequest {
-                                tab_id: QueryId::new(),
-                                connection_id,
-                                sql: batch_sql.clone(),
-                                mode: QueryExecutionMode::All,
-                                cursor_offset: 0,
-                                selection: None,
-                                timeout_ms: 60000,
-                            },
-                            None,
-                        )
-                        .await
+                        match query_service
+                            .execute(
+                                QueryExecutionRequest {
+                                    tab_id: QueryId::new(),
+                                    connection_id,
+                                    sql: batch_sql.clone(),
+                                    mode: QueryExecutionMode::All,
+                                    cursor_offset: 0,
+                                    selection: None,
+                                    timeout_ms: 60000,
+                                },
+                                None,
+                            )
+                            .await
                         {
                             Ok(report) => {
-                                let affected: u64 = report.results.iter().map(|r| r.affected_rows).sum();
+                                let affected: u64 =
+                                    report.results.iter().map(|r| r.affected_rows).sum();
                                 success += affected as usize;
                                 if report.results.iter().any(|r| r.affected_rows == 0) {
-                                    errors.push(format!("Batch {}: some rows may not have been inserted", i + 1));
+                                    errors.push(format!(
+                                        "Batch {}: some rows may not have been inserted",
+                                        i + 1
+                                    ));
                                 }
                             }
                             Err(e) => {
@@ -721,7 +759,11 @@ impl ImportWizard {
         match self.schema.as_deref().filter(|s| !s.is_empty()) {
             Some(schema) => {
                 let schema_ident = Identifier::new(schema).unwrap();
-                format!("{}.{}", dialect.quote_identifier(&schema_ident), quoted_table)
+                format!(
+                    "{}.{}",
+                    dialect.quote_identifier(&schema_ident),
+                    quoted_table
+                )
             }
             None => quoted_table,
         }
@@ -798,4 +840,3 @@ impl ImportWizard {
         }
     }
 }
-

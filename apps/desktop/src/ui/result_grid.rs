@@ -127,21 +127,16 @@ impl ResultSetGrid {
                         .id_source("result_set_vertical")
                         .max_height(ui.available_height().max(240.0))
                         .auto_shrink([false, false])
-                        .show_rows(
-                            ui,
-                            ROW_HEIGHT,
-                            self.page_rows().len(),
-                            |ui, row_range| {
-                                let page_rows = self.page_rows();
-                                for visible_row_index in row_range {
-                                    let Some(row_index) = page_rows.get(visible_row_index).copied()
-                                    else {
-                                        continue;
-                                    };
-                                    self.row(ui, row_index);
-                                }
-                            },
-                        );
+                        .show_rows(ui, ROW_HEIGHT, self.page_rows().len(), |ui, row_range| {
+                            let page_rows = self.page_rows();
+                            for visible_row_index in row_range {
+                                let Some(row_index) = page_rows.get(visible_row_index).copied()
+                                else {
+                                    continue;
+                                };
+                                self.row(ui, row_index);
+                            }
+                        });
                 });
         });
 
@@ -296,11 +291,11 @@ impl ResultSetGrid {
                         };
                         let title = format!("{column_name}{marker}");
                         let title_btn = if sort_dir.is_some() {
-                            Button::new(RichText::new(title).strong().color(Color32::from_rgb(
-                                60,
-                                100,
-                                180,
-                            )))
+                            Button::new(
+                                RichText::new(title)
+                                    .strong()
+                                    .color(Color32::from_rgb(60, 100, 180)),
+                            )
                         } else {
                             Button::new(RichText::new(title).strong())
                         };
@@ -313,11 +308,7 @@ impl ResultSetGrid {
                             self.page = 0;
                         }
                         ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("↔")
-                                    .color(Color32::GRAY)
-                                    .size(10.0),
-                            );
+                            ui.label(RichText::new("↔").color(Color32::GRAY).size(10.0));
                             ui.add(
                                 DragValue::new(&mut self.column_widths[column_index])
                                     .speed(2.0)
@@ -353,9 +344,7 @@ impl ResultSetGrid {
                         Vec2::new(width, ROW_HEIGHT),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            let label = Label::new(rich_text)
-                                .sense(Sense::click())
-                                .truncate(true);
+                            let label = Label::new(rich_text).sense(Sense::click()).truncate(true);
                             ui.add_sized([width, ROW_HEIGHT], label)
                         },
                     )
@@ -540,16 +529,22 @@ impl ResultSetGrid {
                     // Open file save dialog (blocking on a background thread to avoid freezing UI).
                     let path = rfd::FileDialog::new()
                         .set_title(&format!("Save as {}", format_label))
-                        .add_filter(format_label, &[file_ext.as_str()])
+                        .add_filter(&format_label, &[file_ext.as_str()])
                         .save_file();
 
                     if let Some(path) = path {
+                        let path_for_task = path.clone();
+                        let format_label_for_task = format_label.clone();
                         rt.spawn(async move {
-                            match tokio::fs::write(&path, &text_clone).await {
+                            match tokio::fs::write(&path_for_task, &text_clone).await {
                                 Ok(()) => {
                                     // Status update must be set via the egui context on next frame.
                                     // We use a simpler approach: just log the success.
-                                    tracing::info!("Exported {} to {}", format_label, path.display());
+                                    tracing::info!(
+                                        "Exported {} to {}",
+                                        format_label_for_task,
+                                        path_for_task.display()
+                                    );
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to write export file: {e}");
@@ -564,7 +559,10 @@ impl ResultSetGrid {
                     }
                 } else {
                     // Fallback: copy to clipboard if no runtime available.
-                    *message = Some(format!("{} export ready (no file dialog available — copied to clipboard)", format_name));
+                    *message = Some(format!(
+                        "{} export ready (no file dialog available — copied to clipboard)",
+                        format_name
+                    ));
                 }
             }
             Err(error) => {

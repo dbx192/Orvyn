@@ -72,7 +72,8 @@ pub fn parse_csv_preview(path: &Path, options: &CsvImportOptions) -> Result<CsvP
 
     let mut all_records: Vec<Vec<String>> = Vec::new();
     for result in reader.records() {
-        let record = result.map_err(|e| db_common::AppError::validation(format!("CSV parse error: {e}")))?;
+        let record =
+            result.map_err(|e| db_common::AppError::validation(format!("CSV parse error: {e}")))?;
         all_records.push(record.iter().map(|s| s.to_string()).collect());
     }
 
@@ -167,7 +168,8 @@ pub fn validate_types(
 
             // Basic type checks based on database_type hints
             let db_type = col.database_type.to_lowercase();
-            if db_type.contains("int") || db_type.contains("bigint") || db_type.contains("smallint") {
+            if db_type.contains("int") || db_type.contains("bigint") || db_type.contains("smallint")
+            {
                 if value.trim().parse::<i64>().is_err() {
                     issues.push(TypeIssue {
                         row: row_idx + 1,
@@ -176,7 +178,11 @@ pub fn validate_types(
                         reason: format!("Expected integer for type '{}'", col.database_type),
                     });
                 }
-            } else if db_type.contains("float") || db_type.contains("double") || db_type.contains("decimal") || db_type.contains("numeric") {
+            } else if db_type.contains("float")
+                || db_type.contains("double")
+                || db_type.contains("decimal")
+                || db_type.contains("numeric")
+            {
                 if value.trim().parse::<f64>().is_err() {
                     issues.push(TypeIssue {
                         row: row_idx + 1,
@@ -187,7 +193,13 @@ pub fn validate_types(
                 }
             } else if db_type.contains("bool") {
                 let lower = value.trim().to_lowercase();
-                if lower != "true" && lower != "false" && lower != "1" && lower != "0" && lower != "t" && lower != "f" {
+                if lower != "true"
+                    && lower != "false"
+                    && lower != "1"
+                    && lower != "0"
+                    && lower != "t"
+                    && lower != "f"
+                {
                     issues.push(TypeIssue {
                         row: row_idx + 1,
                         column: col.name.clone(),
@@ -224,7 +236,9 @@ pub fn generate_insert_batches(
         .collect();
 
     if mapped_columns.is_empty() {
-        return Err(db_common::AppError::validation("No columns mapped for import"));
+        return Err(db_common::AppError::validation(
+            "No columns mapped for import",
+        ));
     }
 
     let col_names: Vec<String> = mapped_columns
@@ -303,8 +317,22 @@ mod tests {
     fn auto_maps_by_case_insensitive_name() {
         let headers = vec!["NAME".to_string(), "Age".to_string()];
         let columns = vec![
-            TableColumn { name: "name".into(), database_type: "VARCHAR".into(), nullable: true, default_value: None, primary_key: false, comment: None },
-            TableColumn { name: "age".into(), database_type: "INT".into(), nullable: false, default_value: None, primary_key: false, comment: None },
+            TableColumn {
+                name: "name".into(),
+                database_type: "VARCHAR".into(),
+                nullable: true,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            },
+            TableColumn {
+                name: "age".into(),
+                database_type: "INT".into(),
+                nullable: false,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            },
         ];
         let mapping = auto_map_fields(&headers, &columns);
         assert_eq!(mapping.mappings[0], Some(0));
@@ -315,13 +343,27 @@ mod tests {
     fn validates_not_null_and_type() {
         let headers = vec!["name".to_string(), "age".to_string()];
         let columns = vec![
-            TableColumn { name: "name".into(), database_type: "VARCHAR".into(), nullable: true, default_value: None, primary_key: false, comment: None },
-            TableColumn { name: "age".into(), database_type: "INT".into(), nullable: false, default_value: None, primary_key: false, comment: None },
+            TableColumn {
+                name: "name".into(),
+                database_type: "VARCHAR".into(),
+                nullable: true,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            },
+            TableColumn {
+                name: "age".into(),
+                database_type: "INT".into(),
+                nullable: false,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            },
         ];
         let mapping = auto_map_fields(&headers, &columns);
         let rows = vec![
-            vec!["Alice".to_string(), "".to_string()],       // age is empty → NOT NULL error
-            vec!["Bob".to_string(), "abc".to_string()],       // age is not int → type error
+            vec!["Alice".to_string(), "".to_string()], // age is empty → NOT NULL error
+            vec!["Bob".to_string(), "abc".to_string()], // age is not int → type error
         ];
         let report = validate_types(&rows, &headers, &columns, &mapping);
         assert_eq!(report.issues.len(), 2);
@@ -331,13 +373,38 @@ mod tests {
     fn generates_insert_batches() {
         let headers = vec!["name".to_string(), "age".to_string()];
         let columns = vec![
-            TableColumn { name: "name".into(), database_type: "VARCHAR".into(), nullable: true, default_value: None, primary_key: false, comment: None },
-            TableColumn { name: "age".into(), database_type: "INT".into(), nullable: false, default_value: None, primary_key: false, comment: None },
+            TableColumn {
+                name: "name".into(),
+                database_type: "VARCHAR".into(),
+                nullable: true,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            },
+            TableColumn {
+                name: "age".into(),
+                database_type: "INT".into(),
+                nullable: false,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            },
         ];
         let mapping = auto_map_fields(&headers, &columns);
-        let rows: Vec<Vec<String>> = (1..=5).map(|i| vec![format!("User{i}"), format!("{}", i * 10)]).collect();
+        let rows: Vec<Vec<String>> = (1..=5)
+            .map(|i| vec![format!("User{i}"), format!("{}", i * 10)])
+            .collect();
         let dialect = DoubleQuoteDialect;
-        let batches = generate_insert_batches(&rows, &headers, &columns, &mapping, "\"public\".\"users\"", &dialect, 2).unwrap();
+        let batches = generate_insert_batches(
+            &rows,
+            &headers,
+            &columns,
+            &mapping,
+            "\"public\".\"users\"",
+            &dialect,
+            2,
+        )
+        .unwrap();
         assert_eq!(batches.len(), 3); // 5 rows / batch_size 2 = 3 batches
         assert!(batches[0].starts_with("INSERT INTO \"public\".\"users\""));
         assert!(batches[0].contains("'User1', 10"));

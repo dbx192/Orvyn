@@ -1,10 +1,17 @@
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
 use app_core::query::QueryService;
-use db_common::{CellValue, ConnectionId, Dialect, Identifier, QueryId, QueryResult, Row, TableColumn, Result};
-use eframe::egui::{
-    Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2, Window,
+use db_common::{
+    CellValue, ConnectionId, Dialect, Identifier, QueryId, QueryResult, Result, Row, TableColumn,
 };
-use std::{collections::BTreeMap, fmt::Write, sync::{Arc, Mutex}};
+use eframe::egui::{
+    Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Stroke,
+    TextEdit, Ui, Vec2, Window,
+};
+use std::{
+    collections::BTreeMap,
+    fmt::Write,
+    sync::{Arc, Mutex},
+};
 use tokio::runtime::Handle;
 
 const DEFAULT_PAGE_SIZE: usize = 100;
@@ -239,32 +246,34 @@ impl TableEditor {
                 None
             }
             CommitState::Committing(cell) => {
-                if let Ok(mut guard) = cell.lock() {
-                    if let Some(result) = guard.take() {
-                        match result {
-                            Ok(report) => {
-                                let affected = report.affected_rows;
-                                self.clear_changes();
-                                self.last_commit_result = Some((affected as usize, Vec::new()));
-                                Some(format!("Commit successful — {} row(s) affected", affected))
-                            }
-                            Err(e) => {
-                                let msg = format!("Commit failed: {}", e.message);
-                                self.commit_state = CommitState::Failed(msg.clone());
-                                self.commit_error = Some(msg.clone());
-                                Some(msg)
-                            }
-                        }
-                    } else {
-                        // Still waiting — put the cell back.
-                        self.commit_state = CommitState::Committing(cell);
-                        None
-                    }
+                let poll_result = if let Ok(mut guard) = cell.lock() {
+                    guard.take()
                 } else {
                     let msg = "Internal error: commit result lock poisoned".to_string();
                     self.commit_state = CommitState::Failed(msg.clone());
                     self.commit_error = Some(msg.clone());
-                    Some(msg)
+                    return Some(msg);
+                };
+
+                if let Some(result) = poll_result {
+                    match result {
+                        Ok(report) => {
+                            let affected = report.affected_rows;
+                            self.clear_changes();
+                            self.last_commit_result = Some((affected as usize, Vec::new()));
+                            Some(format!("Commit successful — {} row(s) affected", affected))
+                        }
+                        Err(e) => {
+                            let msg = format!("Commit failed: {}", e.message);
+                            self.commit_state = CommitState::Failed(msg.clone());
+                            self.commit_error = Some(msg.clone());
+                            Some(msg)
+                        }
+                    }
+                } else {
+                    // Still waiting — put the cell back.
+                    self.commit_state = CommitState::Committing(cell);
+                    None
                 }
             }
         }
@@ -346,20 +355,27 @@ impl TableEditor {
             ui.separator();
             if ui
                 .add_enabled(!self.is_committing(), Button::new("New Row"))
-                .clicked() {
+                .clicked()
+            {
                 self.new_rows.push(NewRow {
                     values: vec![String::new(); self.columns.len()],
                 });
                 *message = Some("New row staged".to_string());
             }
             if ui
-                .add_enabled(self.has_changes() && !self.is_committing(), Button::new("Commit"))
+                .add_enabled(
+                    self.has_changes() && !self.is_committing(),
+                    Button::new("Commit"),
+                )
                 .clicked()
             {
                 self.show_commit_dialog = true;
             }
             if ui
-                .add_enabled(self.has_changes() && !self.is_committing(), Button::new("Rollback"))
+                .add_enabled(
+                    self.has_changes() && !self.is_committing(),
+                    Button::new("Rollback"),
+                )
                 .clicked()
             {
                 self.clear_changes();
@@ -417,15 +433,15 @@ impl TableEditor {
             .min_width(500.0)
             .min_height(400.0)
             .show(ui.ctx(), |ui| {
-                ui.heading(format!(
-                    "{} pending changes",
-                    summary.total_changes()
-                ));
+                ui.heading(format!("{} pending changes", summary.total_changes()));
                 ui.add_space(16.0);
 
                 ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                     if !summary.inserts.is_empty() {
-                        ui.label(RichText::new(format!("📥 {} INSERT(s)", summary.inserts.len())).strong());
+                        ui.label(
+                            RichText::new(format!("📥 {} INSERT(s)", summary.inserts.len()))
+                                .strong(),
+                        );
                         for (idx, row) in &summary.inserts {
                             ui.label(format!("  Row {}", idx + 1));
                             for (col, val) in row {
@@ -436,21 +452,24 @@ impl TableEditor {
                     }
 
                     if !summary.updates.is_empty() {
-                        ui.label(RichText::new(format!("🔄 {} UPDATE(s)", summary.updates.len())).strong());
+                        ui.label(
+                            RichText::new(format!("🔄 {} UPDATE(s)", summary.updates.len()))
+                                .strong(),
+                        );
                         for (idx, changes) in &summary.updates {
                             ui.label(format!("  Row {}", idx + 1));
                             for (col, old_val, new_val) in changes {
-                                ui.label(format!(
-                                    "    {}: {} -> {}",
-                                    col, old_val, new_val
-                                ));
+                                ui.label(format!("    {}: {} -> {}", col, old_val, new_val));
                             }
                         }
                         ui.add_space(8.0);
                     }
 
                     if !summary.deletes.is_empty() {
-                        ui.label(RichText::new(format!("🗑 {} DELETE(s)", summary.deletes.len())).strong());
+                        ui.label(
+                            RichText::new(format!("🗑 {} DELETE(s)", summary.deletes.len()))
+                                .strong(),
+                        );
                         for (idx, keys) in &summary.deletes {
                             ui.label(format!("  Row {}", idx + 1));
                             for (col, val) in keys {
@@ -533,18 +552,20 @@ impl TableEditor {
         let result_for_task = result_cell.clone();
 
         runtime.spawn(async move {
-            let result = service.execute(
-                db_common::QueryExecutionRequest {
-                    tab_id: QueryId::new(),
-                    connection_id,
-                    sql,
-                    mode: db_common::QueryExecutionMode::All,
-                    cursor_offset: 0,
-                    selection: None,
-                    timeout_ms: 30000,
-                },
-                None,
-            ).await;
+            let result = service
+                .execute(
+                    db_common::QueryExecutionRequest {
+                        tab_id: QueryId::new(),
+                        connection_id,
+                        sql,
+                        mode: db_common::QueryExecutionMode::All,
+                        cursor_offset: 0,
+                        selection: None,
+                        timeout_ms: 30000,
+                    },
+                    None,
+                )
+                .await;
 
             match result {
                 Ok(report) => {
@@ -556,17 +577,30 @@ impl TableEditor {
                         if stmt_result.affected_rows == 0 {
                             success = false;
                             let label = if is_insert { "INSERT" } else { "Statement" };
-                            write!(&mut error_msg, "{} {} affected 0 rows (conflict?); ", label, idx + 1).unwrap();
+                            write!(
+                                &mut error_msg,
+                                "{} {} affected 0 rows (conflict?); ",
+                                label,
+                                idx + 1
+                            )
+                            .unwrap();
                         } else if stmt_result.affected_rows > 1 && !is_insert {
                             success = false;
-                            write!(&mut error_msg, "Statement {} affected {} rows (danger); ", idx + 1, stmt_result.affected_rows).unwrap();
+                            write!(
+                                &mut error_msg,
+                                "Statement {} affected {} rows (danger); ",
+                                idx + 1,
+                                stmt_result.affected_rows
+                            )
+                            .unwrap();
                         }
                     }
 
                     if success {
                         *result_for_task.lock().unwrap() = Some(Ok(report));
                     } else {
-                        *result_for_task.lock().unwrap() = Some(Err(db_common::AppError::validation(error_msg)));
+                        *result_for_task.lock().unwrap() =
+                            Some(Err(db_common::AppError::validation(error_msg)));
                     }
                 }
                 Err(e) => {
@@ -589,10 +623,7 @@ impl TableEditor {
             let mut values = Vec::new();
             for (col_idx, val) in row.values.iter().enumerate() {
                 if !val.trim().is_empty() {
-                    values.push((
-                        self.columns[col_idx].name.clone(),
-                        val.clone(),
-                    ));
+                    values.push((self.columns[col_idx].name.clone(), val.clone()));
                 }
             }
             if !values.is_empty() {
@@ -619,11 +650,7 @@ impl TableEditor {
                     .unwrap_or(&CellValue::Null);
                 let old_val = copy_cell_value(original);
                 if old_val != new_val {
-                    updates.push((
-                        self.columns[col_idx].name.clone(),
-                        old_val,
-                        new_val,
-                    ));
+                    updates.push((self.columns[col_idx].name.clone(), old_val, new_val));
                 }
             }
             if !updates.is_empty() {
@@ -658,7 +685,9 @@ impl TableEditor {
         if !self.has_changes() {
             return false;
         }
-        if !self.can_edit_existing_rows() && (!self.edits.is_empty() || !self.deleted_rows.is_empty()) {
+        if !self.can_edit_existing_rows()
+            && (!self.edits.is_empty() || !self.deleted_rows.is_empty())
+        {
             return false;
         }
         true
@@ -720,15 +749,19 @@ impl TableEditor {
         let deleted =
             matches!(row_key, RowKey::Existing(index) if self.deleted_rows.contains_key(&index));
 
-        let is_error_row = self.error_row_index == Some(match row_key {
-            RowKey::Existing(i) => i,
-            RowKey::New(i) => self.result.rows.len() + i,
-        });
+        let is_error_row = self.error_row_index
+            == Some(match row_key {
+                RowKey::Existing(i) => i,
+                RowKey::New(i) => self.result.rows.len() + i,
+            });
 
         ui.horizontal(|ui| {
             if is_error_row {
-                ui.painter()
-                    .rect_stroke(ui.available_rect_before_wrap(), 2.0, Stroke::new(2.0, Color32::RED));
+                ui.painter().rect_stroke(
+                    ui.available_rect_before_wrap(),
+                    2.0,
+                    Stroke::new(2.0, Color32::RED),
+                );
             }
 
             ui.allocate_ui_with_layout(
@@ -812,8 +845,7 @@ impl TableEditor {
             }
             if self.edits.contains_key(&key) {
                 let rect = response.rect;
-                ui.painter()
-                    .rect_stroke(rect, 2.0, (1.0, Color32::YELLOW));
+                ui.painter().rect_stroke(rect, 2.0, (1.0, Color32::YELLOW));
             }
         } else {
             let mut rich = cell_rich_text(original, display_cell_value(original));

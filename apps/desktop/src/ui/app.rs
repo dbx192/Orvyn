@@ -1,28 +1,24 @@
 use crate::ui::{
     connection_manager::ConnectionManagerUi,
+    import_wizard::ImportWizard,
     object_tree::{ObjectTree, ObjectTreeAction},
     query_editor::QueryEditor,
-    redis_key_browser::RedisKeyBrowser,
-    result_grid::ResultSetGrid,
-    samples::sample_result_set,
+    redis_browser::RedisBrowserUi,
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
-    sql_formatter::format_sql,
     state::{AppState, AppTheme, TaskStatus, UiError},
     table_editor::TableEditor,
     table_structure::TableStructureView,
-    import_wizard::ImportWizard,
 };
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
-    redis_service::RedisService,
-    session::SessionManager,
-};
-use db_common::{
-    dialect::{BacktickDialect, DoubleQuoteDialect},
-    ConnectionId, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest,
-    QueryId, QueryResult, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+    redis_service::RedisService, session::SessionManager,
 };
 use db_common::DatabaseFunction;
+use db_common::{
+    dialect::{BacktickDialect, DoubleQuoteDialect},
+    ConnectionId, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest, QueryId,
+    QueryResult, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+};
 use eframe::egui::{
     Align, Button, CentralPanel, Color32, Context, Frame, Key, Layout, Modifiers, RichText,
     SidePanel, TopBottomPanel, Window,
@@ -36,18 +32,18 @@ pub struct DesktopApp {
     object_tree: ObjectTree,
     query_editor: QueryEditor,
     state: AppState,
-    result_grid: ResultSetGrid,
     table_editor: Option<TableEditor>,
     table_structure: Option<TableStructureView>,
     import_wizard: Option<ImportWizard>,
-    redis_browser: RedisKeyBrowser,
+    redis_browser: RedisBrowserUi,
     last_tree_status: String,
     error_window_open: bool,
     active_panel: ActivePanel,
     /// Pending async load for table data (Arc<Mutex> polled each frame).
     pending_table_load: Option<Arc<Mutex<Option<Result<TableDataPayload, db_common::AppError>>>>>,
     /// Pending async load for table structure.
-    pending_structure_load: Option<Arc<Mutex<Option<Result<TableStructurePayload, db_common::AppError>>>>>,
+    pending_structure_load:
+        Option<Arc<Mutex<Option<Result<TableStructurePayload, db_common::AppError>>>>>,
     // Cloned service handles for spawning async loads.
     connection_manager: ConnectionManager,
     metadata_service: MetadataService,
@@ -99,11 +95,9 @@ impl DesktopApp {
         redis_service: RedisService,
         runtime: Handle,
     ) -> Self {
-        let result_grid_result = sample_result_set();
         let cm = connection_manager.clone();
         let ms = metadata_service.clone();
         let qs = query_service.clone();
-        let rt_grid = runtime.clone();
         let rt_cm_ui = runtime.clone();
         let rt_redis = runtime.clone();
         let rt_field = runtime.clone();
@@ -111,17 +105,30 @@ impl DesktopApp {
             app_name,
             connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), rt_cm_ui),
             object_tree: ObjectTree::new(
-                metadata_service,
+                metadata_service.clone(),
                 session_manager,
                 runtime.clone(),
             ),
-            query_editor: QueryEditor::new(query_service, connection_manager, runtime),
+            query_editor: QueryEditor::new(
+                query_service,
+                connection_manager.clone(),
+                metadata_service.clone(),
+                runtime,
+            ),
             state: AppState::with_sample_workspace(),
-            result_grid: ResultSetGrid::new(result_grid_result).with_runtime(rt_grid),
             table_editor: None,
             table_structure: None,
             import_wizard: None,
-            redis_browser: RedisKeyBrowser::new(redis_service, rt_redis),
+            redis_browser: {
+                let redis_conn_id = ConnectionId::new();
+                RedisBrowserUi::new(
+                    redis_conn_id,
+                    connection_manager.clone(),
+                    metadata_service.clone(),
+                    redis_service.clone(),
+                    rt_redis,
+                )
+            },
             last_tree_status: String::new(),
             error_window_open: false,
             active_panel: ActivePanel::QueryEditor,
@@ -144,10 +151,14 @@ impl DesktopApp {
         }
 
         // Ctrl/Cmd+Enter: Execute current SQL
-        if matches_shortcut(&input, &AppShortcut::ExecuteCurrent.with_platform_modifier()) {
+        if matches_shortcut(
+            &input,
+            &AppShortcut::ExecuteCurrent.with_platform_modifier(),
+        ) {
             if !self.query_editor.is_executing() {
                 self.query_editor.execute_current_statement();
-                self.state.set_status("Executing current statement (Ctrl+Enter)");
+                self.state
+                    .set_status("Executing current statement (Ctrl+Enter)");
             }
         }
 
@@ -159,7 +170,8 @@ impl DesktopApp {
         if input.modifiers.shift && matches_shortcut(&input, &shift_enter) {
             if !self.query_editor.is_executing() {
                 self.query_editor.execute_selection();
-                self.state.set_status("Executing selection (Ctrl+Shift+Enter)");
+                self.state
+                    .set_status("Executing selection (Ctrl+Shift+Enter)");
             }
         }
 
@@ -179,7 +191,10 @@ impl DesktopApp {
         }
 
         // Ctrl/Cmd+L: Focus object search
-        if matches_shortcut(&input, &AppShortcut::FocusObjectSearch.with_platform_modifier()) {
+        if matches_shortcut(
+            &input,
+            &AppShortcut::FocusObjectSearch.with_platform_modifier(),
+        ) {
             self.state.set_search_focused(true);
             self.state.set_status("Focus object search (Ctrl+L)");
         }
@@ -201,7 +216,8 @@ impl DesktopApp {
                 AppTheme::Light => "Light",
                 AppTheme::Dark => "Dark",
             };
-            self.state.set_status(format!("Theme: {} (Ctrl+T)", theme_name));
+            self.state
+                .set_status(format!("Theme: {} (Ctrl+T)", theme_name));
         }
 
         // Ctrl/Cmd+Shift+F: Format SQL
@@ -272,10 +288,7 @@ impl DesktopApp {
             match self.active_panel {
                 ActivePanel::QueryEditor => {
                     let query_status = self.query_editor.ui(ctx, ui);
-                    ui.separator();
-                    self.sync_result_grid();
-                    let grid_status = self.result_grid.ui(ui);
-                    if let Some(message) = query_status.or(grid_status) {
+                    if let Some(message) = query_status {
                         if !message.is_empty() {
                             self.state.set_status(message);
                         }
@@ -343,15 +356,6 @@ impl DesktopApp {
         });
     }
 
-    fn sync_result_grid(&mut self) {
-        let latest = self.query_editor.latest_result().cloned();
-        if let Some(new_result) = latest {
-            if self.result_grid.result() != &new_result {
-                self.result_grid.set_result(new_result);
-            }
-        }
-    }
-
     fn top_toolbar(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -375,17 +379,20 @@ impl DesktopApp {
                     AppTheme::Light => "🌙",
                     AppTheme::Dark => "☀️",
                 };
-                if ui.button(theme_icon).on_hover_text("Toggle Theme (Ctrl+T)").clicked() {
+                if ui
+                    .button(theme_icon)
+                    .on_hover_text("Toggle Theme (Ctrl+T)")
+                    .clicked()
+                {
                     self.state.toggle_theme();
                 }
 
                 // Show error button for demo
                 if ui.button("Show Error").clicked() {
-                    self.state.push_error(UiError::new(
-                        "Connection Error",
-                        "Failed to connect to database server.",
-                    ).with_detail(
-                        "Error details:\n\
+                    self.state.push_error(
+                        UiError::new("Connection Error", "Failed to connect to database server.")
+                            .with_detail(
+                                "Error details:\n\
                          - Host: localhost:3306\n\
                          - Error code: 1045\n\
                          - Access denied for user 'root'@'localhost'\n\
@@ -394,8 +401,9 @@ impl DesktopApp {
                          Stack trace:\n\
                          at Connection.connect() line 45\n\
                          at SessionManager.connect() line 78\n\
-                         at DesktopApp.handle_connect() line 123"
-                    ));
+                         at DesktopApp.handle_connect() line 123",
+                            ),
+                    );
                     self.error_window_open = true;
                 }
 
@@ -457,11 +465,9 @@ impl DesktopApp {
                     schema,
                 } => {
                     self.query_editor
-                        .new_query_with_connection(connection_id);
-                    self.state.set_status(format!(
-                        "New query on {} (db={:?}, schema={:?})",
-                        connection_id, database, schema
-                    ));
+                        .new_query_with_connection(connection_id, database, schema);
+                    self.state
+                        .set_status(format!("New query on {}", connection_id));
                 }
                 ObjectTreeAction::ViewKey {
                     connection_id,
@@ -513,18 +519,14 @@ impl DesktopApp {
                     let table_name = wizard.table_name();
                     self.import_wizard = Some(wizard);
                     self.active_panel = ActivePanel::ImportWizard;
-                    self.state.set_status(format!(
-                        "Import CSV to {}",
-                        table_name
-                    ));
+                    self.state
+                        .set_status(format!("Import CSV to {}", table_name));
                 }
                 ObjectTreeAction::EditConnection(id) => {
-                    self.state
-                        .set_status(format!("Edit connection: {}", id));
+                    self.state.set_status(format!("Edit connection: {}", id));
                 }
                 ObjectTreeAction::DeleteConnection(id) => {
-                    self.state
-                        .set_status(format!("Delete connection: {}", id));
+                    self.state.set_status(format!("Delete connection: {}", id));
                 }
             }
         }
@@ -561,7 +563,8 @@ impl DesktopApp {
                             ));
                         }
                         Err(e) => {
-                            self.state.set_status(format!("Failed to load table: {}", e.message));
+                            self.state
+                                .set_status(format!("Failed to load table: {}", e.message));
                         }
                     }
                 }
@@ -594,10 +597,12 @@ impl DesktopApp {
                             );
                             let table_name = view.table_name();
                             self.table_structure = Some(view);
-                            self.state.set_status(format!("Loaded structure for {}", table_name));
+                            self.state
+                                .set_status(format!("Loaded structure for {}", table_name));
                         }
                         Err(e) => {
-                            self.state.set_status(format!("Failed to load structure: {}", e.message));
+                            self.state
+                                .set_status(format!("Failed to load structure: {}", e.message));
                         }
                     }
                 }
@@ -632,13 +637,14 @@ impl DesktopApp {
 
         runtime.spawn(async move {
             // Resolve the connection profile to determine the dialect.
-            let dialect: Box<dyn Dialect> = match connection_manager.get_profile(connection_id).await {
-                Ok(Some(profile)) => match profile.kind {
-                    DataSourceKind::MySql => Box::new(BacktickDialect),
+            let dialect: Box<dyn Dialect> =
+                match connection_manager.get_profile(connection_id).await {
+                    Ok(Some(profile)) => match profile.kind {
+                        DataSourceKind::MySql => Box::new(BacktickDialect),
+                        _ => Box::new(DoubleQuoteDialect),
+                    },
                     _ => Box::new(DoubleQuoteDialect),
-                },
-                _ => Box::new(DoubleQuoteDialect),
-            };
+                };
 
             // Build a safe SELECT with LIMIT.
             let qualified = match &sch {
@@ -646,7 +652,8 @@ impl DesktopApp {
                     format!(
                         "{}.{}",
                         dialect.quote_identifier(&db_common::Identifier::new(s.as_str()).unwrap()),
-                        dialect.quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
+                        dialect
+                            .quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
                     )
                 }
                 _ => dialect.quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
@@ -676,15 +683,19 @@ impl DesktopApp {
 
             let result = match (columns_result, query_result) {
                 (Ok(columns), Ok(report)) => {
-                    let data = report.results.into_iter().next().unwrap_or_else(|| QueryResult {
-                        statement: String::new(),
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        affected_rows: 0,
-                        execution_time_ms: 0,
-                        notices: Vec::new(),
-                        metadata: Default::default(),
-                    });
+                    let data = report
+                        .results
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| QueryResult {
+                            statement: String::new(),
+                            columns: Vec::new(),
+                            rows: Vec::new(),
+                            affected_rows: 0,
+                            execution_time_ms: 0,
+                            notices: Vec::new(),
+                            metadata: Default::default(),
+                        });
                     Ok(TableDataPayload {
                         connection_id,
                         database: db,
@@ -750,20 +761,25 @@ impl DesktopApp {
                 functions_result,
                 sql_result,
             ) {
-                (Ok(columns), Ok(indexes), Ok(foreign_keys), Ok(triggers), Ok(functions), Ok(create_sql)) => {
-                    Ok(TableStructurePayload {
-                        connection_id,
-                        database: db,
-                        schema: sch,
-                        table: tbl,
-                        columns,
-                        indexes,
-                        foreign_keys,
-                        triggers,
-                        functions,
-                        create_sql,
-                    })
-                }
+                (
+                    Ok(columns),
+                    Ok(indexes),
+                    Ok(foreign_keys),
+                    Ok(triggers),
+                    Ok(functions),
+                    Ok(create_sql),
+                ) => Ok(TableStructurePayload {
+                    connection_id,
+                    database: db,
+                    schema: sch,
+                    table: tbl,
+                    columns,
+                    indexes,
+                    foreign_keys,
+                    triggers,
+                    functions,
+                    create_sql,
+                }),
                 (Err(e), ..) => Err(e),
                 (_, Err(e), ..) => Err(e),
                 (_, _, Err(e), ..) => Err(e),
@@ -838,7 +854,11 @@ impl DesktopApp {
                                 ui.add_space(8.0);
 
                                 // Toggle button for detail
-                                let toggle_text = if error.expanded { "▼ Hide Details" } else { "▶ Show Details" };
+                                let toggle_text = if error.expanded {
+                                    "▼ Hide Details"
+                                } else {
+                                    "▶ Show Details"
+                                };
                                 if ui.button(toggle_text).clicked() {
                                     error.expanded = !error.expanded;
                                 }
@@ -846,9 +866,9 @@ impl DesktopApp {
                                 // Show detail content if expanded
                                 if error.expanded {
                                     ui.add_space(4.0);
-                                    Frame::default()
-                                        .fill(Color32::from_rgb(40, 40, 40))
-                                        .show(ui, |ui| {
+                                    Frame::default().fill(Color32::from_rgb(40, 40, 40)).show(
+                                        ui,
+                                        |ui| {
                                             ScrollArea::horizontal().show(ui, |ui| {
                                                 ui.label(
                                                     RichText::new(detail)
@@ -857,7 +877,8 @@ impl DesktopApp {
                                                         .color(Color32::GRAY),
                                                 );
                                             });
-                                        });
+                                        },
+                                    );
                                 }
                             }
                         });
@@ -867,13 +888,19 @@ impl DesktopApp {
 
                     // Action buttons
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(!self.state.errors.is_empty(), Button::new("Clear All")).clicked() {
+                        if ui
+                            .add_enabled(!self.state.errors.is_empty(), Button::new("Clear All"))
+                            .clicked()
+                        {
                             self.state.errors.clear();
                             self.error_window_open = false;
                         }
 
                         if ui.button("Copy All").clicked() {
-                            let error_text: String = self.state.errors.iter()
+                            let error_text: String = self
+                                .state
+                                .errors
+                                .iter()
                                 .map(|e| {
                                     let detail = e.detail.as_deref().unwrap_or("");
                                     format!("{}: {}\n{}", e.title, e.message, detail)
@@ -907,7 +934,7 @@ impl DesktopApp {
             (format!("{}R", modifier), "Refresh"),
             (format!("{}F", modifier), "Search"),
             (format!("{}L", modifier), "Focus"),
-            ("Esc", "Close"),
+            ("Esc".to_string(), "Close"),
             (format!("{}T", modifier), "Theme"),
         ];
 

@@ -298,7 +298,9 @@ impl RedisConnector for RedisConnectorImpl {
         ttl_seconds: Option<u64>,
     ) -> Result<()> {
         let _ = (database, key, value, ttl_seconds);
-        Err(AppError::internal("set_value not implemented in metadata reader"))
+        Err(AppError::internal(
+            "set_value not implemented in metadata reader",
+        ))
     }
 
     async fn delete_key(&self, database: u8, key: &str) -> Result<()> {
@@ -340,12 +342,11 @@ impl RedisConnectorWithAuth {
         key: &str,
     ) -> Result<RedisValue> {
         select_database(conn, database).await?;
-        let type_name: String =
-            redis::cmd("TYPE")
-                .arg(key)
-                .query_async(conn)
-                .await
-                .map_err(redis_query_error)?;
+        let type_name: String = redis::cmd("TYPE")
+            .arg(key)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
 
         match type_name.as_str() {
             "string" => {
@@ -494,49 +495,38 @@ impl RedisConnectorWithAuth {
         key: &str,
     ) -> Result<u64> {
         select_database(conn, database).await?;
-        let type_name: String =
-            redis::cmd("TYPE")
+        let type_name: String = redis::cmd("TYPE")
+            .arg(key)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+
+        let size: u64 = match type_name.as_str() {
+            "string" => redis::cmd("STRLEN")
                 .arg(key)
                 .query_async(conn)
                 .await
-                .map_err(redis_query_error)?;
-
-        let size: u64 = match type_name.as_str() {
-            "string" => {
-                redis::cmd("STRLEN")
-                    .arg(key)
-                    .query_async(conn)
-                    .await
-                    .map_err(redis_query_error)?
-            }
-            "list" => {
-                redis::cmd("LLEN")
-                    .arg(key)
-                    .query_async(conn)
-                    .await
-                    .map_err(redis_query_error)?
-            }
-            "set" => {
-                redis::cmd("SCARD")
-                    .arg(key)
-                    .query_async(conn)
-                    .await
-                    .map_err(redis_query_error)?
-            }
-            "zset" => {
-                redis::cmd("ZCARD")
-                    .arg(key)
-                    .query_async(conn)
-                    .await
-                    .map_err(redis_query_error)?
-            }
-            "hash" => {
-                redis::cmd("HLEN")
-                    .arg(key)
-                    .query_async(conn)
-                    .await
-                    .map_err(redis_query_error)?
-            }
+                .map_err(redis_query_error)?,
+            "list" => redis::cmd("LLEN")
+                .arg(key)
+                .query_async(conn)
+                .await
+                .map_err(redis_query_error)?,
+            "set" => redis::cmd("SCARD")
+                .arg(key)
+                .query_async(conn)
+                .await
+                .map_err(redis_query_error)?,
+            "zset" => redis::cmd("ZCARD")
+                .arg(key)
+                .query_async(conn)
+                .await
+                .map_err(redis_query_error)?,
+            "hash" => redis::cmd("HLEN")
+                .arg(key)
+                .query_async(conn)
+                .await
+                .map_err(redis_query_error)?,
             _ => 0,
         };
         Ok(size)
@@ -908,7 +898,11 @@ impl RedisConnectorWithAuth {
                     } else {
                         0.0
                     };
-                    let member = if parts.len() == 2 { parts[1] } else { initial_value };
+                    let member = if parts.len() == 2 {
+                        parts[1]
+                    } else {
+                        initial_value
+                    };
                     redis::cmd("ZADD")
                         .arg(key)
                         .arg(score)

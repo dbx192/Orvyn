@@ -1,4 +1,4 @@
-use crate::{AppError, ConnectionId, id::SessionId, TaskId};
+use crate::{id::SessionId, AppError, ConnectionId, TaskId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -15,7 +15,10 @@ pub enum TaskStatus {
 
 impl TaskStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Failed | Self::TimedOut)
+        matches!(
+            self,
+            Self::Completed | Self::Cancelled | Self::Failed | Self::TimedOut
+        )
     }
 
     pub fn is_running(self) -> bool {
@@ -104,7 +107,8 @@ pub struct TaskProgress {
 
 impl TaskProgress {
     pub fn percentage(&self) -> Option<f64> {
-        self.total.map(|total| (self.current as f64 / total as f64) * 100.0)
+        self.total
+            .map(|total| (self.current as f64 / total as f64) * 100.0)
     }
 }
 

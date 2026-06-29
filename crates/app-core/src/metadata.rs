@@ -126,6 +126,35 @@ impl MetadataService {
             .await
     }
 
+    pub async fn list_databases(
+        &self,
+        connection_id: ConnectionId,
+        runtime_password: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.relational_reader(profile.kind)?;
+        reader.list_databases(&profile, password.as_deref()).await
+    }
+
+    pub async fn list_schemas(
+        &self,
+        connection_id: ConnectionId,
+        database: Option<&str>,
+        runtime_password: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.relational_reader(profile.kind)?;
+        reader
+            .list_schemas(&profile, password.as_deref(), database)
+            .await
+    }
+
     pub async fn table_indexes(
         &self,
         connection_id: ConnectionId,
@@ -271,7 +300,12 @@ impl MetadataService {
             MetadataNodeKind::Schema => Ok(vec![
                 folder_node(profile.id, path, MetadataNodeKind::TablesFolder, "Tables"),
                 folder_node(profile.id, path, MetadataNodeKind::ViewsFolder, "Views"),
-                folder_node(profile.id, path, MetadataNodeKind::FunctionsFolder, "Functions"),
+                folder_node(
+                    profile.id,
+                    path,
+                    MetadataNodeKind::FunctionsFolder,
+                    "Functions",
+                ),
             ]),
             MetadataNodeKind::TablesFolder => {
                 let tables = reader
@@ -314,7 +348,12 @@ impl MetadataService {
                     MetadataNodeKind::ForeignKeysFolder,
                     "Foreign Keys",
                 ),
-                folder_node(profile.id, path, MetadataNodeKind::TriggersFolder, "Triggers"),
+                folder_node(
+                    profile.id,
+                    path,
+                    MetadataNodeKind::TriggersFolder,
+                    "Triggers",
+                ),
             ]),
             MetadataNodeKind::ColumnsFolder => {
                 let table = required_object(path)?;

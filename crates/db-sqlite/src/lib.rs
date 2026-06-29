@@ -535,7 +535,10 @@ fn sqlite_index_columns(conn: &rusqlite::Connection, index_name: &str) -> Result
 
 fn sqlite_foreign_keys(path: PathBuf, table: &str) -> Result<Vec<TableForeignKey>> {
     let conn = sqlite_connection(path)?;
-    let sql = format!("PRAGMA foreign_key_list({})", quote_sqlite_identifier(table));
+    let sql = format!(
+        "PRAGMA foreign_key_list({})",
+        quote_sqlite_identifier(table)
+    );
     let mut stmt = conn.prepare(&sql).map_err(sqlite_query_error)?;
     let rows = stmt
         .query_map([], |row| {
@@ -563,8 +566,16 @@ fn sqlite_foreign_keys(path: PathBuf, table: &str) -> Result<Vec<TableForeignKey
                 columns: vec![from],
                 referenced_table: ref_table,
                 referenced_columns: vec![to],
-                on_update: if on_update == "NO ACTION" { None } else { Some(on_update) },
-                on_delete: if on_delete == "NO ACTION" { None } else { Some(on_delete) },
+                on_update: if on_update == "NO ACTION" {
+                    None
+                } else {
+                    Some(on_update)
+                },
+                on_delete: if on_delete == "NO ACTION" {
+                    None
+                } else {
+                    Some(on_delete)
+                },
             });
         }
     }
