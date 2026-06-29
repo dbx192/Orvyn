@@ -1,6 +1,10 @@
 use db_common::{AppError, ErrorKind, Result};
 use std::sync::Arc;
-use tokio::{runtime::Handle, sync::Semaphore, task::JoinHandle};
+use tokio::{
+    runtime::Handle,
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinHandle,
+};
 
 #[derive(Clone)]
 pub struct BlockingPool {
@@ -18,10 +22,6 @@ impl BlockingPool {
         }
     }
 
-    pub fn default() -> Self {
-        Self::new(4, "blocking-worker")
-    }
-
     pub async fn spawn<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce() -> Result<R> + Send + 'static,
@@ -30,7 +30,7 @@ impl BlockingPool {
         let _permit = self.acquire_permit().await?;
         let runtime_handle = self.runtime_handle.clone();
 
-        let handle: JoinHandle<Result<R>> = runtime_handle.spawn_blocking(move || f());
+        let handle: JoinHandle<Result<R>> = runtime_handle.spawn_blocking(f);
 
         handle.await.map_err(|e| {
             if e.is_cancelled() {
@@ -50,7 +50,7 @@ impl BlockingPool {
         let _permit = self.acquire_permit().await?;
         let runtime_handle = self.runtime_handle.clone();
 
-        let handle: JoinHandle<Result<R>> = runtime_handle.spawn_blocking(move || f());
+        let handle: JoinHandle<Result<R>> = runtime_handle.spawn_blocking(f);
 
         let timeout = std::time::Duration::from_millis(timeout_ms);
         tokio::time::timeout(timeout, handle)
@@ -66,11 +66,11 @@ impl BlockingPool {
             })?
     }
 
-    async fn acquire_permit(&self) -> Result<()> {
+    async fn acquire_permit(&self) -> Result<OwnedSemaphorePermit> {
         self.semaphore
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
-            .map(|_| ())
             .map_err(|_| AppError::new(ErrorKind::Internal, "blocking pool semaphore closed"))
     }
 
@@ -83,6 +83,12 @@ impl BlockingPool {
     }
 }
 
+impl Default for BlockingPool {
+    fn default() -> Self {
+        Self::new(4, "blocking-worker")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,14 +98,14 @@ mod tests {
         let pool = BlockingPool::new(2, "test");
 
         let result = pool.spawn(|| Ok(42)).await;
-        assert_eq!(result, Ok(42));
+        assert_eq!(result.unwrap(), 42);
     }
 
     #[tokio::test]
     async fn handles_blocking_error() {
         let pool = BlockingPool::new(2, "test");
 
-        let result = pool.spawn(|| Err(AppError::validation("test error"))).await;
+        let result: Result<()> = pool.spawn(|| Err(AppError::validation("test error"))).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().message, "test error");
     }
@@ -109,9 +115,11 @@ mod tests {
         let pool = BlockingPool::new(1, "test");
 
         let start = std::time::Instant::now();
+        let pool_for_first = pool.clone();
+        let pool_for_second = pool.clone();
 
         let handle1 = tokio::spawn(async move {
-            pool.spawn(|| {
+            pool_for_first.spawn(|| {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 Ok(1)
             })
@@ -119,7 +127,7 @@ mod tests {
         });
 
         let handle2 = tokio::spawn(async move {
-            pool.spawn(|| {
+            pool_for_second.spawn(|| {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 Ok(2)
             })
@@ -127,8 +135,8 @@ mod tests {
         });
 
         let (r1, r2) = tokio::join!(handle1, handle2);
-        assert_eq!(r1.unwrap(), Ok(1));
-        assert_eq!(r2.unwrap(), Ok(2));
+        assert_eq!(r1.unwrap().unwrap(), 1);
+        assert_eq!(r2.unwrap().unwrap(), 2);
 
         let elapsed = start.elapsed();
         assert!(elapsed >= std::time::Duration::from_millis(200));

@@ -1,3 +1,11 @@
+#![allow(dead_code)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::single_match)]
+#![allow(clippy::option_as_ref_deref)]
+#![allow(clippy::op_ref)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::redundant_closure)]
+
 //! Redis key browser UI.
 //!
 //! Provides a complete Redis key browsing experience:
@@ -1586,7 +1594,7 @@ impl RedisBrowserUi {
 
         self.runtime.spawn(async move {
             match manager.profile_with_password(connection_id, None).await {
-                Ok((profile, _)) => match RedisConnectorWithAuth::new(&profile, None).await {
+                Ok((profile, _)) => match RedisConnectorWithAuth::connect(&profile, None).await {
                     Ok(mut conn) => {
                         match RedisConnectorWithAuth::get_key_value(&mut conn, database, &key_name)
                             .await
@@ -1650,7 +1658,7 @@ impl RedisBrowserUi {
         self.runtime.spawn(async move {
             match manager.profile_with_password(connection_id, None).await {
                 Ok((profile, _)) => {
-                    match RedisConnectorWithAuth::new(&profile, None).await {
+                    match RedisConnectorWithAuth::connect(&profile, None).await {
                         Ok(mut conn) => {
                             match RedisConnectorWithAuth::get_key_size(
                                 &mut conn, database, &key_name,
@@ -1683,7 +1691,7 @@ impl RedisBrowserUi {
 
         self.runtime.spawn(async move {
             match manager.profile_with_password(connection_id, None).await {
-                Ok((profile, _)) => match RedisConnectorWithAuth::new(&profile, None).await {
+                Ok((profile, _)) => match RedisConnectorWithAuth::connect(&profile, None).await {
                     Ok(mut conn) => {
                         match RedisConnectorWithAuth::delete_key(&mut conn, database, &key_name)
                             .await

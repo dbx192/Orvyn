@@ -11,7 +11,7 @@ use db_common::{
     AppError, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind,
     FavoriteQuery, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
     QueryHistoryEntry, QueryId, QueryTab, RelationalQueryExecutor, Result, SqlHighlightToken,
-    TaskId, TaskInfo, TaskKind, TextRange,
+    TextRange,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -28,7 +28,7 @@ pub struct QueryService {
     connections: ConnectionManager,
     executors: Arc<BTreeMap<DataSourceKind, Arc<dyn RelationalQueryExecutor>>>,
     pool_config: ConnectionPoolConfig,
-    task_manager: TaskManager,
+    _task_manager: TaskManager,
     history_store: Option<Arc<dyn QueryHistoryStore>>,
     favorite_store: Option<Arc<dyn FavoriteQueryStore>>,
     state: Arc<Mutex<QueryServiceState>>,
@@ -43,7 +43,7 @@ impl QueryService {
         history_store: Option<Arc<dyn QueryHistoryStore>>,
         favorite_store: Option<Arc<dyn FavoriteQueryStore>>,
     ) -> Self {
-        let mut service = Self {
+        let service = Self {
             connections,
             executors: Arc::new(
                 executors
@@ -52,7 +52,7 @@ impl QueryService {
                     .collect(),
             ),
             pool_config,
-            task_manager,
+            _task_manager: task_manager,
             history_store,
             favorite_store,
             state: Arc::new(Mutex::new(QueryServiceState::default())),

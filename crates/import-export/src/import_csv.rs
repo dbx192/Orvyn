@@ -135,7 +135,7 @@ pub fn auto_map_fields(csv_headers: &[String], table_columns: &[TableColumn]) ->
 /// Checks: non-nullable columns with empty values, numeric columns with non-numeric strings.
 pub fn validate_types(
     rows: &[Vec<String>],
-    headers: &[String],
+    _headers: &[String],
     table_columns: &[TableColumn],
     mapping: &FieldMapping,
 ) -> ValidationReport {
@@ -220,7 +220,7 @@ pub fn validate_types(
 /// Generate batch INSERT SQL statements for the given rows and field mapping.
 pub fn generate_insert_batches(
     rows: &[Vec<String>],
-    headers: &[String],
+    _headers: &[String],
     table_columns: &[TableColumn],
     mapping: &FieldMapping,
     qualified_table: &str,
@@ -262,7 +262,7 @@ pub fn generate_insert_batches(
                         // Use empty string as fallback for non-nullable columns
                         "''".to_string()
                     } else {
-                        sql_literal(raw)
+                        sql_literal_for_column(raw, col)
                     }
                 })
                 .collect();
@@ -288,15 +288,74 @@ fn sql_literal(value: &str) -> String {
     }
 }
 
+fn sql_literal_for_column(value: &str, column: &TableColumn) -> String {
+    let trimmed = value.trim();
+    let db_type = column.database_type.to_ascii_lowercase();
+
+    if trimmed.eq_ignore_ascii_case("NULL") {
+        return "NULL".to_string();
+    }
+
+    if is_integer_type(&db_type) && trimmed.parse::<i64>().is_ok() {
+        return trimmed.to_string();
+    }
+
+    if is_numeric_type(&db_type) && trimmed.parse::<f64>().is_ok() {
+        return trimmed.to_string();
+    }
+
+    if is_boolean_type(&db_type) {
+        match trimmed.to_ascii_lowercase().as_str() {
+            "true" | "false" => return trimmed.to_ascii_lowercase(),
+            "1" | "t" => return "TRUE".to_string(),
+            "0" | "f" => return "FALSE".to_string(),
+            _ => {}
+        }
+    }
+
+    sql_literal(value)
+}
+
+fn is_integer_type(db_type: &str) -> bool {
+    db_type.contains("bigint")
+        || db_type.contains("smallint")
+        || db_type.contains("tinyint")
+        || (db_type.contains("int") && !db_type.contains("point"))
+}
+
+fn is_numeric_type(db_type: &str) -> bool {
+    is_integer_type(db_type)
+        || db_type.contains("float")
+        || db_type.contains("double")
+        || db_type.contains("decimal")
+        || db_type.contains("numeric")
+        || db_type.contains("real")
+}
+
+fn is_boolean_type(db_type: &str) -> bool {
+    db_type.contains("bool")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use db_common::dialect::DoubleQuoteDialect;
-    use std::io::Write;
+    use std::{
+        io::Write,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn make_csv(content: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("test_import_{}.csv", uuid::Uuid::new_v4()));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = dir.join(format!(
+            "test_import_{}-{}.csv",
+            std::process::id(),
+            nanos
+        ));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path

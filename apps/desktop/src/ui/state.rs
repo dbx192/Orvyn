@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use db_common::{ConnectionId, DataSourceKind, QueryId, TaskId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

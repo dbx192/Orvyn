@@ -18,7 +18,7 @@ pub struct MetadataService {
     connections: ConnectionManager,
     relational_readers: Arc<BTreeMap<DataSourceKind, Arc<dyn RelationalMetadataReader>>>,
     redis_readers: Arc<BTreeMap<DataSourceKind, Arc<dyn RedisMetadataReader>>>,
-    task_manager: TaskManager,
+    _task_manager: TaskManager,
 }
 
 impl MetadataService {
@@ -42,7 +42,7 @@ impl MetadataService {
                     .map(|reader| (reader.kind(), reader))
                     .collect(),
             ),
-            task_manager,
+            _task_manager: task_manager,
         }
     }
 
@@ -745,7 +745,7 @@ mod tests {
             .await
             .expect("created");
 
-        let service = MetadataService::new(manager, Vec::new(), Vec::new());
+        let service = MetadataService::new(manager, Vec::new(), Vec::new(), TaskManager::default());
         let nodes = service.root_nodes().await.expect("nodes");
 
         assert_eq!(nodes.len(), 1);

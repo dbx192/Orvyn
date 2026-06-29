@@ -19,7 +19,7 @@ pub fn copy_to_clipboard(ui: &mut Ui, text: String) {
 /// Visual rules:
 /// - `NULL`  → dimmed italic "NULL" with a warning color.
 /// - `""`    → dimmed italic `""` to make empty-string clearly distinct from
-///            NULL and from regular text.
+///   NULL and from regular text.
 /// - `Bytes` → blue monospace-ish summary like `<binary 12 B base64 AABB...>`.
 /// - Date/Time/DateTime/Timestamp → time-aware coloring, but otherwise plain.
 /// - `Json`  → light gray to indicate structured payload.

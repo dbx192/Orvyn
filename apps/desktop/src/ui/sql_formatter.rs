@@ -242,7 +242,7 @@ pub fn format_sql(sql: &str) -> String {
                             }
                         }
 
-                        result.push_str(&rest);
+                        result.push_str(&word_upper);
                         indent_level += if should_indent_after.contains(&word_upper.as_str()) {
                             1
                         } else {

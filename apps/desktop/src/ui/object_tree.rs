@@ -1,3 +1,6 @@
+#![allow(clippy::if_same_then_else)]
+#![allow(clippy::collapsible_if)]
+
 use app_core::{metadata::MetadataService, session::SessionManager};
 use db_common::{
     AppError, ConnectionId, ConnectionStatus, MetadataNode, MetadataNodeKind, MetadataPath,

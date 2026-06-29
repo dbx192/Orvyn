@@ -205,7 +205,23 @@ fn escape_delimited(value: &str, delimiter: char) -> String {
 mod tests {
     use super::*;
     use db_common::{Column, LogicalType, Row};
-    use tempfile::NamedTempFile;
+    use std::{
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_test_file_path(extension: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "rust-db-client-export-{}-{}.{}",
+            std::process::id(),
+            nanos,
+            extension
+        ))
+    }
 
     #[test]
     fn exports_csv_with_headers_and_null_marker() {
@@ -267,10 +283,11 @@ mod tests {
             metadata: Default::default(),
         };
 
-        let temp = NamedTempFile::new().unwrap();
-        export_query_result_to_file(&result, ExportFormat::Csv, temp.path()).unwrap();
+        let path = temp_test_file_path("csv");
+        export_query_result_to_file(&result, ExportFormat::Csv, &path).unwrap();
 
-        let content = std::fs::read_to_string(temp.path()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
         assert_eq!(content, "id,name\n1,alice\n");
     }
 

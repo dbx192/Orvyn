@@ -1,8 +1,6 @@
 use crate::blocking_pool::BlockingPool;
 use chrono::{DateTime, Utc};
-use db_common::{
-    AppError, ConnectionId, ErrorKind, Result, SessionId, TaskId, TaskInfo, TaskKind, TaskStatus,
-};
+use db_common::{AppError, ConnectionId, ErrorKind, Result, SessionId, TaskId, TaskInfo, TaskKind};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::{sync::RwLock, task::AbortHandle, time::Duration};
 use tracing::{info, instrument};
@@ -23,10 +21,6 @@ impl TaskManager {
         }
     }
 
-    pub fn default() -> Self {
-        Self::new(BlockingPool::default())
-    }
-
     #[instrument(skip(self, future), fields(task_id = %task.id, task_kind = ?task.kind))]
     pub async fn spawn<T, F>(&self, task: TaskInfo, future: F) -> Result<TaskId>
     where
@@ -34,8 +28,6 @@ impl TaskManager {
         T: Send + 'static,
     {
         let task_id = task.id;
-        let connection_id = task.connection_id;
-
         self.update_task(task_id, |t| {
             t.mark_running();
         })
@@ -258,10 +250,16 @@ impl TaskManager {
     }
 }
 
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new(BlockingPool::default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use db_common::ConnectionId;
+    use db_common::{ConnectionId, TaskStatus};
 
     #[tokio::test]
     async fn spawns_and_tracks_task() {

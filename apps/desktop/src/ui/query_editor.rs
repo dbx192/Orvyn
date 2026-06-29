@@ -1193,7 +1193,7 @@ impl QueryEditor {
         };
 
         let Some(path) = rfd::FileDialog::new()
-            .set_title(&format!("Export {label}"))
+            .set_title(format!("Export {label}"))
             .add_filter(label, &[ext])
             .save_file()
         else {
@@ -1493,6 +1493,6 @@ fn upsert_favorite(favorites: &mut Vec<FavoriteQuery>, favorite: FavoriteQuery) 
         *existing = favorite;
     } else {
         favorites.push(favorite);
-        favorites.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        favorites.sort_by_key(|favorite| std::cmp::Reverse(favorite.updated_at));
     }
 }

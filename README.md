@@ -111,6 +111,20 @@ RUST_DB_CLIENT_CONFIG_DIR=.rust-db-client
 RUST_DB_CLIENT_MASTER_KEY=change-this-master-key
 ```
 
+## DuckDB 本地库
+
+当前仓库默认使用已下载到仓库内的 DuckDB 本地库，不再在构建时联网下载。
+
+- 本地库目录：`target/duckdb-download/x86_64-unknown-linux-gnu/1.5.4`
+- 项目级 Cargo 配置：`.cargo/config.toml`
+
+如果你更换了 DuckDB 版本、目标平台或删除了该目录，需要同步更新 `.cargo/config.toml` 中的：
+
+- `DUCKDB_LIB_DIR`
+- `DUCKDB_INCLUDE_DIR`
+
+如果本地库不存在，`db-duckdb`、`app-core` 和 `desktop` 的相关构建会失败；当前默认策略是不再回退到自动下载。
+
 ## 常用命令
 
 ```bash
@@ -119,6 +133,11 @@ cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+当前已验证的本地基线：
+
+- `cargo check --workspace`
+- `cargo test --workspace`
 
 ## 目录
 

@@ -3,6 +3,7 @@
 pub use redis;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use db_common::{
     redact_connection_url, AppError, CellValue, ConnectionProfile, ConnectionTestReport,
     ConnectionTester, DataSourceKind, ErrorKind, RedisConnector, RedisDatabase, RedisKeyInfo,
@@ -82,10 +83,7 @@ impl RedisMetadataReader for RedisMetadataReaderImpl {
             .get_multiplexed_async_connection()
             .await
             .map_err(redis_connection_error)?;
-        let count = match redis_database_count(&mut conn).await {
-            Ok(count) => count,
-            Err(_) => 16,
-        };
+        let count = redis_database_count(&mut conn).await.unwrap_or(16);
         let mut databases = Vec::new();
 
         for index in 0..count {
@@ -274,17 +272,17 @@ impl RedisConnector for RedisConnectorImpl {
 
     async fn scan_keys(
         &self,
-        database: u8,
-        pattern: Option<&str>,
-        cursor: u64,
-        limit: u32,
+        _database: u8,
+        _pattern: Option<&str>,
+        _cursor: u64,
+        _limit: u32,
     ) -> Result<(u64, Vec<RedisKeyInfo>)> {
         Err(AppError::internal(
             "RedisConnector::scan_keys requires profile and password",
         ))
     }
 
-    async fn get_value(&self, database: u8, key: &str) -> Result<RedisValue> {
+    async fn get_value(&self, _database: u8, _key: &str) -> Result<RedisValue> {
         Err(AppError::internal(
             "RedisConnector::get_value requires profile and password",
         ))
@@ -324,7 +322,7 @@ impl RedisConnector for RedisConnectorImpl {
 pub struct RedisConnectorWithAuth;
 
 impl RedisConnectorWithAuth {
-    pub async fn new(
+    pub async fn connect(
         profile: &ConnectionProfile,
         password: Option<&str>,
     ) -> Result<redis::aio::MultiplexedConnection> {
@@ -1007,7 +1005,6 @@ fn redis_value_from_raw(value: redis::Value) -> Result<RedisValue> {
                 .map(redis_cell_from_raw)
                 .collect::<Result<Vec<_>>>()?,
         )),
-        other => Ok(RedisValue::String(format!("{other:?}").into_bytes())),
     }
 }
 
@@ -1027,7 +1024,6 @@ fn redis_cell_from_raw(value: redis::Value) -> Result<CellValue> {
                 .map(redis_json_from_raw)
                 .collect::<Result<Vec<_>>>()?,
         ))),
-        other => Ok(CellValue::Text(format!("{other:?}"))),
     }
 }
 
@@ -1039,7 +1035,7 @@ fn redis_json_from_raw(value: redis::Value) -> Result<serde_json::Value> {
         CellValue::UInt(value) => Ok(serde_json::json!(value)),
         CellValue::Float(value) => Ok(serde_json::json!(value)),
         CellValue::Decimal(value) | CellValue::Text(value) => Ok(serde_json::Value::String(value)),
-        CellValue::Bytes(bytes) => Ok(serde_json::Value::String(base64::encode(bytes))),
+        CellValue::Bytes(bytes) => Ok(serde_json::Value::String(BASE64.encode(bytes))),
         CellValue::Date(value) => Ok(serde_json::Value::String(value.to_string())),
         CellValue::Time(value) => Ok(serde_json::Value::String(value.to_string())),
         CellValue::DateTime(value) => Ok(serde_json::Value::String(value.to_string())),

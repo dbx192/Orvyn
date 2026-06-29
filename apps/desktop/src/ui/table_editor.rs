@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::too_many_arguments)]
+
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
 use app_core::{metadata::MetadataService, query::QueryService};
 use db_common::{

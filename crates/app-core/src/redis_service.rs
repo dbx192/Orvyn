@@ -40,7 +40,8 @@ impl RedisService {
                 .connections
                 .profile_with_password(connection_id, None)
                 .await?;
-            let conn = db_redis::RedisConnectorWithAuth::new(&profile, password.as_deref()).await?;
+            let conn =
+                db_redis::RedisConnectorWithAuth::connect(&profile, password.as_deref()).await?;
             cache.insert(connection_id, conn.clone());
             Ok(conn)
         }

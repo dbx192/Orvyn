@@ -47,6 +47,12 @@ apps/desktop/src/
 
 UI 模块只持有界面状态和用户操作状态，真实连接、查询、元数据和导出能力必须通过 `app-core`、`db-common` 和各数据库适配 crate 暴露的接口进入。
 
+### 2.4 本地构建约束
+
+- DuckDB 通过仓库内缓存的本地动态库链接，当前路径固定为 `target/duckdb-download/x86_64-unknown-linux-gnu/1.5.4`。
+- 项目通过 `.cargo/config.toml` 设置 `DUCKDB_LIB_DIR` 和 `DUCKDB_INCLUDE_DIR`，默认不再联网下载 DuckDB 运行库。
+- 如果升级 DuckDB crate 版本、切换目标平台、或清理掉 `target/duckdb-download`，必须同步更新 Cargo 配置和 README。
+
 ## 3. 功能范围
 
 ### 3.1 第一优先级：必须实现

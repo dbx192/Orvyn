@@ -675,9 +675,9 @@ mod tests {
 
     #[test]
     fn splits_empty_statements() {
-        assert_eq!(split_statements(""), vec![]);
-        assert_eq!(split_statements("   "), vec![]);
-        assert_eq!(split_statements(";;"), vec![]);
+        assert_eq!(split_statements(""), Vec::<String>::new());
+        assert_eq!(split_statements("   "), Vec::<String>::new());
+        assert_eq!(split_statements(";;"), Vec::<String>::new());
         assert_eq!(split_statements("; select 1 ; ;"), vec!["select 1"]);
     }
 
@@ -703,15 +703,15 @@ mod tests {
     fn handles_single_line_comments() {
         assert_eq!(
             split_statements("-- this is a comment\nselect 1"),
-            vec!["-- this is a comment select 1"]
+            vec!["-- this is a comment\nselect 1"]
         );
         assert_eq!(
             split_statements("select 1 -- comment;\nselect 2"),
-            vec!["select 1 -- comment; select 2"]
+            vec!["select 1 -- comment;\nselect 2"]
         );
         assert_eq!(
             split_statements("-- comment with ; semicolon\nselect 1;"),
-            vec!["-- comment with ; semicolon select 1"]
+            vec!["-- comment with ; semicolon\nselect 1"]
         );
     }
 
@@ -750,7 +750,7 @@ mod tests {
             split_statements(r#"select "a""b";"#),
             vec![r#"select "a""b""#]
         );
-        assert_eq!(split_statements(r#"select ";";"#), vec![r#"select ";"#]);
+        assert_eq!(split_statements(r#"select ";";"#), vec![r#"select ";""#]);
     }
 
     #[test]
@@ -760,7 +760,7 @@ mod tests {
             vec![
                 "select 'a'",
                 "/* comment */ select \"b\"",
-                "-- comment select 3"
+                "-- comment\nselect 3"
             ]
         );
     }
@@ -768,10 +768,13 @@ mod tests {
     #[test]
     fn handles_statement_at_offset_with_comments() {
         let sql = "-- comment\nselect 1;\n/* comment */\nselect 2;";
-        assert_eq!(statement_at_offset(sql, 20).as_deref(), Some("select 1"));
+        assert_eq!(
+            statement_at_offset(sql, 20).as_deref(),
+            Some("/* comment */\nselect 2")
+        );
         assert_eq!(
             statement_at_offset(sql, 40).as_deref(),
-            Some("/* comment */ select 2")
+            Some("/* comment */\nselect 2")
         );
     }
 

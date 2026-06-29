@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::ui::format::{
     cell_rich_text, compare_cell_values, copy_cell_value, copy_to_clipboard, display_cell_value,
     hover_cell_value,
@@ -621,7 +623,7 @@ impl ResultSetGrid {
             let format_label = format_name.to_string();
             let file_ext = ext.to_string();
             let path = rfd::FileDialog::new()
-                .set_title(&format!("Save as {}", format_label))
+                .set_title(format!("Save as {}", format_label))
                 .add_filter(&format_label, &[file_ext.as_str()])
                 .save_file();
 

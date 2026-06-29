@@ -2717,7 +2717,6 @@ dependencies = [
  "db-common",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]

@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use crate::ui::{
     connection_manager::ConnectionManagerUi,
     import_wizard::ImportWizard,
@@ -175,12 +177,11 @@ impl DesktopApp {
         if matches_shortcut(
             &input,
             &AppShortcut::ExecuteCurrent.with_platform_modifier(),
-        ) {
-            if !self.query_editor.is_executing() {
-                self.query_editor.execute_current_statement();
-                self.state
-                    .set_status("Executing current statement (Ctrl+Enter)");
-            }
+        ) && !self.query_editor.is_executing()
+        {
+            self.query_editor.execute_current_statement();
+            self.state
+                .set_status("Executing current statement (Ctrl+Enter)");
         }
 
         // Ctrl/Cmd+Shift+Enter: Execute selected SQL
@@ -188,12 +189,13 @@ impl DesktopApp {
             modifiers: platform_modifiers(),
             key: Key::Enter,
         };
-        if input.modifiers.shift && matches_shortcut(&input, &shift_enter) {
-            if !self.query_editor.is_executing() {
-                self.query_editor.execute_selection();
-                self.state
-                    .set_status("Executing selection (Ctrl+Shift+Enter)");
-            }
+        if input.modifiers.shift
+            && matches_shortcut(&input, &shift_enter)
+            && !self.query_editor.is_executing()
+        {
+            self.query_editor.execute_selection();
+            self.state
+                .set_status("Executing selection (Ctrl+Shift+Enter)");
         }
 
         // Ctrl/Cmd+S: Save/Submit
@@ -246,10 +248,11 @@ impl DesktopApp {
             modifiers: platform_modifiers(),
             key: Key::F,
         };
-        if input.modifiers.shift && matches_shortcut(&input, &shift_f) {
-            if let Some(_) = self.query_editor.format_current_sql() {
-                self.state.set_status("SQL formatted (Ctrl+Shift+F)");
-            }
+        if input.modifiers.shift
+            && matches_shortcut(&input, &shift_f)
+            && self.query_editor.format_current_sql().is_some()
+        {
+            self.state.set_status("SQL formatted (Ctrl+Shift+F)");
         }
     }
 }
@@ -942,7 +945,7 @@ impl DesktopApp {
                         };
                         let path = rfd::FileDialog::new()
                             .set_title("Export Table Data")
-                            .set_file_name(&format!("{}.{}", table_file_name, ext))
+                            .set_file_name(format!("{}.{}", table_file_name, ext))
                             .add_filter(
                                 match format {
                                     ExportFormat::Csv => "CSV",

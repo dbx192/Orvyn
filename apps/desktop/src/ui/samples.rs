@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use db_common::{CellValue, Column, LogicalType, QueryResult, Row, TableColumn};
 
 pub fn sample_result_set() -> QueryResult {
@@ -13,7 +15,7 @@ pub fn sample_result_set() -> QueryResult {
                 CellValue::Bool(index % 2 == 0),
                 CellValue::Bytes(vec![0x52, 0x53, 0x54, index as u8, 0, 255]),
                 CellValue::Timestamp(
-                    chrono::DateTime::from_timestamp(1_718_000_000 + i64::from(index) * 3600, 0)
+                    chrono::DateTime::from_timestamp(1_718_000_000 + index * 3600, 0)
                         .unwrap_or_else(db_common::now_utc),
                 ),
             ])

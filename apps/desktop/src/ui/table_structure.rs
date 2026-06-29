@@ -1,7 +1,10 @@
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+
 use db_common::{
     ConnectionId, DatabaseFunction, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
-use eframe::egui::{Button, CollapsingHeader, Color32, Grid, RichText, ScrollArea, TextStyle, Ui};
+use eframe::egui::{CollapsingHeader, Color32, Grid, RichText, ScrollArea, TextStyle, Ui};
 
 /// A dedicated tab that displays the full structure of a database table:
 /// columns, indexes, foreign keys, triggers, functions, and DDL.

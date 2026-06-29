@@ -220,6 +220,11 @@ mod tests {
             .username("postgres")
             .build()
             .expect("profile");
+        manager
+            .connections
+            .create_profile(profile.clone(), PasswordUpdate::Keep)
+            .await
+            .expect("created profile");
 
         let session = manager.connect(profile.id, None).await;
         assert!(session.is_err());
@@ -236,6 +241,11 @@ mod tests {
             .username("postgres")
             .build()
             .expect("profile");
+        manager
+            .connections
+            .create_profile(profile.clone(), PasswordUpdate::Keep)
+            .await
+            .expect("created profile");
 
         assert_eq!(
             manager.status_for(profile.id).await,
@@ -253,11 +263,11 @@ mod tests {
         let connection_manager = ConnectionManager::new(
             Arc::new(MemoryConnectionProfileStore::default()),
             Arc::new(MemorySecureStore::default()),
-            vec![Arc::new(db_postgres::PostgreSqlConnectionTester)],
+            vec![Arc::new(db_postgres::PostgresConnectionTester)],
         );
         SessionManager::new(
             connection_manager,
-            vec![Arc::new(db_postgres::PostgreSqlConnectionTester)],
+            vec![Arc::new(db_postgres::PostgresConnectionTester)],
         )
     }
 

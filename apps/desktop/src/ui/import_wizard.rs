@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 //! CSV import wizard: step-by-step guide to import CSV data into a database table.
 
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};

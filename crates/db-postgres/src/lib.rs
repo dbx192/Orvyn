@@ -811,7 +811,7 @@ async fn pg_get_create_table(client: &Client, schema: &str, table: &str) -> Resu
 
     for row in idx_rows {
         let indexdef: String = row.get(1);
-        ddl.push_str("\n");
+        ddl.push('\n');
         ddl.push_str(&indexdef);
         ddl.push(';');
     }

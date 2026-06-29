@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use eframe::egui::{InputState, Key, Modifiers};
 
 /// Represents a keyboard shortcut with optional modifiers and a key.
@@ -44,10 +46,10 @@ impl Shortcut {
     }
 
     pub fn matches(&self, input: &InputState) -> bool {
-        if input.modifiers == self.modifiers || input.modifiers.matches_exact(self.modifiers) {
-            if input.key_pressed(self.key) {
-                return true;
-            }
+        if (input.modifiers == self.modifiers || input.modifiers.matches_exact(self.modifiers))
+            && input.key_pressed(self.key)
+        {
+            return true;
         }
         false
     }
