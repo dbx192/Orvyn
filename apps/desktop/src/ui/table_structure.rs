@@ -19,6 +19,7 @@ pub struct TableStructureView {
     functions: Vec<DatabaseFunction>,
     create_sql: String,
     active_tab: StructureTab,
+    details_loaded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +58,44 @@ impl TableStructureView {
             functions,
             create_sql,
             active_tab: StructureTab::Columns,
+            details_loaded: true,
         }
+    }
+
+    pub fn from_columns(
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        columns: Vec<TableColumn>,
+    ) -> Self {
+        Self {
+            connection_id,
+            database,
+            schema,
+            table,
+            columns,
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            functions: Vec::new(),
+            create_sql: String::new(),
+            active_tab: StructureTab::Columns,
+            details_loaded: false,
+        }
+    }
+
+    pub fn needs_detail_load(&self) -> bool {
+        !self.details_loaded
+    }
+
+    pub fn load_target(&self) -> (ConnectionId, Option<String>, Option<String>, String) {
+        (
+            self.connection_id,
+            self.database.clone(),
+            self.schema.clone(),
+            self.table.clone(),
+        )
     }
 
     /// Return the fully qualified table name.
@@ -92,8 +130,18 @@ impl TableStructureView {
                         .color(Color32::GRAY),
                 );
             }
+            if !self.details_loaded {
+                ui.label(
+                    RichText::new("details lazy-loaded")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+            }
             ui.separator();
-            if ui.button("Copy DDL").clicked() {
+            if ui
+                .add_enabled(self.details_loaded, eframe::egui::Button::new("Copy DDL"))
+                .clicked()
+            {
                 ui.output_mut(|o| o.copied_text = self.create_sql.clone());
                 message = Some("CREATE TABLE DDL copied to clipboard".to_string());
             }
@@ -106,7 +154,7 @@ impl TableStructureView {
         Frame::default()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-            .inner_margin(Margin::symmetric(8.0, 6.0))
+            .inner_margin(Margin::same(0.0))
             .show(ui, |ui| match self.active_tab {
                 StructureTab::Columns => self.columns_table(ui),
                 StructureTab::Indexes => self.indexes_table(ui),
@@ -163,7 +211,7 @@ impl TableStructureView {
                 Grid::new("structure_columns_grid")
                     .striped(true)
                     .num_columns(5)
-                    .spacing([24.0, 6.0])
+                    .spacing([14.0, 2.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Type", "Null", "Default", "Key"] {
                             ui.label(RichText::new(*label).strong());
@@ -196,7 +244,7 @@ impl TableStructureView {
                 Grid::new("structure_indexes_grid")
                     .striped(true)
                     .num_columns(4)
-                    .spacing([24.0, 6.0])
+                    .spacing([14.0, 2.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Columns", "Unique", "Primary"] {
                             ui.label(RichText::new(*label).strong());
@@ -227,7 +275,7 @@ impl TableStructureView {
                 Grid::new("structure_fks_grid")
                     .striped(true)
                     .num_columns(6)
-                    .spacing([24.0, 6.0])
+                    .spacing([14.0, 2.0])
                     .show(ui, |ui| {
                         for label in &[
                             "Name",
@@ -267,7 +315,7 @@ impl TableStructureView {
                 Grid::new("structure_triggers_grid")
                     .striped(true)
                     .num_columns(4)
-                    .spacing([24.0, 6.0])
+                    .spacing([14.0, 2.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Event", "Timing", "Statement"] {
                             ui.label(RichText::new(*label).strong());
@@ -304,7 +352,7 @@ impl TableStructureView {
                 Grid::new("structure_functions_grid")
                     .striped(true)
                     .num_columns(3)
-                    .spacing([24.0, 6.0])
+                    .spacing([14.0, 2.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Return Type", "Kind"] {
                             ui.label(RichText::new(*label).strong());

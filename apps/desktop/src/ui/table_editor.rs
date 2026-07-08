@@ -14,23 +14,23 @@ use db_common::{
     QueryExecutionRequest, QueryId, QueryResult, Result, Row, TableColumn,
 };
 use eframe::egui::{
-    vec2, Align, Button, Color32, DragValue, Frame, Layout, Margin, Rect, RichText, ScrollArea,
-    Sense, Stroke, TextEdit, Ui, Window,
+    vec2, Align, Button, Color32, DragValue, Frame, Key, Layout, Margin, Modifiers, Rect, RichText,
+    ScrollArea, Sense, Stroke, TextEdit, TextStyle, Ui, Window,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write,
     sync::{Arc, Mutex},
 };
 use tokio::runtime::Handle;
 
 const DEFAULT_PAGE_SIZE: usize = 100;
-const MIN_COLUMN_WIDTH: f32 = 72.0;
+const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
-const ROW_HEIGHT: f32 = 28.0;
-const HEADER_HEIGHT: f32 = 32.0;
-const ROW_HANDLE_WIDTH: f32 = 48.0;
+const ROW_HEIGHT: f32 = 24.0;
+const HEADER_HEIGHT: f32 = 26.0;
+const ROW_HANDLE_WIDTH: f32 = 38.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -128,6 +128,7 @@ pub struct TableEditor {
     new_rows: Vec<NewRow>,
     deleted_rows: BTreeMap<usize, Row>,
     selected_row: Option<RowKey>,
+    selected_rows: BTreeSet<RowKey>,
     allow_risk_without_pk: bool,
     query_service: Option<QueryService>,
     metadata_service: Option<MetadataService>,
@@ -170,6 +171,7 @@ impl TableEditor {
             new_rows: Vec::new(),
             deleted_rows: BTreeMap::new(),
             selected_row: None,
+            selected_rows: BTreeSet::new(),
             allow_risk_without_pk: false,
             query_service: None,
             metadata_service: None,
@@ -238,6 +240,7 @@ impl TableEditor {
 
         self.toolbar(ui, &mut message);
         ui.add_space(4.0);
+        self.handle_row_shortcuts(ui, &mut message);
 
         if !self.has_primary_key() && !self.allow_risk_without_pk {
             ui.colored_label(
@@ -248,6 +251,7 @@ impl TableEditor {
         }
 
         let grid_height = (ui.available_height() - 34.0).max(240.0);
+        let visible_rows = self.visible_rows();
         Frame::default()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(grid_stroke(ui))
@@ -262,22 +266,15 @@ impl TableEditor {
                             .id_source("table_editor_vertical")
                             .max_height(grid_height)
                             .auto_shrink([false, false])
-                            .show_rows(
-                                ui,
-                                ROW_HEIGHT,
-                                self.visible_rows().len(),
-                                |ui, row_range| {
-                                    let visible_rows = self.visible_rows();
-                                    for visible_index in row_range {
-                                        let Some(row_key) =
-                                            visible_rows.get(visible_index).copied()
-                                        else {
-                                            continue;
-                                        };
-                                        self.row(ui, row_key, visible_index);
-                                    }
-                                },
-                            );
+                            .show_rows(ui, ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
+                                for visible_index in row_range {
+                                    let Some(row_key) = visible_rows.get(visible_index).copied()
+                                    else {
+                                        continue;
+                                    };
+                                    self.row(ui, row_key, visible_index, &visible_rows);
+                                }
+                            });
                     });
             });
 
@@ -506,25 +503,26 @@ impl TableEditor {
                 .on_hover_text("Append row")
                 .clicked()
             {
-                let index = self.new_rows.len();
-                self.new_rows.push(NewRow {
-                    values: vec![String::new(); self.display_column_count()],
-                });
-                self.selected_row = Some(RowKey::New(index));
-                *message = Some("New row staged".to_string());
+                self.append_row(message);
             }
 
-            let selected = self.selected_row;
-            let can_remove = selected
-                .map(|row| self.can_remove_or_restore_row(row))
-                .unwrap_or(false)
-                && !self.is_committing();
+            let selected_rows = self.selected_rows.iter().copied().collect::<Vec<_>>();
+            let selected_count = selected_rows.len();
+            let can_remove = !self.is_committing()
+                && selected_rows
+                    .iter()
+                    .any(|row| self.can_remove_or_restore_row(*row));
+            let delete_label = if selected_count > 1 {
+                format!("- Rows ({selected_count})")
+            } else {
+                "- Row".to_string()
+            };
             if ui
-                .add_enabled(can_remove, Button::new("-"))
-                .on_hover_text("Delete selected row or remove staged row")
+                .add_enabled(can_remove, Button::new(delete_label))
+                .on_hover_text("Delete selected row(s), restore delete mark, or remove staged rows")
                 .clicked()
             {
-                self.remove_or_restore_selected_row(message);
+                self.remove_or_restore_rows(selected_rows, message);
             }
 
             ui.separator();
@@ -550,9 +548,13 @@ impl TableEditor {
             }
 
             ui.separator();
-            let selected_label = selected
-                .map(|row| self.row_label(row))
-                .unwrap_or_else(|| "No row selected".to_string());
+            let selected_label = if selected_count > 1 {
+                format!("{selected_count} rows selected")
+            } else {
+                self.selected_row
+                    .map(|row| self.row_label(row))
+                    .unwrap_or_else(|| "No row selected".to_string())
+            };
             ui.label(RichText::new(selected_label).small().color(Color32::GRAY));
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -568,6 +570,18 @@ impl TableEditor {
         });
     }
 
+    fn append_row(&mut self, message: &mut Option<String>) {
+        let index = self.new_rows.len();
+        let row = RowKey::New(index);
+        self.new_rows.push(NewRow {
+            values: vec![String::new(); self.display_column_count()],
+        });
+        self.selected_row = Some(row);
+        self.selected_rows.clear();
+        self.selected_rows.insert(row);
+        *message = Some("New row staged".to_string());
+    }
+
     fn can_remove_or_restore_row(&self, row: RowKey) -> bool {
         match row {
             RowKey::Existing(row_index) => {
@@ -577,29 +591,58 @@ impl TableEditor {
         }
     }
 
-    fn remove_or_restore_selected_row(&mut self, message: &mut Option<String>) {
-        let Some(row) = self.selected_row else {
+    fn remove_or_restore_rows(&mut self, rows: Vec<RowKey>, message: &mut Option<String>) {
+        if rows.is_empty() {
             return;
-        };
+        }
 
-        match row {
-            RowKey::Existing(row_index) => {
-                if self.deleted_rows.remove(&row_index).is_some() {
-                    *message = Some("Delete mark removed".to_string());
-                } else if self.can_edit_existing_rows() {
-                    if let Some(row) = self.result.rows.get(row_index).cloned() {
-                        self.deleted_rows.insert(row_index, row);
-                        *message = Some("Row marked for delete".to_string());
+        let mut marked = 0usize;
+        let mut restored = 0usize;
+        let mut new_rows_to_remove = Vec::new();
+
+        for row in rows {
+            match row {
+                RowKey::Existing(row_index) => {
+                    if self.deleted_rows.remove(&row_index).is_some() {
+                        restored += 1;
+                    } else if self.can_edit_existing_rows() {
+                        if let Some(row) = self.result.rows.get(row_index).cloned() {
+                            self.deleted_rows.insert(row_index, row);
+                            marked += 1;
+                        }
+                    }
+                }
+                RowKey::New(row_index) => {
+                    if row_index < self.new_rows.len() {
+                        new_rows_to_remove.push(row_index);
                     }
                 }
             }
-            RowKey::New(row_index) => {
-                if row_index < self.new_rows.len() {
-                    self.new_rows.remove(row_index);
-                    self.selected_row = None;
-                    *message = Some("Staged row removed".to_string());
-                }
-            }
+        }
+
+        new_rows_to_remove.sort_unstable();
+        new_rows_to_remove.dedup();
+        for row_index in new_rows_to_remove.iter().rev() {
+            self.new_rows.remove(*row_index);
+        }
+        if !new_rows_to_remove.is_empty() {
+            self.selected_row = None;
+            self.selected_rows.clear();
+        }
+
+        let removed = new_rows_to_remove.len();
+        let mut parts = Vec::new();
+        if marked > 0 {
+            parts.push(format!("{marked} marked for delete"));
+        }
+        if restored > 0 {
+            parts.push(format!("{restored} delete mark removed"));
+        }
+        if removed > 0 {
+            parts.push(format!("{removed} staged row removed"));
+        }
+        if !parts.is_empty() {
+            *message = Some(parts.join(", "));
         }
     }
 
@@ -670,6 +713,73 @@ impl TableEditor {
             }
             RowKey::New(index) => format!("*{}", index + 1),
         }
+    }
+
+    fn handle_row_shortcuts(&mut self, ui: &Ui, message: &mut Option<String>) {
+        let has_text_focus = ui.memory(|memory| memory.focused().is_some());
+        if has_text_focus || self.is_committing() {
+            return;
+        }
+
+        let input = ui.input(|input| {
+            (
+                input.key_pressed(Key::Insert),
+                input.key_pressed(Key::Delete),
+                input.key_pressed(Key::A),
+                input.modifiers,
+            )
+        });
+        let (insert_pressed, delete_pressed, a_pressed, modifiers) = input;
+
+        if insert_pressed {
+            self.append_row(message);
+        }
+        if delete_pressed {
+            let rows = self.selected_rows.iter().copied().collect::<Vec<_>>();
+            self.remove_or_restore_rows(rows, message);
+        }
+        if a_pressed && command_modifier(modifiers) {
+            self.selected_rows = self.visible_rows().into_iter().collect();
+            self.selected_row = self.selected_rows.iter().next_back().copied();
+            *message = Some(format!("{} rows selected", self.selected_rows.len()));
+        }
+    }
+
+    fn select_row(&mut self, row_key: RowKey, visible_rows: &[RowKey], modifiers: Modifiers) {
+        if modifiers.shift {
+            if let Some(anchor) = self.selected_row {
+                if let (Some(start), Some(end)) = (
+                    visible_rows.iter().position(|row| *row == anchor),
+                    visible_rows.iter().position(|row| *row == row_key),
+                ) {
+                    let (start, end) = if start <= end {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    };
+                    self.selected_rows.clear();
+                    for row in &visible_rows[start..=end] {
+                        self.selected_rows.insert(*row);
+                    }
+                    self.selected_row = Some(row_key);
+                    return;
+                }
+            }
+        }
+
+        if command_modifier(modifiers) {
+            if !self.selected_rows.remove(&row_key) {
+                self.selected_rows.insert(row_key);
+                self.selected_row = Some(row_key);
+            } else if self.selected_row == Some(row_key) {
+                self.selected_row = self.selected_rows.iter().next_back().copied();
+            }
+            return;
+        }
+
+        self.selected_rows.clear();
+        self.selected_rows.insert(row_key);
+        self.selected_row = Some(row_key);
     }
 
     fn commit_dialog(&mut self, ui: &mut Ui, message: &mut Option<String>) {
@@ -1049,10 +1159,10 @@ impl TableEditor {
         });
     }
 
-    fn row(&mut self, ui: &mut Ui, row_key: RowKey, visible_index: usize) {
+    fn row(&mut self, ui: &mut Ui, row_key: RowKey, visible_index: usize, visible_rows: &[RowKey]) {
         let deleted =
             matches!(row_key, RowKey::Existing(index) if self.deleted_rows.contains_key(&index));
-        let row_selected = self.selected_row == Some(row_key);
+        let row_selected = self.selected_rows.contains(&row_key);
 
         let is_error_row = self.error_row_index
             == Some(match row_key {
@@ -1087,7 +1197,53 @@ impl TableEditor {
                 grid_stroke(ui),
             );
             if row_cell.response.clicked() {
-                self.selected_row = Some(row_key);
+                let modifiers = ui.input(|input| input.modifiers);
+                self.select_row(row_key, visible_rows, modifiers);
+            }
+            let mut append_requested = false;
+            let mut remove_requested = false;
+            let mut clear_selection_requested = false;
+            row_cell.response.context_menu(|ui| {
+                if ui.button("Insert Row").clicked() {
+                    append_requested = true;
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        self.can_remove_or_restore_row(row_key),
+                        Button::new(if deleted { "Undo Delete" } else { "Delete Row" }),
+                    )
+                    .clicked()
+                {
+                    if !self.selected_rows.contains(&row_key) {
+                        self.selected_rows.clear();
+                        self.selected_rows.insert(row_key);
+                        self.selected_row = Some(row_key);
+                    }
+                    remove_requested = true;
+                    ui.close_menu();
+                }
+                if self.selected_rows.len() > 1 && ui.button("Delete Selected Rows").clicked() {
+                    remove_requested = true;
+                    ui.close_menu();
+                }
+                if ui.button("Clear Selection").clicked() {
+                    clear_selection_requested = true;
+                    ui.close_menu();
+                }
+            });
+            if append_requested {
+                let mut ignored = None;
+                self.append_row(&mut ignored);
+            }
+            if remove_requested {
+                let mut ignored = None;
+                let rows = self.selected_rows.iter().copied().collect::<Vec<_>>();
+                self.remove_or_restore_rows(rows, &mut ignored);
+            }
+            if clear_selection_requested {
+                self.selected_row = None;
+                self.selected_rows.clear();
             }
 
             for column_index in 0..self.display_column_count() {
@@ -1263,9 +1419,16 @@ impl TableEditor {
         paint_cell_frame(ui, rect, fill, grid_stroke(ui));
 
         let button_width = 22.0;
+        let edit_height = (ui.text_style_height(&TextStyle::Body) + 6.0)
+            .min(ROW_HEIGHT)
+            .max(18.0);
         let edit_rect = Rect::from_min_max(
-            rect.min + vec2(crate::ui::grid::CELL_PADDING_X, 2.0),
-            rect.max - vec2(button_width + 2.0, 2.0),
+            rect.left_center() + vec2(crate::ui::grid::CELL_PADDING_X, -edit_height * 0.5),
+            rect.right_center()
+                + vec2(
+                    -(button_width + 2.0 + crate::ui::grid::CELL_PADDING_X),
+                    edit_height * 0.5,
+                ),
         );
         let button_rect = Rect::from_min_max(
             rect.right_top() + vec2(-(button_width + 2.0), 3.0),
@@ -1565,6 +1728,7 @@ impl TableEditor {
         self.new_rows.clear();
         self.deleted_rows.clear();
         self.selected_row = None;
+        self.selected_rows.clear();
         self.time_picker = None;
         self.commit_error = None;
         self.error_row_index = None;
@@ -1908,6 +2072,14 @@ fn table_cell_fill(ui: &Ui, row: usize, deleted: bool, selected: bool) -> Color3
         }
     } else {
         row_fill(ui, row, false)
+    }
+}
+
+fn command_modifier(modifiers: Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        modifiers.command
+    } else {
+        modifiers.ctrl || modifiers.command
     }
 }
 

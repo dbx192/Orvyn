@@ -332,7 +332,7 @@ impl DesktopApp {
             if self.table_editor.is_some() {
                 self.workspace_tab(ui, ActivePanel::TableEditor, "Data");
             }
-            if self.table_structure.is_some() {
+            if self.table_structure.is_some() || self.pending_structure_load.is_some() {
                 self.workspace_tab(ui, ActivePanel::TableStructure, "Structure");
             }
             if self.import_wizard.is_some() {
@@ -348,7 +348,26 @@ impl DesktopApp {
         let selected = self.active_panel == panel;
         if ui.selectable_label(selected, label).clicked() {
             self.active_panel = panel;
+            if panel == ActivePanel::TableStructure {
+                self.ensure_structure_details_loaded();
+            }
         }
+    }
+
+    fn ensure_structure_details_loaded(&mut self) {
+        if self.pending_structure_load.is_some() {
+            return;
+        }
+        let Some(view) = self.table_structure.as_ref() else {
+            return;
+        };
+        if !view.needs_detail_load() {
+            return;
+        }
+        let (connection_id, database, schema, table) = view.load_target();
+        self.state
+            .set_status(format!("Loading structure details for {table} ..."));
+        self.spawn_structure_load(connection_id, database, schema, table);
     }
 
     fn central_panel(&mut self, ctx: &Context) {
@@ -579,7 +598,13 @@ impl DesktopApp {
                         schema.as_deref().unwrap_or(""),
                         table
                     ));
-                    self.spawn_table_data_load(connection_id, database, schema, table);
+                    self.table_structure = None;
+                    self.spawn_table_data_load(
+                        connection_id,
+                        database.clone(),
+                        schema.clone(),
+                        table.clone(),
+                    );
                     self.active_panel = ActivePanel::TableEditor;
                 }
                 ObjectTreeAction::OpenQuery {
@@ -636,6 +661,7 @@ impl DesktopApp {
                         schema.as_deref().unwrap_or(""),
                         table
                     ));
+                    self.table_structure = None;
                     self.spawn_structure_load(connection_id, database, schema, table);
                     self.active_panel = ActivePanel::TableStructure;
                 }
@@ -774,6 +800,14 @@ impl DesktopApp {
                             let row_count = payload.result.rows.len();
                             let table_name = payload.table.clone();
                             let conn_id = payload.connection_id;
+                            self.object_tree.mark_connected(conn_id);
+                            self.table_structure = Some(TableStructureView::from_columns(
+                                conn_id,
+                                payload.database.clone(),
+                                payload.schema.clone(),
+                                payload.table.clone(),
+                                payload.columns.clone(),
+                            ));
                             let editor = TableEditor::with_services(
                                 payload.schema.clone(),
                                 &payload.table,
@@ -813,6 +847,7 @@ impl DesktopApp {
                     done = true;
                     match result {
                         Ok(payload) => {
+                            self.object_tree.mark_connected(payload.connection_id);
                             let view = TableStructureView::new(
                                 payload.connection_id,
                                 payload.database,

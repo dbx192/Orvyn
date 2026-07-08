@@ -1,9 +1,9 @@
 use eframe::egui::{
-    pos2, vec2, Align, Color32, CursorIcon, Id, Label, Layout, Rect, Response, RichText, Sense,
-    Stroke, TextEdit, Ui, Vec2,
+    epaint::TextShape, pos2, vec2, Align, Color32, CursorIcon, Id, Layout, Rect, Response,
+    RichText, Sense, Stroke, TextEdit, TextStyle, Ui, Vec2, WidgetText,
 };
 
-pub const CELL_PADDING_X: f32 = 8.0;
+pub const CELL_PADDING_X: f32 = 0.0;
 const TEXT_UNIT_WIDTH: f32 = 7.4;
 
 pub struct GridCellResponse {
@@ -17,7 +17,7 @@ pub struct GridHeaderResponse {
 }
 
 pub fn estimate_text_width(text: &str) -> f32 {
-    (display_width_units(text) * TEXT_UNIT_WIDTH + CELL_PADDING_X * 2.0 + 2.0).ceil()
+    (display_width_units(text) * TEXT_UNIT_WIDTH + 6.0).ceil()
 }
 
 pub fn grid_stroke(ui: &Ui) -> Stroke {
@@ -83,7 +83,19 @@ pub fn text_edit_cell(
         ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     paint_cell_frame(ui, rect, fill, stroke);
 
-    let inner_rect = rect.shrink2(vec2(CELL_PADDING_X, 2.0));
+    let edit_height = (ui.text_style_height(&TextStyle::Body) + 6.0)
+        .min(height)
+        .max(18.0);
+    let inner_rect = Rect::from_min_max(
+        pos2(
+            rect.left() + CELL_PADDING_X,
+            rect.center().y - edit_height * 0.5,
+        ),
+        pos2(
+            rect.right() - CELL_PADDING_X,
+            rect.center().y + edit_height * 0.5,
+        ),
+    );
     let mut child_ui = ui.child_ui(inner_rect, Layout::left_to_right(Align::Center));
     child_ui.set_clip_rect(inner_rect);
     child_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -159,13 +171,17 @@ pub fn paint_cell_frame(ui: &Ui, rect: Rect, fill: Color32, stroke: Stroke) {
 
 fn paint_label(ui: &mut Ui, rect: Rect, height: f32, text: RichText) {
     let inner_rect = rect.shrink2(vec2(CELL_PADDING_X, 0.0));
-    let mut child_ui = ui.child_ui(inner_rect, Layout::left_to_right(Align::Center));
-    child_ui.set_clip_rect(inner_rect);
-    child_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-    child_ui.add_sized(
-        [inner_rect.width(), height],
-        Label::new(text).truncate(true),
+    let galley =
+        WidgetText::from(text).into_galley(ui, Some(false), inner_rect.width(), TextStyle::Body);
+    let text_pos = pos2(
+        inner_rect.left(),
+        rect.center().y - (galley.size().y * 0.5).min(height * 0.5),
     );
+    ui.painter().with_clip_rect(inner_rect).add(TextShape::new(
+        text_pos,
+        galley,
+        ui.visuals().text_color(),
+    ));
 }
 
 fn display_width_units(text: &str) -> f32 {

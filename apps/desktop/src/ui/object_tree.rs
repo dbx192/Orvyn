@@ -254,6 +254,14 @@ impl ObjectTree {
         self.load_favorites();
     }
 
+    pub fn mark_connected(&mut self, connection_id: ConnectionId) {
+        if let Some((_, status)) = self.connections.get_mut(&connection_id) {
+            *status = ConnectionStatus::Connected;
+        }
+        self.reconnects.remove(&connection_id);
+        self.reconnect_suppressed.remove(&connection_id);
+    }
+
     fn search_bar(&mut self, ui: &mut Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -1215,12 +1223,15 @@ impl ObjectTree {
                     match result {
                         Ok(children) => {
                             if is_connection {
-                                if let Some((tree_node, _)) =
+                                if let Some((tree_node, status)) =
                                     self.connections.get_mut(&key.connection_id)
                                 {
                                     tree_node.children = Some(children);
                                     tree_node.loading = false;
                                     tree_node.load_error = None;
+                                    *status = ConnectionStatus::Connected;
+                                    self.reconnects.remove(&key.connection_id);
+                                    self.reconnect_suppressed.remove(&key.connection_id);
                                 }
                             } else {
                                 self.child_cache.insert(key, children);
@@ -1277,6 +1288,11 @@ impl ObjectTree {
                                 | ConnectionStatus::NotConnected
                         ) {
                             let previous = self.connections.get(&id).map(|(_, status)| *status);
+                            if previous == Some(ConnectionStatus::Connected)
+                                && new_status == ConnectionStatus::NotConnected
+                            {
+                                continue;
+                            }
                             if let Some((_, status)) = self.connections.get_mut(&id) {
                                 *status = new_status;
                             }

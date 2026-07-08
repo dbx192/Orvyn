@@ -1557,6 +1557,8 @@ dependencies = [
  "import-export",
  "rfd",
  "secure-store",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

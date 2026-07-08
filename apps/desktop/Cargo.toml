@@ -18,5 +18,7 @@ eframe.workspace = true
 import-export = { path = "../../crates/import-export" }
 rfd.workspace = true
 secure-store = { path = "../../crates/secure-store" }
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -6,9 +6,11 @@ use db_common::{
 use eframe::egui::{
     Button, Checkbox, ComboBox, DragValue, Grid, RichText, ScrollArea, TextEdit, Ui, Window,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     mem,
+    path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
 };
 use tokio::runtime::Handle;
@@ -138,6 +140,8 @@ enum ConnectionEvent {
     Saved(Result<ConnectionProfile, AppError>),
     Deleted(Result<ConnectionId, AppError>),
     Tested(Result<ConnectionTestReport, AppError>),
+    Exported(Result<PathBuf, AppError>),
+    Imported(Result<Vec<ConnectionId>, AppError>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +166,20 @@ pub struct ConnectionManagerUi {
     confirm_delete: Option<ConnectionId>,
     window_open: bool,
     pending_changes: Vec<ConnectionChange>,
+    export_include_passwords: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConnectionExportFile {
+    version: u32,
+    profiles: Vec<ConnectionExportEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConnectionExportEntry {
+    profile: ConnectionProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
 }
 
 impl ConnectionManagerUi {
@@ -183,6 +201,7 @@ impl ConnectionManagerUi {
             confirm_delete: None,
             window_open: false,
             pending_changes: Vec::new(),
+            export_include_passwords: false,
         };
         ui.load_profiles();
         ui
@@ -457,6 +476,40 @@ impl ConnectionManagerUi {
             }
         });
 
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add(Checkbox::new(
+                &mut self.export_include_passwords,
+                "Include saved passwords",
+            ))
+            .on_hover_text("Writes saved passwords into the exported JSON file");
+            if ui
+                .add_enabled(!self.busy, Button::new("Import Connections"))
+                .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Import Connections")
+                    .add_filter("Connection JSON", &["json"])
+                    .pick_file()
+                {
+                    self.import_connections(path);
+                }
+            }
+            if ui
+                .add_enabled(!self.busy, Button::new("Export Connections"))
+                .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Export Connections")
+                    .set_file_name("connections.json")
+                    .add_filter("Connection JSON", &["json"])
+                    .save_file()
+                {
+                    self.export_connections(path, self.export_include_passwords);
+                }
+            }
+        });
+
         if let Some(id) = self.confirm_delete {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -572,6 +625,34 @@ impl ConnectionManagerUi {
         });
     }
 
+    fn export_connections(&mut self, path: PathBuf, include_passwords: bool) {
+        self.busy = true;
+        self.error = None;
+        self.status = "Exporting connections...".to_string();
+        let tx = self.tx.clone();
+        let manager = self.manager.clone();
+
+        self.runtime.spawn(async move {
+            let result = export_connections_to_file(manager, path.clone(), include_passwords)
+                .await
+                .map(|_| path);
+            let _ = tx.send(ConnectionEvent::Exported(result));
+        });
+    }
+
+    fn import_connections(&mut self, path: PathBuf) {
+        self.busy = true;
+        self.error = None;
+        self.status = "Importing connections...".to_string();
+        let tx = self.tx.clone();
+        let manager = self.manager.clone();
+
+        self.runtime.spawn(async move {
+            let result = import_connections_from_file(manager, path).await;
+            let _ = tx.send(ConnectionEvent::Imported(result));
+        });
+    }
+
     fn drain_events(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             self.busy = false;
@@ -646,6 +727,33 @@ impl ConnectionManagerUi {
                         ))
                     }
                 },
+                ConnectionEvent::Exported(result) => match result {
+                    Ok(path) => {
+                        self.status = format!("Connections exported: {}", path.display());
+                    }
+                    Err(error) => {
+                        self.error = Some(actionable_error(
+                            "Export connections failed",
+                            error,
+                            &self.form.password,
+                        ));
+                    }
+                },
+                ConnectionEvent::Imported(result) => match result {
+                    Ok(ids) => {
+                        self.status = format!("Imported {} connection(s)", ids.len());
+                        self.pending_changes
+                            .extend(ids.into_iter().map(ConnectionChange::Saved));
+                        self.load_profiles();
+                    }
+                    Err(error) => {
+                        self.error = Some(actionable_error(
+                            "Import connections failed",
+                            error,
+                            &self.form.password,
+                        ));
+                    }
+                },
             }
         }
     }
@@ -693,6 +801,79 @@ fn upsert_profile(profiles: &mut Vec<ConnectionProfile>, profile: ConnectionProf
     } else {
         profiles.push(profile);
     }
+}
+
+async fn export_connections_to_file(
+    manager: ConnectionManager,
+    path: PathBuf,
+    include_passwords: bool,
+) -> Result<(), AppError> {
+    let profiles = manager.list_profiles().await?;
+    let mut entries = Vec::with_capacity(profiles.len());
+
+    for mut profile in profiles {
+        let password = if include_passwords {
+            manager
+                .profile_with_password(profile.id, None)
+                .await?
+                .1
+                .filter(|password| !password.is_empty())
+        } else {
+            None
+        };
+
+        profile.password_ref = None;
+        if password.is_none() {
+            profile.security.save_password = false;
+        }
+        entries.push(ConnectionExportEntry { profile, password });
+    }
+
+    let file = ConnectionExportFile {
+        version: 1,
+        profiles: entries,
+    };
+    let bytes = serde_json::to_vec_pretty(&file)?;
+    tokio::fs::write(path, bytes).await?;
+    Ok(())
+}
+
+async fn import_connections_from_file(
+    manager: ConnectionManager,
+    path: PathBuf,
+) -> Result<Vec<ConnectionId>, AppError> {
+    let bytes = tokio::fs::read(path).await?;
+    let file: ConnectionExportFile = serde_json::from_slice(&bytes)?;
+    if file.version != 1 {
+        return Err(AppError::validation(format!(
+            "unsupported connection export version {}",
+            file.version
+        )));
+    }
+
+    let mut imported = Vec::with_capacity(file.profiles.len());
+    for entry in file.profiles {
+        let mut profile = entry.profile;
+        profile.password_ref = None;
+        let password = entry.password.unwrap_or_default();
+        let password_update = if password.is_empty() {
+            profile.security.save_password = false;
+            PasswordUpdate::Clear
+        } else {
+            profile.security.save_password = true;
+            PasswordUpdate::Replace(password)
+        };
+        let id = profile.id;
+
+        if manager.get_profile(id).await?.is_some() {
+            manager.update_profile(profile, password_update).await?;
+        } else {
+            manager.create_profile(profile, password_update).await?;
+        }
+        imported.push(id);
+    }
+
+    Ok(imported)
 }
 
 fn non_empty(value: &str) -> Option<String> {
