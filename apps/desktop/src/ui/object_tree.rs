@@ -7,8 +7,8 @@ use db_common::{
     MetadataPath,
 };
 use eframe::egui::{
-    pos2, vec2, Align2, Button, Color32, Context, FontId, Rect, Response, RichText, Rounding,
-    ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
+    containers::scroll_area::ScrollBarVisibility, pos2, vec2, Align2, Button, Color32, Context,
+    FontId, Rect, Response, RichText, Rounding, ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -224,10 +224,14 @@ impl ObjectTree {
         let mut message = None;
         let mut actions = Vec::new();
 
+        let tree_width = ui.available_width();
         ScrollArea::vertical()
             .id_source("object_tree_scroll")
+            .max_width(tree_width)
             .auto_shrink([false, false])
+            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
+                ui.set_width(tree_width);
                 self.tree_ui(ui, &mut message, &mut actions);
             });
 

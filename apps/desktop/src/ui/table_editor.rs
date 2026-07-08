@@ -4,17 +4,18 @@
 
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
 use crate::ui::grid::{
-    estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_outline,
-    resizable_header_cell, row_fill, text_edit_cell,
+    estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_frame,
+    paint_cell_outline, resizable_header_cell, row_fill, text_edit_cell, GridCellResponse,
 };
 use app_core::{metadata::MetadataService, query::QueryService};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use db_common::{
-    CellValue, ConnectionId, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest,
-    QueryId, QueryResult, Result, Row, TableColumn,
+    CellValue, ConnectionId, Dialect, Identifier, LogicalType, QueryExecutionMode,
+    QueryExecutionRequest, QueryId, QueryResult, Result, Row, TableColumn,
 };
 use eframe::egui::{
-    vec2, Button, Color32, DragValue, Frame, Margin, RichText, ScrollArea, Sense, Stroke, TextEdit,
-    Ui, Window,
+    vec2, Align, Button, Color32, DragValue, Frame, Layout, Margin, Rect, RichText, ScrollArea,
+    Sense, Stroke, TextEdit, Ui, Window,
 };
 use std::{
     collections::BTreeMap,
@@ -29,7 +30,7 @@ const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
 const ROW_HEIGHT: f32 = 28.0;
 const HEADER_HEIGHT: f32 = 32.0;
-const ACTION_WIDTH: f32 = 96.0;
+const ROW_HANDLE_WIDTH: f32 = 48.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -58,6 +59,26 @@ enum RowKey {
 #[derive(Debug, Clone)]
 struct NewRow {
     values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporalKind {
+    Date,
+    Time,
+    DateTime,
+}
+
+#[derive(Debug, Clone)]
+struct TimePickerState {
+    row: RowKey,
+    column: usize,
+    kind: TemporalKind,
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +127,7 @@ pub struct TableEditor {
     edits: BTreeMap<CellKey, String>,
     new_rows: Vec<NewRow>,
     deleted_rows: BTreeMap<usize, Row>,
+    selected_row: Option<RowKey>,
     allow_risk_without_pk: bool,
     query_service: Option<QueryService>,
     metadata_service: Option<MetadataService>,
@@ -114,6 +136,7 @@ pub struct TableEditor {
     runtime: Option<Handle>,
     show_commit_dialog: bool,
     show_close_warning: bool,
+    time_picker: Option<TimePickerState>,
     commit_state: CommitState,
     commit_error: Option<String>,
     error_row_index: Option<usize>,
@@ -146,6 +169,7 @@ impl TableEditor {
             edits: BTreeMap::new(),
             new_rows: Vec::new(),
             deleted_rows: BTreeMap::new(),
+            selected_row: None,
             allow_risk_without_pk: false,
             query_service: None,
             metadata_service: None,
@@ -154,6 +178,7 @@ impl TableEditor {
             runtime: None,
             show_commit_dialog: false,
             show_close_warning: false,
+            time_picker: None,
             commit_state: CommitState::Idle,
             commit_error: None,
             error_row_index: None,
@@ -201,6 +226,8 @@ impl TableEditor {
             self.close_warning_dialog(ui);
         }
 
+        self.time_picker_window(ui, &mut message);
+
         if let Some(error) = self.commit_error.clone() {
             ui.colored_label(Color32::RED, error);
             if ui.button("Clear Error").clicked() {
@@ -220,6 +247,7 @@ impl TableEditor {
             ui.add_space(4.0);
         }
 
+        let grid_height = (ui.available_height() - 34.0).max(240.0);
         Frame::default()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(grid_stroke(ui))
@@ -232,7 +260,7 @@ impl TableEditor {
                         ui.separator();
                         ScrollArea::vertical()
                             .id_source("table_editor_vertical")
-                            .max_height(ui.available_height().max(280.0))
+                            .max_height(grid_height)
                             .auto_shrink([false, false])
                             .show_rows(
                                 ui,
@@ -252,6 +280,8 @@ impl TableEditor {
                             );
                     });
             });
+
+        self.row_actions_bar(ui, &mut message);
 
         message
     }
@@ -384,7 +414,7 @@ impl TableEditor {
         matches!(&self.commit_state, CommitState::Committing(_))
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+    fn toolbar(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(self.table_name()).strong());
             ui.label(
@@ -417,14 +447,20 @@ impl TableEditor {
 
             ui.separator();
             ui.label("Filter");
-            if !self.columns.is_empty() {
-                self.filter_column = self.filter_column.min(self.columns.len() - 1);
-                let selected = &self.columns[self.filter_column].name;
+            let filter_options = (0..self.display_column_count())
+                .map(|index| self.display_column_name(index))
+                .collect::<Vec<_>>();
+            if !filter_options.is_empty() {
+                self.filter_column = self.filter_column.min(filter_options.len() - 1);
+                let selected = filter_options
+                    .get(self.filter_column)
+                    .cloned()
+                    .unwrap_or_default();
                 eframe::egui::ComboBox::from_id_source("table_filter_column")
                     .selected_text(selected)
                     .show_ui(ui, |ui| {
-                        for (index, column) in self.columns.iter().enumerate() {
-                            ui.selectable_value(&mut self.filter_column, index, &column.name);
+                        for (index, label) in filter_options.iter().enumerate() {
+                            ui.selectable_value(&mut self.filter_column, index, label);
                         }
                     });
             }
@@ -444,16 +480,54 @@ impl TableEditor {
                 self.page = 0;
             }
 
-            ui.separator();
+            if !self.has_primary_key() {
+                ui.separator();
+                ui.checkbox(&mut self.allow_risk_without_pk, "Risk mode");
+            }
+            if self.is_committing() {
+                ui.colored_label(Color32::YELLOW, "Committing...");
+            }
+            let pending = self.pending_change_count();
+            if pending > 0 {
+                ui.label(
+                    RichText::new(format!("{pending} pending"))
+                        .small()
+                        .color(Color32::from_rgb(70, 110, 190)),
+                );
+            }
+        });
+    }
+
+    fn row_actions_bar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
             if ui
-                .add_enabled(!self.is_committing(), Button::new("New Row"))
+                .add_enabled(!self.is_committing(), Button::new("+"))
+                .on_hover_text("Append row")
                 .clicked()
             {
+                let index = self.new_rows.len();
                 self.new_rows.push(NewRow {
-                    values: vec![String::new(); self.columns.len()],
+                    values: vec![String::new(); self.display_column_count()],
                 });
+                self.selected_row = Some(RowKey::New(index));
                 *message = Some("New row staged".to_string());
             }
+
+            let selected = self.selected_row;
+            let can_remove = selected
+                .map(|row| self.can_remove_or_restore_row(row))
+                .unwrap_or(false)
+                && !self.is_committing();
+            if ui
+                .add_enabled(can_remove, Button::new("-"))
+                .on_hover_text("Delete selected row or remove staged row")
+                .clicked()
+            {
+                self.remove_or_restore_selected_row(message);
+            }
+
+            ui.separator();
             if ui
                 .add_enabled(
                     self.has_changes() && !self.is_committing(),
@@ -475,22 +549,127 @@ impl TableEditor {
                 *message = Some("Uncommitted table changes rolled back".to_string());
             }
 
-            if !self.has_primary_key() {
-                ui.separator();
-                ui.checkbox(&mut self.allow_risk_without_pk, "Risk mode");
-            }
-            if self.is_committing() {
-                ui.colored_label(Color32::YELLOW, "Committing...");
-            }
-            let pending = self.pending_change_count();
-            if pending > 0 {
-                ui.label(
-                    RichText::new(format!("{pending} pending"))
-                        .small()
-                        .color(Color32::from_rgb(70, 110, 190)),
-                );
-            }
+            ui.separator();
+            let selected_label = selected
+                .map(|row| self.row_label(row))
+                .unwrap_or_else(|| "No row selected".to_string());
+            ui.label(RichText::new(selected_label).small().color(Color32::GRAY));
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let pending = self.pending_change_count();
+                if pending > 0 {
+                    ui.label(
+                        RichText::new(format!("{pending} pending"))
+                            .small()
+                            .color(Color32::from_rgb(70, 110, 190)),
+                    );
+                }
+            });
         });
+    }
+
+    fn can_remove_or_restore_row(&self, row: RowKey) -> bool {
+        match row {
+            RowKey::Existing(row_index) => {
+                self.can_edit_existing_rows() || self.deleted_rows.contains_key(&row_index)
+            }
+            RowKey::New(row_index) => row_index < self.new_rows.len(),
+        }
+    }
+
+    fn remove_or_restore_selected_row(&mut self, message: &mut Option<String>) {
+        let Some(row) = self.selected_row else {
+            return;
+        };
+
+        match row {
+            RowKey::Existing(row_index) => {
+                if self.deleted_rows.remove(&row_index).is_some() {
+                    *message = Some("Delete mark removed".to_string());
+                } else if self.can_edit_existing_rows() {
+                    if let Some(row) = self.result.rows.get(row_index).cloned() {
+                        self.deleted_rows.insert(row_index, row);
+                        *message = Some("Row marked for delete".to_string());
+                    }
+                }
+            }
+            RowKey::New(row_index) => {
+                if row_index < self.new_rows.len() {
+                    self.new_rows.remove(row_index);
+                    self.selected_row = None;
+                    *message = Some("Staged row removed".to_string());
+                }
+            }
+        }
+    }
+
+    fn display_column_count(&self) -> usize {
+        if self.result.columns.is_empty() {
+            self.columns.len()
+        } else {
+            self.result.columns.len()
+        }
+    }
+
+    fn display_column_name(&self, index: usize) -> String {
+        self.result
+            .columns
+            .get(index)
+            .map(|column| column.name.clone())
+            .or_else(|| self.columns.get(index).map(|column| column.name.clone()))
+            .unwrap_or_else(|| format!("column_{}", index + 1))
+    }
+
+    fn metadata_column_for_display_index(&self, index: usize) -> Option<&TableColumn> {
+        let display_name = self.display_column_name(index);
+        self.columns
+            .iter()
+            .find(|column| column.name == display_name)
+            .or_else(|| self.columns.get(index))
+    }
+
+    fn primary_key_display_indices(&self) -> Vec<usize> {
+        (0..self.display_column_count())
+            .filter(|index| {
+                self.metadata_column_for_display_index(*index)
+                    .map(|column| column.primary_key)
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn display_column_hover(&self, index: usize) -> String {
+        let metadata = self.metadata_column_for_display_index(index);
+        let database_type = metadata
+            .map(|column| column.database_type.as_str())
+            .or_else(|| {
+                self.result
+                    .columns
+                    .get(index)
+                    .map(|column| column.database_type.as_str())
+            })
+            .unwrap_or("");
+        let nullable = metadata.map(|column| column.nullable).unwrap_or(true);
+        let primary_key = metadata.map(|column| column.primary_key).unwrap_or(false);
+        format!(
+            "{}{}{}",
+            database_type,
+            if nullable { ", nullable" } else { "" },
+            if primary_key { ", primary key" } else { "" }
+        )
+    }
+
+    fn row_label(&self, row: RowKey) -> String {
+        match row {
+            RowKey::Existing(index) => {
+                if self.deleted_rows.contains_key(&index) {
+                    format!("{}-", index + 1)
+                } else {
+                    (index + 1).to_string()
+                }
+            }
+            RowKey::New(index) => format!("*{}", index + 1),
+        }
     }
 
     fn commit_dialog(&mut self, ui: &mut Ui, message: &mut Option<String>) {
@@ -767,7 +946,7 @@ impl TableEditor {
             let mut values = Vec::new();
             for (col_idx, val) in row.values.iter().enumerate() {
                 if !val.trim().is_empty() {
-                    values.push((self.columns[col_idx].name.clone(), val.clone()));
+                    values.push((self.display_column_name(col_idx), val.clone()));
                 }
             }
             if !values.is_empty() {
@@ -794,7 +973,7 @@ impl TableEditor {
                     .unwrap_or(&CellValue::Null);
                 let old_val = copy_cell_value(original);
                 if old_val != new_val {
-                    updates.push((self.columns[col_idx].name.clone(), old_val, new_val));
+                    updates.push((self.display_column_name(col_idx), old_val, new_val));
                 }
             }
             if !updates.is_empty() {
@@ -804,20 +983,19 @@ impl TableEditor {
 
         for (row_index, row) in &self.deleted_rows {
             let mut keys = Vec::new();
-            for (col_idx, col) in self.columns.iter().enumerate() {
-                if col.primary_key {
-                    let val = row.values.get(col_idx).unwrap_or(&CellValue::Null);
-                    keys.push((col.name.clone(), copy_cell_value(val)));
+            let key_indices = self.primary_key_display_indices();
+            let indices = if key_indices.is_empty() {
+                if self.has_primary_key() {
+                    continue;
                 }
-            }
-            if keys.is_empty() && self.has_primary_key() {
-                continue;
-            }
-            if keys.is_empty() {
-                for (col_idx, col) in self.columns.iter().enumerate() {
-                    let val = row.values.get(col_idx).unwrap_or(&CellValue::Null);
-                    keys.push((col.name.clone(), copy_cell_value(val)));
-                }
+                (0..self.display_column_count()).collect::<Vec<_>>()
+            } else {
+                key_indices
+            };
+
+            for col_idx in indices {
+                let val = row.values.get(col_idx).unwrap_or(&CellValue::Null);
+                keys.push((self.display_column_name(col_idx), copy_cell_value(val)));
             }
             summary.deletes.push((*row_index, keys));
         }
@@ -841,28 +1019,17 @@ impl TableEditor {
         ui.horizontal(|ui| {
             label_cell(
                 ui,
-                ACTION_WIDTH,
+                ROW_HANDLE_WIDTH,
                 HEADER_HEIGHT,
-                RichText::new("Actions").strong(),
+                RichText::new("#").strong(),
                 Sense::hover(),
                 header_fill(ui),
                 grid_stroke(ui),
             );
 
-            for column_index in 0..self.columns.len() {
-                let column = &self.columns[column_index];
-                let column_name = column.name.clone();
-                let column_hover = format!(
-                    "{}{}{}",
-                    column.database_type,
-                    if column.nullable { ", nullable" } else { "" },
-                    if column.primary_key {
-                        ", primary key"
-                    } else {
-                        ""
-                    }
-                );
-
+            for column_index in 0..self.display_column_count() {
+                let column_name = self.display_column_name(column_index);
+                let column_hover = self.display_column_hover(column_index);
                 let title = format!("{}{}", column_name, self.sort_marker(column_index));
                 let header = resizable_header_cell(
                     ui,
@@ -885,6 +1052,7 @@ impl TableEditor {
     fn row(&mut self, ui: &mut Ui, row_key: RowKey, visible_index: usize) {
         let deleted =
             matches!(row_key, RowKey::Existing(index) if self.deleted_rows.contains_key(&index));
+        let row_selected = self.selected_row == Some(row_key);
 
         let is_error_row = self.error_row_index
             == Some(match row_key {
@@ -901,38 +1069,28 @@ impl TableEditor {
                 );
             }
 
-            let action_cell = label_cell(
+            let row_label = self.row_label(row_key);
+            let row_cell = label_cell(
                 ui,
-                ACTION_WIDTH,
+                ROW_HANDLE_WIDTH,
                 ROW_HEIGHT,
-                RichText::new(""),
-                Sense::hover(),
-                table_cell_fill(ui, visible_index, deleted),
+                RichText::new(row_label)
+                    .monospace()
+                    .small()
+                    .color(if row_selected {
+                        Color32::WHITE
+                    } else {
+                        Color32::GRAY
+                    }),
+                Sense::click(),
+                table_cell_fill(ui, visible_index, deleted, row_selected),
                 grid_stroke(ui),
             );
-            ui.allocate_ui_at_rect(
-                action_cell.rect.shrink2(vec2(6.0, 2.0)),
-                |ui| match row_key {
-                    RowKey::Existing(row_index) => {
-                        let can_delete = self.can_edit_existing_rows() && !deleted;
-                        if ui.add_enabled(can_delete, Button::new("Delete")).clicked() {
-                            if let Some(row) = self.result.rows.get(row_index).cloned() {
-                                self.deleted_rows.insert(row_index, row);
-                            }
-                        }
-                        if deleted && ui.button("Undo").clicked() {
-                            self.deleted_rows.remove(&row_index);
-                        }
-                    }
-                    RowKey::New(row_index) => {
-                        if ui.button("Remove").clicked() && row_index < self.new_rows.len() {
-                            self.new_rows.remove(row_index);
-                        }
-                    }
-                },
-            );
+            if row_cell.response.clicked() {
+                self.selected_row = Some(row_key);
+            }
 
-            for column_index in 0..self.columns.len() {
+            for column_index in 0..self.display_column_count() {
                 let width = self.column_widths[column_index];
                 let editable = match row_key {
                     RowKey::Existing(_) => self.can_edit_existing_rows() && !deleted,
@@ -948,11 +1106,19 @@ impl TableEditor {
                             width,
                             editable,
                             deleted,
+                            row_selected,
                             visible_index,
                         );
                     }
                     RowKey::New(row_index) => {
-                        self.new_cell(ui, row_index, column_index, width, visible_index);
+                        self.new_cell(
+                            ui,
+                            row_index,
+                            column_index,
+                            width,
+                            row_selected,
+                            visible_index,
+                        );
                     }
                 }
             }
@@ -967,6 +1133,7 @@ impl TableEditor {
         width: f32,
         editable: bool,
         deleted: bool,
+        row_selected: bool,
         visible_index: usize,
     ) {
         let key = CellKey {
@@ -979,23 +1146,35 @@ impl TableEditor {
             .get(row_index)
             .and_then(|row| row.values.get(column_index))
             .unwrap_or(&CellValue::Null);
+        let original_text = copy_cell_value(original);
 
         if editable {
             let mut value = self
                 .edits
                 .get(&key)
                 .cloned()
-                .unwrap_or_else(|| copy_cell_value(original));
-            let cell = text_edit_cell(
-                ui,
-                width,
-                ROW_HEIGHT,
-                &mut value,
-                table_cell_fill(ui, visible_index, deleted),
-                grid_stroke(ui),
-            );
+                .unwrap_or_else(|| original_text.clone());
+            let cell = if self.temporal_kind_for_column(column_index).is_some() {
+                self.temporal_edit_cell(
+                    ui,
+                    width,
+                    &mut value,
+                    RowKey::Existing(row_index),
+                    column_index,
+                    table_cell_fill(ui, visible_index, deleted, row_selected),
+                )
+            } else {
+                text_edit_cell(
+                    ui,
+                    width,
+                    ROW_HEIGHT,
+                    &mut value,
+                    table_cell_fill(ui, visible_index, deleted, row_selected),
+                    grid_stroke(ui),
+                )
+            };
             if cell.response.changed() {
-                if value == copy_cell_value(original) {
+                if value == original_text {
                     self.edits.remove(&key);
                 } else {
                     self.edits.insert(key, value);
@@ -1015,7 +1194,7 @@ impl TableEditor {
                 ROW_HEIGHT,
                 rich,
                 Sense::hover(),
-                table_cell_fill(ui, visible_index, deleted),
+                table_cell_fill(ui, visible_index, deleted, row_selected),
                 grid_stroke(ui),
             );
             cell.response.on_hover_text(copy_cell_value(original));
@@ -1028,19 +1207,247 @@ impl TableEditor {
         row_index: usize,
         column_index: usize,
         width: f32,
+        row_selected: bool,
         visible_index: usize,
     ) {
-        if let Some(row) = self.new_rows.get_mut(row_index) {
-            if let Some(value) = row.values.get_mut(column_index) {
-                text_edit_cell(
-                    ui,
-                    width,
-                    ROW_HEIGHT,
-                    value,
-                    table_cell_fill(ui, visible_index, false),
-                    grid_stroke(ui),
-                );
+        let Some(current_value) = self
+            .new_rows
+            .get(row_index)
+            .and_then(|row| row.values.get(column_index))
+            .cloned()
+        else {
+            return;
+        };
+
+        let mut value = current_value.clone();
+        let cell = if self.temporal_kind_for_column(column_index).is_some() {
+            self.temporal_edit_cell(
+                ui,
+                width,
+                &mut value,
+                RowKey::New(row_index),
+                column_index,
+                table_cell_fill(ui, visible_index, false, row_selected),
+            )
+        } else {
+            text_edit_cell(
+                ui,
+                width,
+                ROW_HEIGHT,
+                &mut value,
+                table_cell_fill(ui, visible_index, false, row_selected),
+                grid_stroke(ui),
+            )
+        };
+
+        if cell.response.changed() && value != current_value {
+            if let Some(row) = self.new_rows.get_mut(row_index) {
+                if let Some(target) = row.values.get_mut(column_index) {
+                    *target = value;
+                }
             }
+        }
+    }
+
+    fn temporal_edit_cell(
+        &mut self,
+        ui: &mut Ui,
+        width: f32,
+        value: &mut String,
+        row: RowKey,
+        column_index: usize,
+        fill: Color32,
+    ) -> GridCellResponse {
+        let (rect, background_response) =
+            ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
+        paint_cell_frame(ui, rect, fill, grid_stroke(ui));
+
+        let button_width = 22.0;
+        let edit_rect = Rect::from_min_max(
+            rect.min + vec2(crate::ui::grid::CELL_PADDING_X, 2.0),
+            rect.max - vec2(button_width + 2.0, 2.0),
+        );
+        let button_rect = Rect::from_min_max(
+            rect.right_top() + vec2(-(button_width + 2.0), 3.0),
+            rect.right_bottom() + vec2(-2.0, -3.0),
+        );
+
+        let mut edit_ui = ui.child_ui(edit_rect, Layout::left_to_right(Align::Center));
+        edit_ui.set_clip_rect(edit_rect);
+        edit_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let edit_response = edit_ui.add_sized(
+            [edit_rect.width(), (ROW_HEIGHT - 4.0).max(18.0)],
+            TextEdit::singleline(value)
+                .desired_width(edit_rect.width())
+                .frame(false),
+        );
+
+        let button_response = ui
+            .allocate_ui_at_rect(button_rect, |ui| {
+                ui.add_sized(
+                    [button_rect.width(), button_rect.height()],
+                    Button::new("..."),
+                )
+            })
+            .inner
+            .on_hover_text("Choose date/time");
+
+        if button_response.clicked() {
+            if let Some(kind) = self.temporal_kind_for_column(column_index) {
+                self.time_picker =
+                    Some(TimePickerState::from_value(row, column_index, kind, value));
+            }
+        }
+
+        if edit_response.has_focus() {
+            paint_cell_outline(
+                ui,
+                rect,
+                Stroke::new(1.5, ui.visuals().selection.stroke.color),
+            );
+        }
+
+        GridCellResponse {
+            response: edit_response
+                .union(button_response)
+                .union(background_response),
+            rect,
+        }
+    }
+
+    fn time_picker_window(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+        let Some(mut picker) = self.time_picker.take() else {
+            return;
+        };
+
+        let title = match picker.kind {
+            TemporalKind::Date => "Choose Date",
+            TemporalKind::Time => "Choose Time",
+            TemporalKind::DateTime => "Choose Date/Time",
+        };
+        let mut open = true;
+        let mut apply_value = None;
+        let mut set_null = false;
+        let mut close_requested = false;
+
+        Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                if matches!(picker.kind, TemporalKind::Date | TemporalKind::DateTime) {
+                    ui.horizontal(|ui| {
+                        ui.label("Date");
+                        ui.add(DragValue::new(&mut picker.year).speed(1));
+                        ui.add(DragValue::new(&mut picker.month).clamp_range(1..=12));
+                        let max_day = days_in_month(picker.year, picker.month);
+                        picker.day = picker.day.clamp(1, max_day);
+                        ui.add(DragValue::new(&mut picker.day).clamp_range(1..=max_day));
+                    });
+                }
+
+                if matches!(picker.kind, TemporalKind::Time | TemporalKind::DateTime) {
+                    ui.horizontal(|ui| {
+                        ui.label("Time");
+                        ui.add(DragValue::new(&mut picker.hour).clamp_range(0..=23));
+                        ui.add(DragValue::new(&mut picker.minute).clamp_range(0..=59));
+                        ui.add(DragValue::new(&mut picker.second).clamp_range(0..=59));
+                    });
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Now").clicked() {
+                        picker.set_now();
+                    }
+                    if ui.button("NULL").clicked() {
+                        set_null = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close_requested = true;
+                    }
+                    if ui.button("Apply").clicked() {
+                        apply_value = Some(picker.format_value());
+                    }
+                });
+            });
+
+        if close_requested {
+            open = false;
+        }
+        if set_null {
+            apply_value = Some("NULL".to_string());
+        }
+        if let Some(value) = apply_value {
+            self.set_cell_text(picker.row, picker.column, value);
+            *message = Some("Cell date/time updated".to_string());
+        } else if open {
+            self.time_picker = Some(picker);
+        }
+    }
+
+    fn set_cell_text(&mut self, row: RowKey, column: usize, value: String) {
+        match row {
+            RowKey::Existing(row_index) => {
+                let key = CellKey {
+                    row: row_index,
+                    column,
+                };
+                let original = self
+                    .result
+                    .rows
+                    .get(row_index)
+                    .and_then(|row| row.values.get(column))
+                    .map(copy_cell_value)
+                    .unwrap_or_else(|| "NULL".to_string());
+                if value == original {
+                    self.edits.remove(&key);
+                } else {
+                    self.edits.insert(key, value);
+                }
+            }
+            RowKey::New(row_index) => {
+                if let Some(row) = self.new_rows.get_mut(row_index) {
+                    if let Some(target) = row.values.get_mut(column) {
+                        *target = value;
+                    }
+                }
+            }
+        }
+    }
+
+    fn temporal_kind_for_column(&self, column_index: usize) -> Option<TemporalKind> {
+        match self
+            .result
+            .columns
+            .get(column_index)
+            .map(|column| column.logical_type.clone())
+        {
+            Some(LogicalType::Date) => return Some(TemporalKind::Date),
+            Some(LogicalType::Time) => return Some(TemporalKind::Time),
+            Some(LogicalType::DateTime) => return Some(TemporalKind::DateTime),
+            _ => {}
+        }
+
+        let db_type = self
+            .metadata_column_for_display_index(column_index)
+            .map(|column| column.database_type.to_ascii_lowercase())
+            .or_else(|| {
+                self.result
+                    .columns
+                    .get(column_index)
+                    .map(|column| column.database_type.to_ascii_lowercase())
+            })
+            .unwrap_or_default();
+
+        if db_type.contains("timestamp") || db_type.contains("datetime") {
+            Some(TemporalKind::DateTime)
+        } else if db_type.contains("date") {
+            Some(TemporalKind::Date)
+        } else if db_type.contains("time") {
+            Some(TemporalKind::Time)
+        } else {
+            None
         }
     }
 
@@ -1157,6 +1564,8 @@ impl TableEditor {
         self.edits.clear();
         self.new_rows.clear();
         self.deleted_rows.clear();
+        self.selected_row = None;
+        self.time_picker = None;
         self.commit_error = None;
         self.error_row_index = None;
     }
@@ -1198,7 +1607,7 @@ impl TableEditor {
 
             let columns = values
                 .iter()
-                .map(|(index, _)| self.quote_identifier(&self.columns[*index].name))
+                .map(|(index, _)| self.quote_identifier(&self.display_column_name(*index)))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let sql_values = values
                 .iter()
@@ -1236,7 +1645,7 @@ impl TableEditor {
                 .map(|(column_index, value)| {
                     Ok(format!(
                         "{} = {}",
-                        self.quote_identifier(&self.columns[*column_index].name)?,
+                        self.quote_identifier(&self.display_column_name(*column_index))?,
                         sql_literal(value)
                     ))
                 })
@@ -1264,15 +1673,10 @@ impl TableEditor {
     }
 
     fn where_clause(&self, row: &Row) -> std::result::Result<String, String> {
-        let key_columns = self
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, column)| column.primary_key)
-            .collect::<Vec<_>>();
+        let key_columns = self.primary_key_display_indices();
 
         let columns = if key_columns.is_empty() {
-            self.columns.iter().enumerate().collect::<Vec<_>>()
+            (0..self.display_column_count()).collect::<Vec<_>>()
         } else {
             key_columns
         };
@@ -1282,8 +1686,8 @@ impl TableEditor {
         }
 
         let mut predicates = Vec::new();
-        for (index, column) in columns {
-            let identifier = self.quote_identifier(&column.name)?;
+        for index in columns {
+            let identifier = self.quote_identifier(&self.display_column_name(index))?;
             let value = row.values.get(index).unwrap_or(&CellValue::Null);
             if matches!(value, CellValue::Null) {
                 predicates.push(format!("{identifier} IS NULL"));
@@ -1314,6 +1718,73 @@ impl TableEditor {
     }
 }
 
+impl TimePickerState {
+    fn from_value(row: RowKey, column: usize, kind: TemporalKind, value: &str) -> Self {
+        let now = Local::now().naive_local();
+        let mut state = Self {
+            row,
+            column,
+            kind,
+            year: now.year(),
+            month: now.month(),
+            day: now.day(),
+            hour: now.hour(),
+            minute: now.minute(),
+            second: now.second(),
+        };
+
+        match kind {
+            TemporalKind::Date => {
+                if let Some(date) = parse_date_value(value) {
+                    state.year = date.year();
+                    state.month = date.month();
+                    state.day = date.day();
+                }
+            }
+            TemporalKind::Time => {
+                if let Some(time) = parse_time_value(value) {
+                    state.hour = time.hour();
+                    state.minute = time.minute();
+                    state.second = time.second();
+                }
+            }
+            TemporalKind::DateTime => {
+                if let Some(datetime) = parse_datetime_value(value) {
+                    state.year = datetime.date().year();
+                    state.month = datetime.date().month();
+                    state.day = datetime.date().day();
+                    state.hour = datetime.time().hour();
+                    state.minute = datetime.time().minute();
+                    state.second = datetime.time().second();
+                }
+            }
+        }
+
+        state
+    }
+
+    fn set_now(&mut self) {
+        let now = Local::now().naive_local();
+        self.year = now.year();
+        self.month = now.month();
+        self.day = now.day();
+        self.hour = now.hour();
+        self.minute = now.minute();
+        self.second = now.second();
+    }
+
+    fn format_value(&self) -> String {
+        match self.kind {
+            TemporalKind::Date => format!("{:04}-{:02}-{:02}", self.year, self.month, self.day),
+            TemporalKind::Time => format!("{:02}:{:02}:{:02}", self.hour, self.minute, self.second),
+            TemporalKind::DateTime => format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                self.year, self.month, self.day, self.hour, self.minute, self.second
+            ),
+        }
+    }
+}
+
 fn sql_literal(value: &str) -> String {
     if value == "NULL" {
         "NULL".to_string()
@@ -1322,13 +1793,97 @@ fn sql_literal(value: &str) -> String {
     }
 }
 
+fn parse_date_value(value: &str) -> Option<NaiveDate> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .ok()
+        .or_else(|| parse_datetime_value(trimmed).map(|value| value.date()))
+}
+
+fn parse_time_value(value: &str) -> Option<NaiveTime> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    for format in ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"] {
+        if let Ok(time) = NaiveTime::parse_from_str(trimmed, format) {
+            return Some(time);
+        }
+    }
+    parse_datetime_value(trimmed).map(|value| value.time())
+}
+
+fn parse_datetime_value(value: &str) -> Option<NaiveDateTime> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(datetime.naive_local());
+    }
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
+        if let Ok(datetime) = NaiveDateTime::parse_from_str(trimmed, format) {
+            return Some(datetime);
+        }
+    }
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let month = month.clamp(1, 12);
+    let Some(first_of_next_month) = (if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }) else {
+        return 31;
+    };
+    first_of_next_month
+        .pred_opt()
+        .map(|date| date.day())
+        .unwrap_or(31)
+}
+
 fn estimate_column_widths(columns: &[TableColumn], result: &QueryResult) -> Vec<f32> {
-    columns
-        .iter()
-        .enumerate()
-        .map(|(column_index, column)| {
-            let mut estimated = estimate_text_width(&column.name)
-                .max(estimate_text_width(&column.database_type))
+    let display_count = if result.columns.is_empty() {
+        columns.len()
+    } else {
+        result.columns.len()
+    };
+
+    (0..display_count)
+        .map(|column_index| {
+            let column_name = result
+                .columns
+                .get(column_index)
+                .map(|column| column.name.as_str())
+                .or_else(|| columns.get(column_index).map(|column| column.name.as_str()))
+                .unwrap_or("");
+            let database_type = columns
+                .iter()
+                .find(|column| column.name == column_name)
+                .or_else(|| columns.get(column_index))
+                .map(|column| column.database_type.as_str())
+                .or_else(|| {
+                    result
+                        .columns
+                        .get(column_index)
+                        .map(|column| column.database_type.as_str())
+                })
+                .unwrap_or("");
+            let mut estimated = estimate_text_width(column_name)
+                .max(estimate_text_width(database_type))
                 .max(MIN_COLUMN_WIDTH);
 
             for row in result.rows.iter().take(200) {
@@ -1342,8 +1897,10 @@ fn estimate_column_widths(columns: &[TableColumn], result: &QueryResult) -> Vec<
         .collect()
 }
 
-fn table_cell_fill(ui: &Ui, row: usize, deleted: bool) -> Color32 {
-    if deleted {
+fn table_cell_fill(ui: &Ui, row: usize, deleted: bool, selected: bool) -> Color32 {
+    if selected {
+        row_fill(ui, row, true)
+    } else if deleted {
         if ui.visuals().dark_mode {
             Color32::from_rgb(42, 30, 30)
         } else {
@@ -1357,7 +1914,7 @@ fn table_cell_fill(ui: &Ui, row: usize, deleted: bool) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use db_common::{dialect::BacktickDialect, QueryResult};
+    use db_common::{dialect::BacktickDialect, Column, QueryResult};
 
     #[test]
     fn builds_update_and_delete_by_primary_key() {
@@ -1403,6 +1960,81 @@ mod tests {
         assert_eq!(summary.updates.len(), 1);
         assert_eq!(summary.deletes.len(), 1);
         assert_eq!(summary.total_changes(), 3);
+    }
+
+    #[test]
+    fn aligns_result_columns_with_row_values_when_metadata_order_differs() {
+        let columns = vec![
+            TableColumn {
+                name: "id".to_string(),
+                database_type: "BIGINT".to_string(),
+                nullable: false,
+                default_value: None,
+                primary_key: true,
+                comment: None,
+            },
+            TableColumn {
+                name: "name".to_string(),
+                database_type: "VARCHAR".to_string(),
+                nullable: true,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            },
+        ];
+        let result = QueryResult {
+            statement: "select name, id from customers".to_string(),
+            columns: vec![
+                Column {
+                    name: "name".to_string(),
+                    database_type: "VARCHAR".to_string(),
+                    logical_type: LogicalType::Text,
+                    nullable: true,
+                    primary_key: false,
+                },
+                Column {
+                    name: "id".to_string(),
+                    database_type: "BIGINT".to_string(),
+                    logical_type: LogicalType::Int,
+                    nullable: false,
+                    primary_key: true,
+                },
+            ],
+            rows: vec![Row::new(vec![
+                CellValue::Text("Alice".to_string()),
+                CellValue::Int(1),
+            ])],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            notices: Vec::new(),
+            metadata: Default::default(),
+        };
+        let mut editor = TableEditor::new(
+            "main",
+            "customers",
+            columns,
+            result,
+            Box::new(BacktickDialect),
+        );
+
+        assert_eq!(editor.display_column_name(0), "name");
+        assert_eq!(editor.display_column_name(1), "id");
+        assert_eq!(editor.primary_key_display_indices(), vec![1]);
+
+        editor
+            .edits
+            .insert(CellKey { row: 0, column: 0 }, "Bob".to_string());
+        editor.deleted_rows.insert(0, editor.result.rows[0].clone());
+
+        let sql = editor.build_commit_sql().unwrap();
+        assert!(sql.contains("UPDATE `main`.`customers` SET `name` = 'Bob' WHERE `id` = '1';"));
+        assert!(sql.contains("DELETE FROM `main`.`customers` WHERE `id` = '1';"));
+
+        let summary = editor.build_change_summary();
+        assert_eq!(
+            summary.deletes[0].1,
+            vec![("id".to_string(), "1".to_string())]
+        );
     }
 
     fn test_editor(primary_key: bool) -> TableEditor {

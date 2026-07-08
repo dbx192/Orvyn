@@ -152,7 +152,7 @@ pub fn paint_cell_outline(ui: &Ui, rect: Rect, stroke: Stroke) {
     ui.painter().rect_stroke(rect.shrink(0.5), 0.0, stroke);
 }
 
-fn paint_cell_frame(ui: &Ui, rect: Rect, fill: Color32, stroke: Stroke) {
+pub fn paint_cell_frame(ui: &Ui, rect: Rect, fill: Color32, stroke: Stroke) {
     ui.painter().rect_filled(rect, 0.0, fill);
     ui.painter().rect_stroke(rect.shrink(0.5), 0.0, stroke);
 }

@@ -86,6 +86,7 @@ struct TableStructurePayload {
 
 struct TableExportRequest {
     connection_id: ConnectionId,
+    database: Option<String>,
     schema: Option<String>,
     table: String,
     format: ExportFormat,
@@ -666,13 +667,17 @@ impl DesktopApp {
                     schema,
                     table,
                 } => {
-                    self.state.set_status(format!(
-                        "Loading table {}.{} for export ...",
-                        schema.as_deref().unwrap_or(""),
-                        table
-                    ));
-                    self.spawn_table_data_load(connection_id, database, schema, table);
-                    self.active_panel = ActivePanel::TableEditor;
+                    let table_name =
+                        qualified_table_label(schema.as_deref().or(database.as_deref()), &table);
+                    self.export_request = Some(TableExportRequest {
+                        connection_id,
+                        database,
+                        schema,
+                        table,
+                        format: ExportFormat::Csv,
+                    });
+                    self.state
+                        .set_status(format!("Export table: {}", table_name));
                 }
                 ObjectTreeAction::EditConnection(id) => {
                     self.connection_manager_ui.edit_connection(id);
@@ -1056,10 +1061,19 @@ impl DesktopApp {
         };
 
         let mut open = true;
-        let table_name = match request.schema.as_deref().filter(|value| !value.is_empty()) {
-            Some(schema) => format!("{}.{}", schema, request.table),
-            None => request.table.clone(),
-        };
+        let table_name = qualified_table_label(
+            request
+                .schema
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    request
+                        .database
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                }),
+            &request.table,
+        );
         let table_file_name = request.table.clone();
         let mut submit_export = None;
         let mut cancel_export = false;
@@ -1146,16 +1160,28 @@ impl DesktopApp {
         self.pending_table_export = Some(cell.clone());
 
         runtime.spawn(async move {
-            let dialect: Box<dyn Dialect> =
-                match connection_manager.get_profile(request.connection_id).await {
-                    Ok(Some(profile)) => match profile.kind {
-                        DataSourceKind::MySql => Box::new(BacktickDialect),
-                        _ => Box::new(DoubleQuoteDialect),
-                    },
-                    _ => Box::new(DoubleQuoteDialect),
-                };
+            let profile_kind = connection_manager
+                .get_profile(request.connection_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|profile| profile.kind);
+            let dialect: Box<dyn Dialect> = match profile_kind {
+                Some(DataSourceKind::MySql) => Box::new(BacktickDialect),
+                _ => Box::new(DoubleQuoteDialect),
+            };
 
-            let qualified = match request.schema.as_deref().filter(|value| !value.is_empty()) {
+            let qualifier = request
+                .schema
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    matches!(profile_kind, Some(DataSourceKind::MySql))
+                        .then_some(request.database.as_deref())
+                        .flatten()
+                        .filter(|value| !value.is_empty())
+                });
+            let qualified = match qualifier {
                 Some(schema) => format!(
                     "{}.{}",
                     dialect.quote_identifier(&db_common::Identifier::new(schema).unwrap()),
@@ -1190,11 +1216,7 @@ impl DesktopApp {
                         .unwrap_or_else(|| QueryResult::empty(""));
                     let path_for_write = path.clone();
                     let format = request.format;
-                    let table_name =
-                        match request.schema.as_deref().filter(|value| !value.is_empty()) {
-                            Some(schema) => format!("{}.{}", schema, request.table),
-                            None => request.table.clone(),
-                        };
+                    let table_name = qualified_table_label(qualifier, &request.table);
                     let write_result = tokio::task::spawn_blocking(move || {
                         export_query_result_to_file(&result, format, &path_for_write).map(|_| {
                             TableExportPayload {
@@ -1398,4 +1420,11 @@ fn compact_status_text(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     text.push_str("...");
     text
+}
+
+fn qualified_table_label(qualifier: Option<&str>, table: &str) -> String {
+    match qualifier.filter(|value| !value.is_empty()) {
+        Some(qualifier) => format!("{qualifier}.{table}"),
+        None => table.to_string(),
+    }
 }
