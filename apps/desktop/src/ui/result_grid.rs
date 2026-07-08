@@ -5,24 +5,23 @@ use crate::ui::format::{
     hover_cell_value,
 };
 use crate::ui::grid::{
-    estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_outline,
-    resizable_header_cell, row_fill,
+    estimate_text_width, grid_stroke, label_cell, paint_cell_outline, resizable_header_cell,
+    row_fill,
 };
 use db_common::{CellValue, Column, QueryResult};
 use eframe::egui::{
-    Button, Color32, DragValue, Frame, Margin, RichText, ScrollArea, Sense, Stroke, Ui,
+    vec2, Button, Color32, DragValue, Frame, Margin, RichText, ScrollArea, Sense, Stroke, Ui,
 };
 use import_export::{export_query_result, export_query_result_to_file, ExportFormat};
 use std::cmp::Ordering;
 use tokio::runtime::Handle;
 
 const DEFAULT_PAGE_SIZE: usize = 100;
-const MIN_COLUMN_WIDTH: f32 = 72.0;
+const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
-const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
-const ROW_HEIGHT: f32 = 26.0;
-const HEADER_HEIGHT: f32 = 32.0;
-const ROW_NUMBER_WIDTH: f32 = 64.0;
+const INITIAL_MAX_COLUMN_WIDTH: f32 = 320.0;
+const ROW_HEIGHT: f32 = 20.0;
+const HEADER_HEIGHT: f32 = 22.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -118,7 +117,6 @@ impl ResultSetGrid {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         self.header(ui);
-                        ui.separator();
                         ScrollArea::vertical()
                             .id_source("result_set_vertical")
                             .max_height(ui.available_height().max(240.0))
@@ -300,15 +298,7 @@ impl ResultSetGrid {
 
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            label_cell(
-                ui,
-                ROW_NUMBER_WIDTH,
-                HEADER_HEIGHT,
-                RichText::new("#").strong(),
-                Sense::hover(),
-                header_fill(ui),
-                grid_stroke(ui),
-            );
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
             for column_index in 0..self.result.columns.len() {
                 let column = self.result.columns[column_index].clone();
@@ -354,33 +344,7 @@ impl ResultSetGrid {
 
     fn row(&mut self, ui: &mut Ui, row_index: usize, visible_row_index: usize) {
         ui.horizontal(|ui| {
-            let row_selected = self
-                .selected
-                .map(|selected| selected.row == row_index)
-                .unwrap_or(false);
-            let row_number = self.page_start() + visible_row_index + 1;
-
-            let row_cell = label_cell(
-                ui,
-                ROW_NUMBER_WIDTH,
-                ROW_HEIGHT,
-                RichText::new(format!("{row_number}"))
-                    .monospace()
-                    .color(if row_selected {
-                        Color32::WHITE
-                    } else {
-                        Color32::GRAY
-                    }),
-                Sense::click(),
-                row_fill(ui, visible_row_index, row_selected),
-                grid_stroke(ui),
-            );
-            if row_cell.response.clicked() {
-                self.selected = Some(SelectedCell {
-                    row: row_index,
-                    column: 0,
-                });
-            }
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
             for column_index in 0..self.result.columns.len() {
                 let width = self.column_widths[column_index];

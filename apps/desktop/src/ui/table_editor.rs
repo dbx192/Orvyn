@@ -4,8 +4,8 @@
 
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
 use crate::ui::grid::{
-    estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_frame,
-    paint_cell_outline, resizable_header_cell, row_fill, text_edit_cell, GridCellResponse,
+    estimate_text_width, grid_stroke, label_cell, paint_cell_frame, paint_cell_outline,
+    resizable_header_cell, row_fill, text_edit_cell, GridCellResponse,
 };
 use app_core::{metadata::MetadataService, query::QueryService};
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
@@ -14,8 +14,8 @@ use db_common::{
     QueryExecutionRequest, QueryId, QueryResult, Result, Row, TableColumn,
 };
 use eframe::egui::{
-    vec2, Align, Button, Color32, DragValue, Frame, Key, Layout, Margin, Modifiers, Rect, RichText,
-    ScrollArea, Sense, Stroke, TextEdit, TextStyle, Ui, Window,
+    vec2, Align, Button, Color32, DragValue, Frame, Key, Layout, Margin, Modifiers, Rect, Response,
+    RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Window,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -28,9 +28,8 @@ const DEFAULT_PAGE_SIZE: usize = 100;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
-const ROW_HEIGHT: f32 = 24.0;
-const HEADER_HEIGHT: f32 = 26.0;
-const ROW_HANDLE_WIDTH: f32 = 38.0;
+const ROW_HEIGHT: f32 = 20.0;
+const HEADER_HEIGHT: f32 = 22.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -239,7 +238,6 @@ impl TableEditor {
         }
 
         self.toolbar(ui, &mut message);
-        ui.add_space(4.0);
         self.handle_row_shortcuts(ui, &mut message);
 
         if !self.has_primary_key() && !self.allow_risk_without_pk {
@@ -247,7 +245,6 @@ impl TableEditor {
                 ui.visuals().warn_fg_color,
                 "No primary key detected. Existing rows are read-only until risk mode is enabled.",
             );
-            ui.add_space(4.0);
         }
 
         let grid_height = (ui.available_height() - 34.0).max(240.0);
@@ -261,7 +258,6 @@ impl TableEditor {
                     .id_source("table_editor_horizontal")
                     .show(ui, |ui| {
                         self.header(ui);
-                        ui.separator();
                         ScrollArea::vertical()
                             .id_source("table_editor_vertical")
                             .max_height(grid_height)
@@ -589,6 +585,10 @@ impl TableEditor {
             }
             RowKey::New(row_index) => row_index < self.new_rows.len(),
         }
+    }
+
+    fn row_is_deleted(&self, row: RowKey) -> bool {
+        matches!(row, RowKey::Existing(index) if self.deleted_rows.contains_key(&index))
     }
 
     fn remove_or_restore_rows(&mut self, rows: Vec<RowKey>, message: &mut Option<String>) {
@@ -1127,15 +1127,7 @@ impl TableEditor {
 
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            label_cell(
-                ui,
-                ROW_HANDLE_WIDTH,
-                HEADER_HEIGHT,
-                RichText::new("#").strong(),
-                Sense::hover(),
-                header_fill(ui),
-                grid_stroke(ui),
-            );
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
             for column_index in 0..self.display_column_count() {
                 let column_name = self.display_column_name(column_index);
@@ -1171,6 +1163,8 @@ impl TableEditor {
             });
 
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+
             if is_error_row {
                 ui.painter().rect_stroke(
                     ui.available_rect_before_wrap(),
@@ -1179,59 +1173,48 @@ impl TableEditor {
                 );
             }
 
-            let row_label = self.row_label(row_key);
-            let row_cell = label_cell(
-                ui,
-                ROW_HANDLE_WIDTH,
-                ROW_HEIGHT,
-                RichText::new(row_label)
-                    .monospace()
-                    .small()
-                    .color(if row_selected {
-                        Color32::WHITE
-                    } else {
-                        Color32::GRAY
-                    }),
-                Sense::click(),
-                table_cell_fill(ui, visible_index, deleted, row_selected),
-                grid_stroke(ui),
-            );
-            if row_cell.response.clicked() {
-                let modifiers = ui.input(|input| input.modifiers);
-                self.select_row(row_key, visible_rows, modifiers);
-            }
             let mut append_requested = false;
             let mut remove_requested = false;
             let mut clear_selection_requested = false;
-            row_cell.response.context_menu(|ui| {
-                if ui.button("Insert Row").clicked() {
-                    append_requested = true;
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(
-                        self.can_remove_or_restore_row(row_key),
-                        Button::new(if deleted { "Undo Delete" } else { "Delete Row" }),
-                    )
-                    .clicked()
-                {
-                    if !self.selected_rows.contains(&row_key) {
-                        self.selected_rows.clear();
-                        self.selected_rows.insert(row_key);
-                        self.selected_row = Some(row_key);
-                    }
-                    remove_requested = true;
-                    ui.close_menu();
-                }
-                if self.selected_rows.len() > 1 && ui.button("Delete Selected Rows").clicked() {
-                    remove_requested = true;
-                    ui.close_menu();
-                }
-                if ui.button("Clear Selection").clicked() {
-                    clear_selection_requested = true;
-                    ui.close_menu();
-                }
-            });
+
+            for column_index in 0..self.display_column_count() {
+                let width = self.column_widths[column_index];
+                let editable = match row_key {
+                    RowKey::Existing(_) => self.can_edit_existing_rows() && !deleted,
+                    RowKey::New(_) => true,
+                };
+
+                let cell = match row_key {
+                    RowKey::Existing(row_index) => self.existing_cell(
+                        ui,
+                        row_index,
+                        column_index,
+                        width,
+                        editable,
+                        deleted,
+                        row_selected,
+                        visible_index,
+                    ),
+                    RowKey::New(row_index) => self.new_cell(
+                        ui,
+                        row_index,
+                        column_index,
+                        width,
+                        row_selected,
+                        visible_index,
+                    ),
+                };
+                self.handle_row_cell_response(
+                    ui,
+                    &cell.response,
+                    row_key,
+                    visible_rows,
+                    &mut append_requested,
+                    &mut remove_requested,
+                    &mut clear_selection_requested,
+                );
+            }
+
             if append_requested {
                 let mut ignored = None;
                 self.append_row(&mut ignored);
@@ -1245,38 +1228,56 @@ impl TableEditor {
                 self.selected_row = None;
                 self.selected_rows.clear();
             }
+        });
+    }
 
-            for column_index in 0..self.display_column_count() {
-                let width = self.column_widths[column_index];
-                let editable = match row_key {
-                    RowKey::Existing(_) => self.can_edit_existing_rows() && !deleted,
-                    RowKey::New(_) => true,
-                };
+    fn handle_row_cell_response(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        row_key: RowKey,
+        visible_rows: &[RowKey],
+        append_requested: &mut bool,
+        remove_requested: &mut bool,
+        clear_selection_requested: &mut bool,
+    ) {
+        if response.clicked() {
+            let modifiers = ui.input(|input| input.modifiers);
+            self.select_row(row_key, visible_rows, modifiers);
+        }
 
-                match row_key {
-                    RowKey::Existing(row_index) => {
-                        self.existing_cell(
-                            ui,
-                            row_index,
-                            column_index,
-                            width,
-                            editable,
-                            deleted,
-                            row_selected,
-                            visible_index,
-                        );
-                    }
-                    RowKey::New(row_index) => {
-                        self.new_cell(
-                            ui,
-                            row_index,
-                            column_index,
-                            width,
-                            row_selected,
-                            visible_index,
-                        );
-                    }
-                }
+        response.context_menu(|ui| {
+            if !self.selected_rows.contains(&row_key) {
+                self.selected_rows.clear();
+                self.selected_rows.insert(row_key);
+                self.selected_row = Some(row_key);
+            }
+
+            if ui.button("Insert Row").clicked() {
+                *append_requested = true;
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(
+                    self.can_remove_or_restore_row(row_key),
+                    Button::new(if self.row_is_deleted(row_key) {
+                        "Undo Delete"
+                    } else {
+                        "Delete Row"
+                    }),
+                )
+                .clicked()
+            {
+                *remove_requested = true;
+                ui.close_menu();
+            }
+            if self.selected_rows.len() > 1 && ui.button("Delete Selected Rows").clicked() {
+                *remove_requested = true;
+                ui.close_menu();
+            }
+            if ui.button("Clear Selection").clicked() {
+                *clear_selection_requested = true;
+                ui.close_menu();
             }
         });
     }
@@ -1291,7 +1292,7 @@ impl TableEditor {
         deleted: bool,
         row_selected: bool,
         visible_index: usize,
-    ) {
+    ) -> GridCellResponse {
         let key = CellKey {
             row: row_index,
             column: column_index,
@@ -1339,6 +1340,7 @@ impl TableEditor {
             if self.edits.contains_key(&key) {
                 paint_cell_outline(ui, cell.rect, Stroke::new(1.0, Color32::YELLOW));
             }
+            cell
         } else {
             let mut rich = cell_rich_text(original, display_cell_value(original));
             if deleted {
@@ -1349,11 +1351,14 @@ impl TableEditor {
                 width,
                 ROW_HEIGHT,
                 rich,
-                Sense::hover(),
+                Sense::click(),
                 table_cell_fill(ui, visible_index, deleted, row_selected),
                 grid_stroke(ui),
             );
-            cell.response.on_hover_text(copy_cell_value(original));
+            GridCellResponse {
+                response: cell.response.on_hover_text(copy_cell_value(original)),
+                rect: cell.rect,
+            }
         }
     }
 
@@ -1365,15 +1370,13 @@ impl TableEditor {
         width: f32,
         row_selected: bool,
         visible_index: usize,
-    ) {
-        let Some(current_value) = self
+    ) -> GridCellResponse {
+        let current_value = self
             .new_rows
             .get(row_index)
             .and_then(|row| row.values.get(column_index))
             .cloned()
-        else {
-            return;
-        };
+            .unwrap_or_default();
 
         let mut value = current_value.clone();
         let cell = if self.temporal_kind_for_column(column_index).is_some() {
@@ -1403,6 +1406,8 @@ impl TableEditor {
                 }
             }
         }
+
+        cell
     }
 
     fn temporal_edit_cell(
@@ -1418,28 +1423,22 @@ impl TableEditor {
             ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
         paint_cell_frame(ui, rect, fill, grid_stroke(ui));
 
-        let button_width = 22.0;
-        let edit_height = (ui.text_style_height(&TextStyle::Body) + 6.0)
-            .min(ROW_HEIGHT)
-            .max(18.0);
+        let button_width = 20.0;
         let edit_rect = Rect::from_min_max(
-            rect.left_center() + vec2(crate::ui::grid::CELL_PADDING_X, -edit_height * 0.5),
-            rect.right_center()
-                + vec2(
-                    -(button_width + 2.0 + crate::ui::grid::CELL_PADDING_X),
-                    edit_height * 0.5,
-                ),
+            rect.left_top() + vec2(crate::ui::grid::CELL_PADDING_X, 0.0),
+            rect.right_bottom()
+                + vec2(-(button_width + 1.0 + crate::ui::grid::CELL_PADDING_X), 0.0),
         );
         let button_rect = Rect::from_min_max(
-            rect.right_top() + vec2(-(button_width + 2.0), 3.0),
-            rect.right_bottom() + vec2(-2.0, -3.0),
+            rect.right_top() + vec2(-(button_width + 1.0), 1.0),
+            rect.right_bottom() + vec2(-1.0, -1.0),
         );
 
         let mut edit_ui = ui.child_ui(edit_rect, Layout::left_to_right(Align::Center));
         edit_ui.set_clip_rect(edit_rect);
         edit_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         let edit_response = edit_ui.add_sized(
-            [edit_rect.width(), (ROW_HEIGHT - 4.0).max(18.0)],
+            [edit_rect.width(), ROW_HEIGHT],
             TextEdit::singleline(value)
                 .desired_width(edit_rect.width())
                 .frame(false),

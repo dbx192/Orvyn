@@ -103,6 +103,12 @@ struct ReconnectState {
 }
 
 /// Action surfaced to the parent app when a node is activated from the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseExportMode {
+    Structure,
+    StructureAndData,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectTreeAction {
     OpenTableData {
@@ -145,6 +151,13 @@ pub enum ObjectTreeAction {
         database: Option<String>,
         schema: Option<String>,
         table: String,
+    },
+    ExportDatabase {
+        connection_id: ConnectionId,
+        mode: DatabaseExportMode,
+    },
+    ImportTable {
+        connection_id: ConnectionId,
     },
     EditConnection(ConnectionId),
     DeleteConnection(ConnectionId),
@@ -263,11 +276,6 @@ impl ObjectTree {
     }
 
     fn search_bar(&mut self, ui: &mut Ui) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("对象").strong().size(13.0));
-        });
-        ui.add_space(4.0);
         ui.horizontal(|ui| {
             let clear_width = 26.0;
             let edit_width = (ui.available_width() - clear_width).max(80.0);
@@ -285,9 +293,7 @@ impl ObjectTree {
                 self.search_query.clear();
             }
         });
-        ui.add_space(6.0);
         ui.separator();
-        ui.add_space(2.0);
     }
 
     fn tree_ui(
@@ -613,6 +619,33 @@ impl ObjectTree {
                 }
             }
         }
+
+        ui.separator();
+        ui.add_enabled_ui(!matches!(status, ConnectionStatus::Connecting), |ui| {
+            if ui.button("Import Table...").clicked() {
+                actions.push(ObjectTreeAction::ImportTable { connection_id });
+                *message = Some("Opening table import".to_string());
+                ui.close_menu();
+            }
+            ui.menu_button("Export Database", |ui| {
+                if ui.button("Structure Only...").clicked() {
+                    actions.push(ObjectTreeAction::ExportDatabase {
+                        connection_id,
+                        mode: DatabaseExportMode::Structure,
+                    });
+                    *message = Some("Export database structure".to_string());
+                    ui.close_menu();
+                }
+                if ui.button("Structure and Data...").clicked() {
+                    actions.push(ObjectTreeAction::ExportDatabase {
+                        connection_id,
+                        mode: DatabaseExportMode::StructureAndData,
+                    });
+                    *message = Some("Export database structure and data".to_string());
+                    ui.close_menu();
+                }
+            });
+        });
 
         ui.separator();
         if ui.button("Refresh").clicked() {

@@ -17,7 +17,7 @@ pub struct GridHeaderResponse {
 }
 
 pub fn estimate_text_width(text: &str) -> f32 {
-    (display_width_units(text) * TEXT_UNIT_WIDTH + 6.0).ceil()
+    (display_width_units(text) * TEXT_UNIT_WIDTH + 2.0).ceil()
 }
 
 pub fn grid_stroke(ui: &Ui) -> Stroke {
@@ -83,25 +83,16 @@ pub fn text_edit_cell(
         ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     paint_cell_frame(ui, rect, fill, stroke);
 
-    let edit_height = (ui.text_style_height(&TextStyle::Body) + 6.0)
-        .min(height)
-        .max(18.0);
     let inner_rect = Rect::from_min_max(
-        pos2(
-            rect.left() + CELL_PADDING_X,
-            rect.center().y - edit_height * 0.5,
-        ),
-        pos2(
-            rect.right() - CELL_PADDING_X,
-            rect.center().y + edit_height * 0.5,
-        ),
+        pos2(rect.left() + CELL_PADDING_X, rect.top()),
+        pos2(rect.right() - CELL_PADDING_X, rect.bottom()),
     );
     let mut child_ui = ui.child_ui(inner_rect, Layout::left_to_right(Align::Center));
     child_ui.set_clip_rect(inner_rect);
     child_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
     let edit_response = child_ui.add_sized(
-        [inner_rect.width(), (height - 4.0).max(18.0)],
+        [inner_rect.width(), height],
         TextEdit::singleline(value)
             .desired_width(inner_rect.width())
             .frame(false),

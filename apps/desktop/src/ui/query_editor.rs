@@ -735,7 +735,6 @@ impl QueryEditor {
                 ui.label(RichText::new(notice).small().color(Color32::LIGHT_BLUE));
             }
 
-            ui.add_space(6.0);
             match &mut result.grid {
                 Some(grid) => {
                     let _ = grid.ui(ui);

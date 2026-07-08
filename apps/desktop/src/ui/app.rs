@@ -3,7 +3,7 @@
 use crate::ui::{
     connection_manager::{ConnectionChange, ConnectionManagerUi},
     import_wizard::ImportWizard,
-    object_tree::{ObjectTree, ObjectTreeAction},
+    object_tree::{DatabaseExportMode, ObjectTree, ObjectTreeAction},
     query_editor::QueryEditor,
     redis_browser::RedisBrowserUi,
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
@@ -15,18 +15,22 @@ use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
     redis_service::RedisService, session::SessionManager,
 };
-use db_common::DatabaseFunction;
 use db_common::{
     dialect::{BacktickDialect, DoubleQuoteDialect},
-    AppError, ConnectionId, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest,
-    QueryId, QueryResult, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+    AppError, CellValue, ConnectionId, DataSourceKind, DatabaseFunction, Dialect, Identifier,
+    QueryExecutionMode, QueryExecutionRequest, QueryId, QueryResult, TableColumn, TableForeignKey,
+    TableIndex, TableTrigger,
 };
 use eframe::egui::{
     vec2, Align, Button, CentralPanel, Color32, Context, Frame, Key, Layout, Margin, Modifiers,
-    RichText, Rounding, SidePanel, Stroke, TopBottomPanel, Ui, Visuals, Window,
+    RichText, Rounding, SidePanel, Stroke, TextEdit, TopBottomPanel, Ui, Visuals, Window,
 };
 use import_export::{export_query_result_to_file, ExportFormat};
-use std::sync::{Arc, Mutex};
+use std::{
+    fmt::Write as _,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tokio::runtime::Handle;
 
 pub struct DesktopApp {
@@ -50,7 +54,10 @@ pub struct DesktopApp {
     /// Pending async export query load and file write.
     pending_table_export:
         Option<Arc<Mutex<Option<Result<TableExportPayload, db_common::AppError>>>>>,
+    pending_database_export:
+        Option<Arc<Mutex<Option<Result<DatabaseExportPayload, db_common::AppError>>>>>,
     export_request: Option<TableExportRequest>,
+    import_table_request: Option<ImportTableRequest>,
     // Cloned service handles for spawning async loads.
     connection_manager: ConnectionManager,
     metadata_service: MetadataService,
@@ -94,8 +101,28 @@ struct TableExportRequest {
 
 struct TableExportPayload {
     table_name: String,
-    path: std::path::PathBuf,
+    path: PathBuf,
     format: ExportFormat,
+}
+
+struct DatabaseExportPayload {
+    path: PathBuf,
+    mode: DatabaseExportMode,
+    table_count: usize,
+    row_count: usize,
+}
+
+struct ImportTableRequest {
+    connection_id: ConnectionId,
+    database: String,
+    schema: String,
+    table: String,
+}
+
+struct DatabaseExportTarget {
+    database: Option<String>,
+    schema: Option<String>,
+    table: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +176,9 @@ impl DesktopApp {
             pending_table_load: None,
             pending_structure_load: None,
             pending_table_export: None,
+            pending_database_export: None,
             export_request: None,
+            import_table_request: None,
             connection_manager: cm,
             metadata_service: ms,
             query_service: qs,
@@ -320,6 +349,7 @@ impl eframe::App for DesktopApp {
         self.central_panel(ctx);
         self.connection_windows(ctx);
         self.table_export_window(ctx);
+        self.import_table_window(ctx);
         self.bottom_status(ctx);
         self.error_window(ctx);
     }
@@ -375,7 +405,7 @@ impl DesktopApp {
             .frame(
                 Frame::default()
                     .fill(ctx.style().visuals.panel_fill)
-                    .inner_margin(Margin::symmetric(6.0, 4.0)),
+                    .inner_margin(Margin::same(0.0)),
             )
             .show(ctx, |ui| {
             if matches!(self.active_panel, ActivePanel::RedisBrowser) && self.redis_browser.is_none()
@@ -705,6 +735,21 @@ impl DesktopApp {
                     self.state
                         .set_status(format!("Export table: {}", table_name));
                 }
+                ObjectTreeAction::ExportDatabase {
+                    connection_id,
+                    mode,
+                } => {
+                    self.request_database_export(connection_id, mode);
+                }
+                ObjectTreeAction::ImportTable { connection_id } => {
+                    self.import_table_request = Some(ImportTableRequest {
+                        connection_id,
+                        database: String::new(),
+                        schema: String::new(),
+                        table: String::new(),
+                    });
+                    self.state.set_status("Choose import target table");
+                }
                 ObjectTreeAction::EditConnection(id) => {
                     self.connection_manager_ui.edit_connection(id);
                     self.state.set_status(format!("Edit connection: {}", id));
@@ -909,6 +954,35 @@ impl DesktopApp {
                 self.pending_table_export = Some(cell);
             }
         }
+
+        let database_export_cell = self.pending_database_export.take();
+        if let Some(cell) = database_export_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            let mode_label = database_export_mode_label(payload.mode);
+                            self.state.set_status(format!(
+                                "{} export completed: {} table(s), {} row(s) -> {}",
+                                mode_label,
+                                payload.table_count,
+                                payload.row_count,
+                                payload.path.display()
+                            ));
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Database export failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_database_export = Some(cell);
+            }
+        }
     }
 
     /// Spawn an async task to load table data (columns + paginated SELECT).
@@ -1088,6 +1162,99 @@ impl DesktopApp {
 
             *cell.lock().unwrap() = Some(result);
         });
+    }
+
+    fn import_table_window(&mut self, ctx: &Context) {
+        let Some(request) = self.import_table_request.as_mut() else {
+            return;
+        };
+
+        let mut open = true;
+        let mut start_import = false;
+        let mut cancel = false;
+
+        Window::new("Import Table")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Target table");
+                ui.add_space(6.0);
+                eframe::egui::Grid::new("connection_import_target_grid")
+                    .num_columns(2)
+                    .spacing(vec2(8.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label("Database");
+                        ui.add(TextEdit::singleline(&mut request.database).desired_width(220.0));
+                        ui.end_row();
+                        ui.label("Schema");
+                        ui.add(TextEdit::singleline(&mut request.schema).desired_width(220.0));
+                        ui.end_row();
+                        ui.label("Table");
+                        ui.add(TextEdit::singleline(&mut request.table).desired_width(220.0));
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Leave database/schema empty to use the connection default.")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui
+                        .add_enabled(!request.table.trim().is_empty(), Button::new("Continue"))
+                        .clicked()
+                    {
+                        start_import = true;
+                    }
+                });
+            });
+
+        if start_import {
+            if let Some(request) = self.import_table_request.take() {
+                let table = request.table.trim().to_string();
+                let wizard = ImportWizard::new(
+                    request.connection_id,
+                    trimmed_option(request.database),
+                    trimmed_option(request.schema),
+                    table,
+                    self.metadata_service.clone(),
+                    self.query_service.clone(),
+                    self.connection_manager.clone(),
+                    self.runtime.clone(),
+                );
+                let table_name = wizard.table_name();
+                self.import_wizard = Some(wizard);
+                self.active_panel = ActivePanel::ImportWizard;
+                self.state
+                    .set_status(format!("Import CSV to {}", table_name));
+            }
+        }
+
+        if cancel || !open {
+            self.import_table_request = None;
+        }
+    }
+
+    fn request_database_export(&mut self, connection_id: ConnectionId, mode: DatabaseExportMode) {
+        let mode_label = database_export_mode_label(mode);
+        let file_name = match mode {
+            DatabaseExportMode::Structure => "database_structure.sql",
+            DatabaseExportMode::StructureAndData => "database_structure_data.sql",
+        };
+        let path = rfd::FileDialog::new()
+            .set_title(mode_label)
+            .set_file_name(file_name)
+            .add_filter("SQL", &["sql"])
+            .save_file();
+
+        if let Some(path) = path {
+            self.spawn_database_export(connection_id, mode, path);
+        }
     }
 
     fn table_export_window(&mut self, ctx: &Context) {
@@ -1277,6 +1444,39 @@ impl DesktopApp {
         self.state.set_status("Table export started");
     }
 
+    fn spawn_database_export(
+        &mut self,
+        connection_id: ConnectionId,
+        mode: DatabaseExportMode,
+        path: PathBuf,
+    ) {
+        let metadata_service = self.metadata_service.clone();
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: Arc<Mutex<Option<Result<DatabaseExportPayload, AppError>>>> =
+            Arc::new(Mutex::new(None));
+        self.pending_database_export = Some(cell.clone());
+
+        runtime.spawn(async move {
+            let result = export_database_sql(
+                metadata_service,
+                query_service,
+                connection_manager,
+                connection_id,
+                mode,
+                path,
+            )
+            .await;
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status(format!(
+            "{} export started",
+            database_export_mode_label(mode)
+        ));
+    }
+
     fn bottom_status(&mut self, ctx: &Context) {
         TopBottomPanel::bottom("bottom_status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1403,6 +1603,335 @@ impl DesktopApp {
             self.error_window_open = false;
         }
     }
+}
+
+async fn export_database_sql(
+    metadata_service: MetadataService,
+    query_service: QueryService,
+    connection_manager: ConnectionManager,
+    connection_id: ConnectionId,
+    mode: DatabaseExportMode,
+    path: PathBuf,
+) -> Result<DatabaseExportPayload, AppError> {
+    let profile = connection_manager
+        .get_profile(connection_id)
+        .await?
+        .ok_or_else(|| AppError::validation("connection profile not found"))?;
+    if !profile.kind.is_relational() {
+        return Err(AppError::validation(
+            "database SQL export is only available for relational connections",
+        ));
+    }
+
+    let dialect = dialect_for_kind(profile.kind);
+    let targets = database_export_targets(&metadata_service, &profile, connection_id).await?;
+    let mut output = String::new();
+    let _ = writeln!(
+        &mut output,
+        "-- rust-db-client {} export\n-- connection: {}\n",
+        database_export_mode_label(mode),
+        profile.name
+    );
+
+    let mut row_count = 0usize;
+    let mut current_mysql_database: Option<String> = None;
+
+    for target in &targets {
+        if matches!(profile.kind, DataSourceKind::MySql)
+            && current_mysql_database.as_deref() != target.database.as_deref()
+        {
+            if let Some(database) = target.database.as_deref() {
+                let database_sql = quote_identifier(dialect.as_ref(), database)?;
+                let _ = writeln!(
+                    &mut output,
+                    "CREATE DATABASE IF NOT EXISTS {database_sql};\nUSE {database_sql};\n"
+                );
+                current_mysql_database = Some(database.to_string());
+            }
+        }
+
+        let qualified_table = qualified_table_sql(
+            dialect.as_ref(),
+            profile.kind,
+            target.database.as_deref(),
+            target.schema.as_deref(),
+            &target.table,
+        )?;
+        let label = qualified_table_label(
+            target
+                .schema
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or_else(|| target.database.as_deref().filter(|value| !value.is_empty())),
+            &target.table,
+        );
+        let _ = writeln!(&mut output, "-- table: {label}");
+
+        let ddl = metadata_service
+            .get_create_table_sql(
+                connection_id,
+                target.database.as_deref(),
+                target.schema.as_deref(),
+                &target.table,
+                None,
+            )
+            .await?;
+        let ddl = ddl.trim().trim_end_matches(';').trim();
+        if ddl.is_empty() {
+            let _ = writeln!(
+                &mut output,
+                "-- no CREATE TABLE SQL available for {label};\n"
+            );
+        } else {
+            let _ = writeln!(&mut output, "{ddl};\n");
+        }
+
+        if mode == DatabaseExportMode::StructureAndData {
+            let sql = format!("SELECT * FROM {qualified_table}");
+            let report = query_service
+                .execute(
+                    QueryExecutionRequest {
+                        tab_id: QueryId::new(),
+                        connection_id,
+                        sql,
+                        mode: QueryExecutionMode::All,
+                        cursor_offset: 0,
+                        selection: None,
+                        timeout_ms: 300_000,
+                    },
+                    None,
+                )
+                .await?;
+            let result = report
+                .results
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| QueryResult::empty(""));
+            row_count += append_insert_sql(
+                &mut output,
+                &qualified_table,
+                &result,
+                dialect.as_ref(),
+                profile.kind,
+            )?;
+        }
+
+        output.push('\n');
+    }
+
+    let path_for_write = path.clone();
+    tokio::fs::write(&path_for_write, output)
+        .await
+        .map_err(AppError::from)?;
+
+    Ok(DatabaseExportPayload {
+        path,
+        mode,
+        table_count: targets.len(),
+        row_count,
+    })
+}
+
+async fn database_export_targets(
+    metadata_service: &MetadataService,
+    profile: &db_common::ConnectionProfile,
+    connection_id: ConnectionId,
+) -> Result<Vec<DatabaseExportTarget>, AppError> {
+    let mut targets = Vec::new();
+
+    match profile.kind {
+        DataSourceKind::MySql => {
+            let databases = metadata_service.list_databases(connection_id, None).await?;
+            let database_names = if databases.is_empty() {
+                profile.database.clone().into_iter().collect::<Vec<_>>()
+            } else {
+                databases
+                    .into_iter()
+                    .map(|database| database.name)
+                    .collect()
+            };
+
+            for database in database_names {
+                let tables = metadata_service
+                    .list_tables(connection_id, Some(database.as_str()), None, None)
+                    .await?;
+                targets.extend(tables.into_iter().map(|table| DatabaseExportTarget {
+                    database: Some(database.clone()),
+                    schema: None,
+                    table: table.name,
+                }));
+            }
+        }
+        DataSourceKind::PostgreSql | DataSourceKind::Sqlite | DataSourceKind::DuckDb => {
+            let database = profile.database.clone();
+            let schemas = metadata_service
+                .list_schemas(connection_id, database.as_deref(), None)
+                .await?;
+
+            if schemas.is_empty() {
+                let tables = metadata_service
+                    .list_tables(connection_id, database.as_deref(), None, None)
+                    .await?;
+                targets.extend(tables.into_iter().map(|table| DatabaseExportTarget {
+                    database: database.clone(),
+                    schema: table.schema,
+                    table: table.name,
+                }));
+            } else {
+                for schema in schemas {
+                    let tables = metadata_service
+                        .list_tables(
+                            connection_id,
+                            database.as_deref(),
+                            Some(schema.name.as_str()),
+                            None,
+                        )
+                        .await?;
+                    targets.extend(tables.into_iter().map(|table| DatabaseExportTarget {
+                        database: database.clone(),
+                        schema: table.schema.or_else(|| Some(schema.name.clone())),
+                        table: table.name,
+                    }));
+                }
+            }
+        }
+        DataSourceKind::Redis => {}
+    }
+
+    Ok(targets)
+}
+
+fn append_insert_sql(
+    output: &mut String,
+    table_sql: &str,
+    result: &QueryResult,
+    dialect: &dyn Dialect,
+    kind: DataSourceKind,
+) -> Result<usize, AppError> {
+    if result.rows.is_empty() || result.columns.is_empty() {
+        return Ok(0);
+    }
+
+    let columns = result
+        .columns
+        .iter()
+        .map(|column| quote_identifier(dialect, &column.name))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+
+    for chunk in result.rows.chunks(200) {
+        let _ = writeln!(output, "INSERT INTO {table_sql} ({columns}) VALUES");
+        for (row_index, row) in chunk.iter().enumerate() {
+            let values = (0..result.columns.len())
+                .map(|index| {
+                    let value = row.values.get(index).unwrap_or(&CellValue::Null);
+                    sql_literal_for_cell(value, kind)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suffix = if row_index + 1 == chunk.len() {
+                ";"
+            } else {
+                ","
+            };
+            let _ = writeln!(output, "({values}){suffix}");
+        }
+        output.push('\n');
+    }
+
+    Ok(result.rows.len())
+}
+
+fn dialect_for_kind(kind: DataSourceKind) -> Box<dyn Dialect> {
+    match kind {
+        DataSourceKind::MySql => Box::new(BacktickDialect),
+        _ => Box::new(DoubleQuoteDialect),
+    }
+}
+
+fn qualified_table_sql(
+    dialect: &dyn Dialect,
+    kind: DataSourceKind,
+    database: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<String, AppError> {
+    let table_sql = quote_identifier(dialect, table)?;
+    let qualifier = match kind {
+        DataSourceKind::MySql => database.or(schema),
+        _ => schema,
+    };
+
+    match qualifier.filter(|value| !value.is_empty()) {
+        Some(qualifier) => Ok(format!(
+            "{}.{table_sql}",
+            quote_identifier(dialect, qualifier)?
+        )),
+        None => Ok(table_sql),
+    }
+}
+
+fn quote_identifier(dialect: &dyn Dialect, value: &str) -> Result<String, AppError> {
+    Ok(dialect.quote_identifier(&Identifier::new(value)?))
+}
+
+fn sql_literal_for_cell(value: &CellValue, kind: DataSourceKind) -> String {
+    match value {
+        CellValue::Null => "NULL".to_string(),
+        CellValue::Bool(value) => {
+            if *value {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        CellValue::Int(value) => value.to_string(),
+        CellValue::UInt(value) => value.to_string(),
+        CellValue::Float(value) => {
+            if value.is_finite() {
+                value.to_string()
+            } else {
+                sql_string_literal(&value.to_string())
+            }
+        }
+        CellValue::Decimal(value) => value.clone(),
+        CellValue::Text(value) => sql_string_literal(value),
+        CellValue::Bytes(value) => match kind {
+            DataSourceKind::PostgreSql => format!("'\\\\x{}'", hex_bytes(value)),
+            _ => format!("X'{}'", hex_bytes(value)),
+        },
+        CellValue::Date(value) => sql_string_literal(&value.format("%Y-%m-%d").to_string()),
+        CellValue::Time(value) => sql_string_literal(&value.format("%H:%M:%S%.3f").to_string()),
+        CellValue::DateTime(value) => {
+            sql_string_literal(&value.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
+        }
+        CellValue::Timestamp(value) => sql_string_literal(&value.to_rfc3339()),
+        CellValue::Json(value) => sql_string_literal(&value.to_string()),
+    }
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn hex_bytes(value: &[u8]) -> String {
+    let mut output = String::with_capacity(value.len() * 2);
+    for byte in value {
+        let _ = write!(&mut output, "{byte:02X}");
+    }
+    output
+}
+
+fn database_export_mode_label(mode: DatabaseExportMode) -> &'static str {
+    match mode {
+        DatabaseExportMode::Structure => "Database structure",
+        DatabaseExportMode::StructureAndData => "Database structure and data",
+    }
+}
+
+fn trimmed_option(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 fn task_status_label(status: TaskStatus) -> &'static str {

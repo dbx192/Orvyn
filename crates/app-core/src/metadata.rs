@@ -155,6 +155,23 @@ impl MetadataService {
             .await
     }
 
+    pub async fn list_tables(
+        &self,
+        connection_id: ConnectionId,
+        database: Option<&str>,
+        schema: Option<&str>,
+        runtime_password: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.relational_reader(profile.kind)?;
+        reader
+            .list_tables(&profile, password.as_deref(), database, schema)
+            .await
+    }
+
     pub async fn table_indexes(
         &self,
         connection_id: ConnectionId,
