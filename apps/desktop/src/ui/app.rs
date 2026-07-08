@@ -1,7 +1,7 @@
 #![allow(clippy::type_complexity)]
 
 use crate::ui::{
-    connection_manager::ConnectionManagerUi,
+    connection_manager::{ConnectionChange, ConnectionManagerUi},
     import_wizard::ImportWizard,
     object_tree::{ObjectTree, ObjectTreeAction},
     query_editor::QueryEditor,
@@ -15,18 +15,17 @@ use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
     redis_service::RedisService, session::SessionManager,
 };
-use import_export::{export_query_result_to_file, ExportFormat};
 use db_common::DatabaseFunction;
 use db_common::{
-    AppError,
     dialect::{BacktickDialect, DoubleQuoteDialect},
-    ConnectionId, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest, QueryId,
-    QueryResult, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+    AppError, ConnectionId, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest,
+    QueryId, QueryResult, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
 use eframe::egui::{
     Align, Button, CentralPanel, Color32, Context, Frame, Key, Layout, Modifiers, RichText,
     SidePanel, TopBottomPanel, Window,
 };
+use import_export::{export_query_result_to_file, ExportFormat};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
 
@@ -39,7 +38,7 @@ pub struct DesktopApp {
     table_editor: Option<TableEditor>,
     table_structure: Option<TableStructureView>,
     import_wizard: Option<ImportWizard>,
-    redis_browser: RedisBrowserUi,
+    redis_browser: Option<RedisBrowserUi>,
     last_tree_status: String,
     error_window_open: bool,
     active_panel: ActivePanel,
@@ -56,6 +55,7 @@ pub struct DesktopApp {
     connection_manager: ConnectionManager,
     metadata_service: MetadataService,
     query_service: QueryService,
+    redis_service: RedisService,
     runtime: Handle,
 }
 
@@ -119,8 +119,8 @@ impl DesktopApp {
         let cm = connection_manager.clone();
         let ms = metadata_service.clone();
         let qs = query_service.clone();
+        let rs = redis_service.clone();
         let rt_cm_ui = runtime.clone();
-        let rt_redis = runtime.clone();
         let rt_field = runtime.clone();
         Self {
             app_name,
@@ -140,16 +140,7 @@ impl DesktopApp {
             table_editor: None,
             table_structure: None,
             import_wizard: None,
-            redis_browser: {
-                let redis_conn_id = ConnectionId::new();
-                RedisBrowserUi::new(
-                    redis_conn_id,
-                    connection_manager.clone(),
-                    metadata_service.clone(),
-                    redis_service.clone(),
-                    rt_redis,
-                )
-            },
+            redis_browser: None,
             last_tree_status: String::new(),
             error_window_open: false,
             active_panel: ActivePanel::QueryEditor,
@@ -160,6 +151,7 @@ impl DesktopApp {
             connection_manager: cm,
             metadata_service: ms,
             query_service: qs,
+            redis_service: rs,
             runtime: rt_field,
         }
     }
@@ -295,8 +287,13 @@ impl eframe::App for DesktopApp {
 impl DesktopApp {
     fn central_panel(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
+            if matches!(self.active_panel, ActivePanel::RedisBrowser) && self.redis_browser.is_none()
+            {
+                self.active_panel = ActivePanel::QueryEditor;
+            }
+
             // Tab bar to switch between panels
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut self.active_panel, ActivePanel::QueryEditor, "📝 Query Editor");
                 if self.table_editor.is_some() {
                     ui.selectable_value(&mut self.active_panel, ActivePanel::TableEditor, "📋 Table Editor");
@@ -307,7 +304,9 @@ impl DesktopApp {
                 if self.import_wizard.is_some() {
                     ui.selectable_value(&mut self.active_panel, ActivePanel::ImportWizard, "📥 Import CSV");
                 }
-                ui.selectable_value(&mut self.active_panel, ActivePanel::RedisBrowser, "🔑 Redis Browser");
+                if self.redis_browser.is_some() {
+                    ui.selectable_value(&mut self.active_panel, ActivePanel::RedisBrowser, "🔑 Redis Browser");
+                }
             });
             ui.separator();
 
@@ -376,7 +375,11 @@ impl DesktopApp {
                     }
                 },
                 ActivePanel::RedisBrowser => {
-                    self.redis_browser.ui(ctx, ui);
+                    if let Some(redis_browser) = &mut self.redis_browser {
+                        redis_browser.ui(ctx, ui);
+                    } else {
+                        self.active_panel = ActivePanel::QueryEditor;
+                    }
                 }
             }
         });
@@ -384,7 +387,8 @@ impl DesktopApp {
 
     fn top_toolbar(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            let show_shortcuts = ui.available_width() >= 1160.0;
+            ui.horizontal_wrapped(|ui| {
                 ui.heading(&self.app_name);
                 ui.separator();
 
@@ -433,11 +437,13 @@ impl DesktopApp {
                     self.error_window_open = true;
                 }
 
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    self.shortcut_label(ui);
+                ui.separator();
+                ui.label(RichText::new(&self.state.status).strong());
+
+                if show_shortcuts {
                     ui.separator();
-                    ui.label(RichText::new(&self.state.status).strong());
-                });
+                    self.shortcut_label(ui);
+                }
             });
         });
     }
@@ -445,8 +451,8 @@ impl DesktopApp {
     fn left_tree(&mut self, ctx: &Context) {
         SidePanel::left("connection_object_tree")
             .resizable(true)
-            .default_width(280.0)
-            .width_range(220.0..=440.0)
+            .default_width(340.0)
+            .width_range(280.0..=560.0)
             .show(ctx, |ui| {
                 let (message, actions) = self.object_tree.ui(ctx, ui);
                 if let Some(message) = message {
@@ -504,8 +510,10 @@ impl DesktopApp {
                         .as_deref()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
-                    self.redis_browser
-                        .load_key(connection_id, database_index, key.clone());
+                    self.ensure_redis_browser(connection_id);
+                    if let Some(redis_browser) = &mut self.redis_browser {
+                        redis_browser.load_key(connection_id, database_index, key.clone());
+                    }
                     self.active_panel = ActivePanel::RedisBrowser;
                     self.state.set_status(format!(
                         "View Redis key {key} (db={:?}, conn={})",
@@ -579,8 +587,10 @@ impl DesktopApp {
                         .as_deref()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
-                    self.redis_browser
-                        .prompt_delete_key(connection_id, database_index, key.clone());
+                    self.ensure_redis_browser(connection_id);
+                    if let Some(redis_browser) = &mut self.redis_browser {
+                        redis_browser.prompt_delete_key(connection_id, database_index, key.clone());
+                    }
                     self.active_panel = ActivePanel::RedisBrowser;
                     self.state.set_status(format!("Delete Redis key {}", key));
                 }
@@ -593,6 +603,51 @@ impl DesktopApp {
             if !message.is_empty() {
                 self.state.set_status(message);
             }
+        }
+        for change in self.connection_manager_ui.take_changes() {
+            self.handle_connection_change(change);
+        }
+    }
+
+    fn handle_connection_change(&mut self, change: ConnectionChange) {
+        self.object_tree.reload_root();
+        match change {
+            ConnectionChange::Saved(_) => {
+                self.state
+                    .set_status("Connection saved; object tree refreshed");
+            }
+            ConnectionChange::Deleted(id) => {
+                if self
+                    .redis_browser
+                    .as_ref()
+                    .is_some_and(|browser| browser.connection_id() == id)
+                {
+                    self.redis_browser = None;
+                    if matches!(self.active_panel, ActivePanel::RedisBrowser) {
+                        self.active_panel = ActivePanel::QueryEditor;
+                    }
+                }
+                self.state
+                    .set_status("Connection deleted; object tree refreshed");
+            }
+        }
+    }
+
+    fn ensure_redis_browser(&mut self, connection_id: ConnectionId) {
+        let needs_new = self
+            .redis_browser
+            .as_ref()
+            .map(|browser| browser.connection_id() != connection_id)
+            .unwrap_or(true);
+
+        if needs_new {
+            self.redis_browser = Some(RedisBrowserUi::new(
+                connection_id,
+                self.connection_manager.clone(),
+                self.metadata_service.clone(),
+                self.redis_service.clone(),
+                self.runtime.clone(),
+            ));
         }
     }
 
@@ -1002,7 +1057,9 @@ impl DesktopApp {
                     dialect.quote_identifier(&db_common::Identifier::new(schema).unwrap()),
                     dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap()),
                 ),
-                None => dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap()),
+                None => {
+                    dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap())
+                }
             };
             let sql = format!("SELECT * FROM {}", qualified);
             let execute_result = query_service
@@ -1029,21 +1086,19 @@ impl DesktopApp {
                         .unwrap_or_else(|| QueryResult::empty(""));
                     let path_for_write = path.clone();
                     let format = request.format;
-                    let table_name = match request
-                        .schema
-                        .as_deref()
-                        .filter(|value| !value.is_empty())
-                    {
-                        Some(schema) => format!("{}.{}", schema, request.table),
-                        None => request.table.clone(),
-                    };
+                    let table_name =
+                        match request.schema.as_deref().filter(|value| !value.is_empty()) {
+                            Some(schema) => format!("{}.{}", schema, request.table),
+                            None => request.table.clone(),
+                        };
                     let write_result = tokio::task::spawn_blocking(move || {
-                        export_query_result_to_file(&result, format, &path_for_write)
-                            .map(|_| TableExportPayload {
+                        export_query_result_to_file(&result, format, &path_for_write).map(|_| {
+                            TableExportPayload {
                                 table_name,
                                 path,
                                 format,
-                            })
+                            }
+                        })
                     })
                     .await;
 

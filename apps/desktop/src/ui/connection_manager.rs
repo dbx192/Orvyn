@@ -8,6 +8,7 @@ use eframe::egui::{
 };
 use std::{
     collections::BTreeMap,
+    mem,
     sync::mpsc::{self, Receiver, Sender},
 };
 use tokio::runtime::Handle;
@@ -137,6 +138,12 @@ enum ConnectionEvent {
     Tested(Result<ConnectionTestReport, AppError>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionChange {
+    Saved(ConnectionId),
+    Deleted(ConnectionId),
+}
+
 pub struct ConnectionManagerUi {
     manager: ConnectionManager,
     runtime: Handle,
@@ -152,6 +159,7 @@ pub struct ConnectionManagerUi {
     test_report: Option<ConnectionTestReport>,
     confirm_delete: Option<ConnectionId>,
     window_open: bool,
+    pending_changes: Vec<ConnectionChange>,
 }
 
 impl ConnectionManagerUi {
@@ -172,6 +180,7 @@ impl ConnectionManagerUi {
             test_report: None,
             confirm_delete: None,
             window_open: false,
+            pending_changes: Vec::new(),
         };
         ui.load_profiles();
         ui
@@ -226,6 +235,10 @@ impl ConnectionManagerUi {
         }
 
         message.or_else(|| (!self.status.is_empty()).then(|| self.status.clone()))
+    }
+
+    pub fn take_changes(&mut self) -> Vec<ConnectionChange> {
+        mem::take(&mut self.pending_changes)
     }
 
     #[allow(dead_code)]
@@ -370,11 +383,13 @@ impl ConnectionManagerUi {
                     let response = ui.add(
                         TextEdit::singleline(&mut self.form.password)
                             .password(true)
-                            .hint_text(if self.form.has_stored_password && !self.form.password_modified {
-                                "Saved password"
-                            } else {
-                                ""
-                            })
+                            .hint_text(
+                                if self.form.has_stored_password && !self.form.password_modified {
+                                    "Saved password"
+                                } else {
+                                    ""
+                                },
+                            )
                             .desired_width(260.0),
                     );
                     if response.changed() {
@@ -576,6 +591,7 @@ impl ConnectionManagerUi {
                         self.selected = Some(id);
                         self.form = ConnectionForm::from_profile(&profile);
                         self.remember_recent(id);
+                        self.pending_changes.push(ConnectionChange::Saved(id));
                         self.status = "Connection saved".to_string();
                         self.window_open = false;
                     }
@@ -593,6 +609,7 @@ impl ConnectionManagerUi {
                         self.recent.retain(|recent_id| *recent_id != id);
                         self.selected = None;
                         self.form = ConnectionForm::new();
+                        self.pending_changes.push(ConnectionChange::Deleted(id));
                         self.status = "Connection deleted".to_string();
                         self.window_open = false;
                     }

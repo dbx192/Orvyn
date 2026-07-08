@@ -6,7 +6,8 @@ use db_common::{
     AppError, ConnectionId, ConnectionStatus, MetadataNode, MetadataNodeKind, MetadataPath,
 };
 use eframe::egui::{
-    Button, Color32, Context, Frame, Label, RichText, ScrollArea, Sense, TextEdit, Ui,
+    pos2, vec2, Align2, Button, Color32, Context, FontId, Rect, Response, RichText, Rounding,
+    ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -18,6 +19,13 @@ const SEARCH_MIN_CHARS: usize = 2;
 const STATUS_POLL_INTERVAL_MS: u64 = 1500;
 const RECONNECT_BASE_DELAY_MS: u64 = 3000;
 const MAX_RECONNECT_ATTEMPTS: u8 = 3;
+const TREE_ROW_HEIGHT: f32 = 24.0;
+const TREE_ROW_RADIUS: f32 = 4.0;
+const TREE_INDENT: f32 = 14.0;
+const TREE_MAX_INDENT: f32 = 96.0;
+const TREE_ARROW_WIDTH: f32 = 15.0;
+const TREE_BADGE_GAP: f32 = 8.0;
+const TREE_STATUS_DOT_WIDTH: f32 = 16.0;
 
 #[derive(Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 struct NodeKey {
@@ -191,8 +199,8 @@ impl ObjectTree {
         self.maybe_poll_status(ctx);
         self.maybe_retry_reconnects(ctx);
 
+        ui.spacing_mut().item_spacing.y = 4.0;
         self.search_bar(ui);
-        ui.separator();
 
         let mut message = None;
         let mut actions = Vec::new();
@@ -207,19 +215,48 @@ impl ObjectTree {
         (message, actions)
     }
 
+    pub fn reload_root(&mut self) {
+        self.child_cache.clear();
+        self.expanded.clear();
+        self.redis_pattern.clear();
+        self.selected_node = None;
+        self.status = "Loading connections...".to_string();
+        self.load_root();
+    }
+
     fn search_bar(&mut self, ui: &mut Ui) {
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("🔍").color(Color32::GRAY));
-            let response = ui.add(
+            ui.label(RichText::new("Objects").strong().size(13.0));
+            ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("{} connections", self.connections.len()))
+                        .small()
+                        .color(muted_text_color(ui)),
+                );
+            });
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let clear_width = 26.0;
+            let edit_width = (ui.available_width() - clear_width).max(80.0);
+            let response = ui.add_sized(
+                [edit_width, 22.0],
                 TextEdit::singleline(&mut self.search_query)
-                    .hint_text(format!("Search object (min {SEARCH_MIN_CHARS} chars)..."))
-                    .desired_width(180.0),
+                    .hint_text(format!("Search database, table, key (min {SEARCH_MIN_CHARS})")),
             );
             let _ = response.changed();
-            if ui.small_button("✕").clicked() {
+            if ui
+                .add_sized([clear_width - 2.0, 22.0], Button::new("x"))
+                .on_hover_text("Clear search")
+                .clicked()
+            {
                 self.search_query.clear();
             }
         });
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
     }
 
     fn tree_ui(
@@ -273,7 +310,8 @@ impl ObjectTree {
     ) {
         let key = tree_node.key();
         let key_str = node_key_id(&key);
-        let expanded = self.expanded.contains(&key_str) || self.connection_force_expanded(tree_node);
+        let expanded =
+            self.expanded.contains(&key_str) || self.connection_force_expanded(tree_node);
         let status_color = connection_status_color(&status);
         let status_label = connection_status_label(&status);
 
@@ -281,103 +319,72 @@ impl ObjectTree {
         let is_selected = self.selected_node == Some(key.clone());
         let matched = self.node_matches_search(&node);
 
-        Frame::group(ui.style())
-            .fill(ui.style().visuals.faint_bg_color)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let arrow = if expanded { "▼" } else { "▶" };
-                    let arrow_resp = ui.add(
-                        Label::new(RichText::new(arrow).color(Color32::GRAY).size(10.0))
-                            .sense(Sense::click()),
-                    );
-                    if arrow_resp.clicked() {
-                        self.toggle_connection(connection_id);
-                    }
+        let response = tree_row(
+            ui,
+            TreeRowSpec {
+                depth: 0,
+                kind: node.kind,
+                label: &node.label,
+                detail: node.detail.as_deref(),
+                expanded,
+                leaf: false,
+                selected: is_selected,
+                matched,
+                strong: true,
+                connection_status: Some((status_color, status_label)),
+            },
+        );
 
-                    let dot_resp = ui
-                        .add(
-                            Label::new(RichText::new("●").color(status_color).size(11.0).strong())
-                                .sense(Sense::click()),
-                        )
-                        .on_hover_text(status_label);
-                    if dot_resp.clicked() {
-                        self.toggle_connection(connection_id);
-                    }
+        let mut show_menu = false;
+        response.context_menu(|ui| {
+            show_menu = true;
+            self.connection_context_menu(ui, connection_id, message, actions);
+        });
 
-                    let label_text = format!("{}  ", node.label);
-                    let label_resp = ui.add(
-                        Label::new(
-                            RichText::new(label_text).strong().color(node_label_color(
-                                ui,
-                                is_selected,
-                                matched,
-                            )),
-                        )
-                        .sense(Sense::click()),
-                    );
+        if response.clicked() && !show_menu {
+            self.selected_node = Some(key.clone());
+            if clicked_in_arrow(&response, 0) || response.double_clicked() {
+                self.toggle_connection(connection_id);
+            }
+        }
 
-                    if let Some(detail) = &node.detail {
-                        ui.label(
-                            RichText::new(format!("({})", detail))
-                                .color(Color32::GRAY)
-                                .size(10.0),
-                        );
-                    }
-
-                    let mut show_menu = false;
-                    label_resp.context_menu(|ui| {
-                        show_menu = true;
-                        self.connection_context_menu(ui, connection_id, message, actions);
-                    });
-
-                    if label_resp.clicked() && !show_menu {
-                        self.toggle_connection(connection_id);
-                        self.selected_node = Some(key.clone());
-                    }
-                });
-
-                if expanded {
-                    ui.indent("conn_children", |ui| {
-                        match (&tree_node.children, tree_node.loading) {
-                            (Some(children), _) => {
-                                if children.is_empty() {
-                                    ui.label(
-                                        RichText::new("(empty)").color(Color32::GRAY).italics(),
-                                    );
-                                } else {
-                                    for child in children {
-                                        if self.search_active()
-                                            && !self.node_or_descendant_matches(child)
-                                        {
-                                            continue;
-                                        }
-                                        self.render_tree_node(ui, child, message, actions);
-                                    }
-                                }
+        if expanded {
+            match (&tree_node.children, tree_node.loading) {
+                (Some(children), _) => {
+                    if children.is_empty() {
+                        tree_message_row(ui, 1, "(empty)", false);
+                    } else {
+                        for child in children {
+                            if self.search_active() && !self.node_or_descendant_matches(child) {
+                                continue;
                             }
-                            (None, true) => {
-                                ui.label(
-                                    RichText::new("Loading...").color(Color32::GRAY).italics(),
-                                );
-                            }
-                            (None, false) => {
-                                if let Some(error) = &tree_node.load_error {
-                                    ui.colored_label(Color32::RED, format!("Error: {}", error));
-                                    if ui.button("Retry").clicked() {
-                                        self.refresh_connection(connection_id);
-                                    }
-                                }
-                            }
+                            self.render_tree_node(ui, child, 1, message, actions);
                         }
-                    });
+                    }
                 }
-            });
+                (None, true) => {
+                    tree_message_row(ui, 1, "Loading...", false);
+                }
+                (None, false) => {
+                    if let Some(error) = &tree_node.load_error {
+                        tree_message_row(ui, 1, &format!("Error: {}", error), true);
+                        ui.horizontal(|ui| {
+                            ui.add_space(TREE_INDENT + TREE_ARROW_WIDTH);
+                            if ui.small_button("Retry").clicked() {
+                                self.refresh_connection(connection_id);
+                            }
+                        });
+                    }
+                }
+            }
+        }
     }
 
     fn render_tree_node(
         &mut self,
         ui: &mut Ui,
         node: &MetadataNode,
+        depth: usize,
         message: &mut Option<String>,
         actions: &mut Vec<ObjectTreeAction>,
     ) {
@@ -391,83 +398,65 @@ impl ObjectTree {
 
         let node_clone = node.clone();
 
-        ui.horizontal(|ui| {
-            if !is_leaf {
-                let arrow = if expanded { "▼" } else { "▶" };
-                if ui
-                    .add(
-                        Label::new(RichText::new(arrow).color(Color32::GRAY).size(10.0))
-                            .sense(Sense::click()),
-                    )
-                    .clicked()
-                {
-                    self.toggle_node(node_clone.clone());
-                }
-            } else {
-                ui.add_space(12.0);
-            }
+        let response = tree_row(
+            ui,
+            TreeRowSpec {
+                depth,
+                kind: node.kind,
+                label: &node.label,
+                detail: node.detail.as_deref(),
+                expanded,
+                leaf: is_leaf,
+                selected: is_selected,
+                matched,
+                strong: matches!(
+                    node.kind,
+                    MetadataNodeKind::Database
+                        | MetadataNodeKind::Schema
+                        | MetadataNodeKind::Table
+                        | MetadataNodeKind::View
+                        | MetadataNodeKind::RedisDatabase
+                ),
+                connection_status: None,
+            },
+        );
 
-            let icon = node_kind_icon(node.kind);
-            ui.label(RichText::new(icon).size(12.0));
-
-            let label_resp = ui.add(
-                Label::new(
-                    RichText::new(&node.label).color(node_label_color(ui, is_selected, matched)),
-                )
-                .sense(Sense::click()),
-            );
-
-            let mut show_menu = false;
-            label_resp.context_menu(|ui| {
-                show_menu = true;
-                self.node_context_menu(ui, &node_clone, message, actions);
-            });
-
-            let double_clicked = label_resp.double_clicked();
-            if (label_resp.clicked() || double_clicked) && !show_menu {
-                self.selected_node = Some(key.clone());
-                if double_clicked && !is_leaf {
-                    self.toggle_node(node_clone.clone());
-                }
-                if double_clicked && is_leaf {
-                    self.activate_node(&node_clone, message, actions);
-                } else {
-                    *message = Some(format!("Selected: {}", node.label));
-                }
-            }
-
-            if let Some(detail) = &node.detail {
-                ui.label(
-                    RichText::new(format!(" ({})", detail))
-                        .color(Color32::GRAY)
-                        .size(10.0),
-                );
-            }
+        let mut show_menu = false;
+        response.context_menu(|ui| {
+            show_menu = true;
+            self.node_context_menu(ui, &node_clone, message, actions);
         });
 
+        let double_clicked = response.double_clicked();
+        if (response.clicked() || double_clicked) && !show_menu {
+            self.selected_node = Some(key.clone());
+            if !is_leaf && (clicked_in_arrow(&response, depth) || double_clicked) {
+                self.toggle_node(node_clone.clone());
+            }
+            if double_clicked && is_leaf {
+                self.activate_node(&node_clone, message, actions);
+            } else {
+                *message = Some(format!("Selected: {}", node.label));
+            }
+        }
+
         if expanded && !is_leaf {
-            ui.indent("node_children", |ui| match children {
+            match children {
                 Some(list) if list.is_empty() => {
-                    ui.label(RichText::new("(empty)").color(Color32::GRAY).italics());
+                    tree_message_row(ui, depth + 1, "(empty)", false);
                 }
                 Some(list) => {
                     for child in &list {
                         if self.search_active() && !self.node_or_descendant_matches(child) {
                             continue;
                         }
-                        self.render_tree_node(ui, child, message, actions);
+                        self.render_tree_node(ui, child, depth + 1, message, actions);
                     }
                 }
                 None => {
-                    if matches!(node.kind, MetadataNodeKind::RedisKeysFolder)
-                        && self.redis_pattern.contains_key(&key)
-                    {
-                        ui.label(RichText::new("Loading...").color(Color32::GRAY).italics());
-                    } else {
-                        ui.label(RichText::new("Loading...").color(Color32::GRAY).italics());
-                    }
+                    tree_message_row(ui, depth + 1, "Loading...", false);
                 }
-            });
+            }
         }
     }
 
@@ -1039,7 +1028,9 @@ impl ObjectTree {
             .reconnects
             .iter()
             .filter_map(|(id, state)| {
-                (!state.in_flight && state.attempts < MAX_RECONNECT_ATTEMPTS && now_ms >= state.next_retry_ms)
+                (!state.in_flight
+                    && state.attempts < MAX_RECONNECT_ATTEMPTS
+                    && now_ms >= state.next_retry_ms)
                     .then_some(*id)
             })
             .collect::<Vec<_>>();
@@ -1058,13 +1049,15 @@ impl ObjectTree {
             match event {
                 TreeEvent::RootLoaded(result) => match result {
                     Ok(nodes) => {
+                        let previous_connections = std::mem::take(&mut self.connections);
                         self.connections = nodes
                             .into_iter()
                             .map(|n| {
-                                (
-                                    n.path.connection_id,
-                                    (TreeNode::new(n), ConnectionStatus::NotConnected),
-                                )
+                                let status = previous_connections
+                                    .get(&n.path.connection_id)
+                                    .map(|(_, status)| *status)
+                                    .unwrap_or(ConnectionStatus::NotConnected);
+                                (n.path.connection_id, (TreeNode::new(n), status))
                             })
                             .collect();
                         self.status = format!("Loaded {} connections", self.connections.len());
@@ -1180,7 +1173,11 @@ impl ObjectTree {
         let key = NodeKey::from(&node.path);
         self.child_cache
             .get(&key)
-            .map(|children| children.iter().any(|child| self.node_or_descendant_matches(child)))
+            .map(|children| {
+                children
+                    .iter()
+                    .any(|child| self.node_or_descendant_matches(child))
+            })
             .unwrap_or(false)
     }
 
@@ -1189,7 +1186,11 @@ impl ObjectTree {
             || tree_node
                 .children
                 .as_ref()
-                .map(|children| children.iter().any(|child| self.node_or_descendant_matches(child)))
+                .map(|children| {
+                    children
+                        .iter()
+                        .any(|child| self.node_or_descendant_matches(child))
+                })
                 .unwrap_or(false)
     }
 
@@ -1208,17 +1209,23 @@ impl ObjectTree {
         ctx: &Context,
     ) {
         if self.reconnect_suppressed.contains(&connection_id)
-            || !matches!(status, ConnectionStatus::Disconnected | ConnectionStatus::Failed)
+            || !matches!(
+                status,
+                ConnectionStatus::Disconnected | ConnectionStatus::Failed
+            )
         {
             return;
         }
 
         let now_ms = (ctx.input(|i| i.time) * 1000.0) as u64;
-        let state = self.reconnects.entry(connection_id).or_insert(ReconnectState {
-            attempts: 0,
-            next_retry_ms: now_ms + RECONNECT_BASE_DELAY_MS,
-            in_flight: false,
-        });
+        let state = self
+            .reconnects
+            .entry(connection_id)
+            .or_insert(ReconnectState {
+                attempts: 0,
+                next_retry_ms: now_ms + RECONNECT_BASE_DELAY_MS,
+                in_flight: false,
+            });
 
         if state.attempts >= MAX_RECONNECT_ATTEMPTS || state.in_flight {
             return;
@@ -1230,6 +1237,273 @@ impl ObjectTree {
         }
         state.attempts = state.attempts.saturating_add(1);
         state.in_flight = false;
+    }
+}
+
+struct TreeRowSpec<'a> {
+    depth: usize,
+    kind: MetadataNodeKind,
+    label: &'a str,
+    detail: Option<&'a str>,
+    expanded: bool,
+    leaf: bool,
+    selected: bool,
+    matched: bool,
+    strong: bool,
+    connection_status: Option<(Color32, &'a str)>,
+}
+
+fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
+    let width = ui.available_width().max(1.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, TREE_ROW_HEIGHT), Sense::click());
+    let painter = ui.painter();
+
+    let bg_fill = if spec.selected {
+        ui.visuals().selection.bg_fill
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        Color32::TRANSPARENT
+    };
+    if bg_fill != Color32::TRANSPARENT {
+        painter.rect_filled(rect.expand2(vec2(1.0, 0.0)), Rounding::same(TREE_ROW_RADIUS), bg_fill);
+    }
+    if spec.selected {
+        painter.rect_stroke(
+            rect.expand2(vec2(1.0, 0.0)).shrink(0.5),
+            Rounding::same(TREE_ROW_RADIUS),
+            Stroke::new(1.0, ui.visuals().selection.stroke.color),
+        );
+    }
+
+    draw_tree_guides(ui, rect, spec.depth);
+
+    let center_y = rect.center().y;
+    let mut x = rect.left() + 5.0 + tree_indent(spec.depth);
+
+    let arrow = if spec.leaf {
+        ""
+    } else if spec.expanded {
+        "▾"
+    } else {
+        "▸"
+    };
+    painter.text(
+        pos2(x + TREE_ARROW_WIDTH * 0.5, center_y),
+        Align2::CENTER_CENTER,
+        arrow,
+        FontId::proportional(12.0),
+        muted_text_color(ui),
+    );
+    x += TREE_ARROW_WIDTH;
+
+    if let Some((status_color, _)) = spec.connection_status {
+        painter.circle_filled(pos2(x + 6.0, center_y), 4.0, status_color);
+        x += TREE_STATUS_DOT_WIDTH;
+    }
+
+    let (badge, badge_color) = node_kind_badge(spec.kind, spec.detail);
+    let badge_width = if badge.len() > 2 { 28.0 } else { 23.0 };
+    let badge_rect = Rect::from_center_size(pos2(x + badge_width * 0.5, center_y), vec2(badge_width, 15.0));
+    painter.rect_filled(badge_rect, Rounding::same(3.0), badge_color);
+    painter.text(
+        badge_rect.center(),
+        Align2::CENTER_CENTER,
+        badge,
+        FontId::monospace(9.0),
+        badge_text_color(badge_color),
+    );
+    x += badge_width + TREE_BADGE_GAP;
+
+    let right_label = spec
+        .connection_status
+        .map(|(_, label)| label)
+        .or(spec.detail)
+        .filter(|value| !value.trim().is_empty());
+    let right_reserved = if right_label.is_some() { 92.0 } else { 6.0 };
+    let text_rect = Rect::from_min_max(
+        pos2(x, rect.top()),
+        pos2((rect.right() - right_reserved).max(x + 24.0), rect.bottom()),
+    );
+    let text_painter = painter.with_clip_rect(text_rect);
+    text_painter.text(
+        pos2(x, center_y),
+        Align2::LEFT_CENTER,
+        spec.label,
+        FontId::proportional(if spec.strong { 13.0 } else { 12.5 }),
+        node_label_color(ui, spec.selected, spec.matched, spec.strong),
+    );
+
+    if let Some(label) = right_label {
+        if rect.width() > 260.0 {
+            painter.text(
+                pos2(rect.right() - 7.0, center_y),
+                Align2::RIGHT_CENTER,
+                label,
+                FontId::proportional(10.5),
+                muted_text_color(ui),
+            );
+        }
+    }
+
+    response.on_hover_text(tree_row_hover(&spec))
+}
+
+fn tree_message_row(ui: &mut Ui, depth: usize, text: &str, error: bool) {
+    let width = ui.available_width().max(1.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, TREE_ROW_HEIGHT), Sense::hover());
+    draw_tree_guides(ui, rect, depth);
+    let color = if error {
+        ui.visuals().error_fg_color
+    } else {
+        muted_text_color(ui)
+    };
+    ui.painter().text(
+        pos2(
+            rect.left() + 5.0 + tree_indent(depth) + TREE_ARROW_WIDTH + 4.0,
+            rect.center().y,
+        ),
+        Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(12.0),
+        color,
+    );
+}
+
+fn clicked_in_arrow(response: &Response, depth: usize) -> bool {
+    response
+        .interact_pointer_pos()
+        .map(|pos| {
+            let left = response.rect.left() + 5.0 + tree_indent(depth);
+            pos.x >= left && pos.x <= left + TREE_ARROW_WIDTH + 2.0
+        })
+        .unwrap_or(false)
+}
+
+fn draw_tree_guides(ui: &Ui, rect: Rect, depth: usize) {
+    if depth == 0 {
+        return;
+    }
+    let stroke = Stroke::new(1.0, tree_guide_color(ui));
+    for level in 0..depth {
+        let x = rect.left() + 5.0 + tree_indent(level) + TREE_ARROW_WIDTH * 0.5;
+        ui.painter()
+            .line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], stroke);
+    }
+}
+
+fn tree_indent(depth: usize) -> f32 {
+    (depth as f32 * TREE_INDENT).min(TREE_MAX_INDENT)
+}
+
+fn tree_row_hover(spec: &TreeRowSpec<'_>) -> String {
+    let mut lines = vec![
+        format!("{}: {}", node_kind_name(spec.kind), spec.label),
+        "Double-click to open or expand".to_string(),
+    ];
+    if let Some(detail) = spec.detail {
+        lines.push(format!("Detail: {detail}"));
+    }
+    if let Some((_, status)) = spec.connection_status {
+        lines.push(format!("Status: {status}"));
+    }
+    lines.join("\n")
+}
+
+fn node_kind_badge(kind: MetadataNodeKind, detail: Option<&str>) -> (&'static str, Color32) {
+    if kind == MetadataNodeKind::Connection {
+        let detail = detail.unwrap_or_default().to_ascii_lowercase();
+        if detail.contains("postgres") {
+            return ("PG", Color32::from_rgb(58, 116, 178));
+        }
+        if detail.contains("mysql") {
+            return ("MY", Color32::from_rgb(27, 131, 151));
+        }
+        if detail.contains("sqlite") {
+            return ("SL", Color32::from_rgb(110, 112, 118));
+        }
+        if detail.contains("duck") {
+            return ("DK", Color32::from_rgb(188, 139, 37));
+        }
+        if detail.contains("redis") {
+            return ("RD", Color32::from_rgb(192, 60, 54));
+        }
+    }
+
+    match kind {
+        MetadataNodeKind::Connection => ("CN", Color32::from_rgb(94, 107, 123)),
+        MetadataNodeKind::Database | MetadataNodeKind::RedisDatabase => {
+            ("DB", Color32::from_rgb(79, 132, 196))
+        }
+        MetadataNodeKind::Schema => ("SC", Color32::from_rgb(100, 151, 96)),
+        MetadataNodeKind::TablesFolder => ("TBL", Color32::from_rgb(86, 117, 151)),
+        MetadataNodeKind::ViewsFolder => ("VW", Color32::from_rgb(121, 104, 173)),
+        MetadataNodeKind::FunctionsFolder => ("FN", Color32::from_rgb(154, 111, 65)),
+        MetadataNodeKind::ColumnsFolder => ("COL", Color32::from_rgb(94, 122, 122)),
+        MetadataNodeKind::IndexesFolder => ("IX", Color32::from_rgb(113, 116, 160)),
+        MetadataNodeKind::ForeignKeysFolder => ("FK", Color32::from_rgb(126, 133, 88)),
+        MetadataNodeKind::TriggersFolder => ("TR", Color32::from_rgb(157, 102, 91)),
+        MetadataNodeKind::Table => ("T", Color32::from_rgb(47, 128, 197)),
+        MetadataNodeKind::View => ("V", Color32::from_rgb(118, 88, 177)),
+        MetadataNodeKind::Column => ("C", Color32::from_rgb(63, 143, 136)),
+        MetadataNodeKind::Index => ("IX", Color32::from_rgb(93, 96, 167)),
+        MetadataNodeKind::ForeignKey => ("FK", Color32::from_rgb(114, 124, 71)),
+        MetadataNodeKind::Trigger => ("TR", Color32::from_rgb(174, 92, 76)),
+        MetadataNodeKind::Function => ("ƒ", Color32::from_rgb(161, 100, 48)),
+        MetadataNodeKind::RedisKeysFolder | MetadataNodeKind::RedisKey => {
+            ("K", Color32::from_rgb(190, 66, 62))
+        }
+    }
+}
+
+fn node_kind_name(kind: MetadataNodeKind) -> &'static str {
+    match kind {
+        MetadataNodeKind::Connection => "Connection",
+        MetadataNodeKind::Database => "Database",
+        MetadataNodeKind::Schema => "Schema",
+        MetadataNodeKind::TablesFolder => "Tables",
+        MetadataNodeKind::ViewsFolder => "Views",
+        MetadataNodeKind::FunctionsFolder => "Functions",
+        MetadataNodeKind::ColumnsFolder => "Columns",
+        MetadataNodeKind::IndexesFolder => "Indexes",
+        MetadataNodeKind::ForeignKeysFolder => "Foreign keys",
+        MetadataNodeKind::TriggersFolder => "Triggers",
+        MetadataNodeKind::Table => "Table",
+        MetadataNodeKind::View => "View",
+        MetadataNodeKind::Column => "Column",
+        MetadataNodeKind::Index => "Index",
+        MetadataNodeKind::ForeignKey => "Foreign key",
+        MetadataNodeKind::Trigger => "Trigger",
+        MetadataNodeKind::Function => "Function",
+        MetadataNodeKind::RedisDatabase => "Redis database",
+        MetadataNodeKind::RedisKeysFolder => "Redis keys",
+        MetadataNodeKind::RedisKey => "Redis key",
+    }
+}
+
+fn badge_text_color(color: Color32) -> Color32 {
+    let luminance =
+        0.299 * f32::from(color.r()) + 0.587 * f32::from(color.g()) + 0.114 * f32::from(color.b());
+    if luminance > 150.0 {
+        Color32::from_rgb(24, 28, 32)
+    } else {
+        Color32::WHITE
+    }
+}
+
+fn muted_text_color(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(150, 155, 162)
+    } else {
+        Color32::from_rgb(96, 103, 112)
+    }
+}
+
+fn tree_guide_color(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(48, 52, 58)
+    } else {
+        Color32::from_rgb(218, 223, 229)
     }
 }
 
@@ -1252,31 +1526,6 @@ fn is_descendant(candidate: &NodeKey, ancestor: &NodeKey) -> bool {
         }
     }
     true
-}
-
-fn node_kind_icon(kind: MetadataNodeKind) -> &'static str {
-    match kind {
-        MetadataNodeKind::Connection => "🗄",
-        MetadataNodeKind::Database => "🗄",
-        MetadataNodeKind::Schema => "📁",
-        MetadataNodeKind::TablesFolder => "📁",
-        MetadataNodeKind::ViewsFolder => "👁",
-        MetadataNodeKind::ColumnsFolder => "🔤",
-        MetadataNodeKind::IndexesFolder => "🔢",
-        MetadataNodeKind::ForeignKeysFolder => "🔗",
-        MetadataNodeKind::TriggersFolder => "⚡",
-        MetadataNodeKind::FunctionsFolder => "ƒ",
-        MetadataNodeKind::Table => "📋",
-        MetadataNodeKind::View => "👁",
-        MetadataNodeKind::Column => "🔤",
-        MetadataNodeKind::Index => "🔢",
-        MetadataNodeKind::ForeignKey => "🔗",
-        MetadataNodeKind::Trigger => "⚡",
-        MetadataNodeKind::Function => "ƒ",
-        MetadataNodeKind::RedisDatabase => "🗄",
-        MetadataNodeKind::RedisKeysFolder => "🔑",
-        MetadataNodeKind::RedisKey => "🔑",
-    }
 }
 
 fn connection_status_color(status: &ConnectionStatus) -> Color32 {
@@ -1333,12 +1582,22 @@ fn fuzzy_matches(label: &str, query: &str) -> bool {
     false
 }
 
-fn node_label_color(ui: &Ui, selected: bool, matched: bool) -> Color32 {
+fn node_label_color(ui: &Ui, selected: bool, matched: bool, strong: bool) -> Color32 {
     if selected {
-        ui.visuals().selection.bg_fill
+        if ui.visuals().dark_mode {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(18, 24, 30)
+        }
     } else if matched {
         Color32::from_rgb(255, 210, 90)
+    } else if strong {
+        if ui.visuals().dark_mode {
+            Color32::from_rgb(238, 241, 245)
+        } else {
+            Color32::from_rgb(24, 30, 36)
+        }
     } else {
-        Color32::default()
+        ui.visuals().text_color()
     }
 }

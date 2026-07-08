@@ -10,7 +10,8 @@ Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQL
 - egui/eframe 桌面入口和 UI 模块：`apps/desktop`
 - 通用模型和全局工具：`crates/db-common`
 - 应用服务层：`crates/app-core`
-- 五类数据库适配 crate
+- 五类数据库适配 crate；
+- 
 - 安全存储与导入导出 crate
 
 ## 第一阶段能力

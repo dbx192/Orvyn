@@ -22,8 +22,8 @@ use app_core::{
     connection::ConnectionManager, metadata::MetadataService, redis_service::RedisService,
 };
 use db_common::{
-    human_bytes, AppError, CellValue, ConnectionId, ConnectionProfile, RedisDatabase, RedisKeyInfo,
-    RedisValue,
+    human_bytes, AppError, CellValue, ConnectionId, ConnectionProfile, DataSourceKind,
+    RedisDatabase, RedisKeyInfo, RedisValue,
 };
 use db_redis::RedisConnectorWithAuth;
 use eframe::egui::{
@@ -376,64 +376,46 @@ impl RedisBrowserUi {
         ui
     }
 
+    pub fn connection_id(&self) -> ConnectionId {
+        self.connection_id
+    }
+
     fn load_connection_profile(&mut self) {
         let connection_id = self.connection_id;
         let manager = self.connection_manager.clone();
         let metadata_service = self.metadata_service.clone();
         let tx = self.response_tx.clone();
-        let runtime = self.runtime.clone();
+        self.is_loading = true;
+        self.error = None;
 
         self.runtime.spawn(async move {
             match manager.get_profile(connection_id).await {
-                Ok(Some(_profile)) => {
-                    // Try to scan Redis keys
-                    runtime.spawn(async move {
-                        match metadata_service
-                            .scan_redis_keys(connection_id, 0, None, 0, SCAN_PAGE_SIZE, None)
-                            .await
-                        {
-                            Ok((cursor, keys)) => {
-                                let transformed: Vec<_> = keys
-                                    .into_iter()
-                                    .filter_map(|n| {
-                                        let name = n.path.object?;
-                                        let type_name = n
-                                            .detail
-                                            .as_ref()
-                                            .and_then(|d| parse_type_from_detail(d))
-                                            .unwrap_or_else(|| "string".to_string());
-                                        let ttl = parse_ttl_from_detail(n.detail.as_deref());
-                                        Some((
-                                            db_common::RedisKeyInfo {
-                                                name,
-                                                type_name,
-                                                ttl_seconds: ttl,
-                                                size_hint: None,
-                                            },
-                                            None,
-                                        ))
-                                    })
-                                    .collect();
-                                let _ = tx.send(BrowserResponse::KeysScanned {
-                                    cursor,
-                                    keys: transformed,
-                                    has_more: cursor != 0,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = tx.send(BrowserResponse::Error(format!(
-                                    "Failed to load Redis: {}",
-                                    e.message
-                                )));
-                            }
-                        }
-                    });
+                Ok(Some(profile)) if profile.kind == DataSourceKind::Redis => {
+                    let _ = tx.send(BrowserResponse::Status(format!(
+                        "Redis connection: {}",
+                        profile.name
+                    )));
+                    let result = metadata_service
+                        .list_redis_databases(connection_id, None)
+                        .await;
+                    let _ = tx.send(BrowserResponse::DatabasesLoaded(result));
                 }
                 Ok(None) => {
-                    // No profile, trigger refresh
+                    let _ = tx.send(BrowserResponse::Error(
+                        "Redis connection profile not found".to_string(),
+                    ));
                 }
-                Err(_) => {
-                    // Error, trigger refresh
+                Ok(Some(profile)) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "{} is not a Redis connection",
+                        profile.name
+                    )));
+                }
+                Err(error) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to load Redis connection: {}",
+                        error.message
+                    )));
                 }
             }
         });
@@ -1411,16 +1393,37 @@ impl RedisBrowserUi {
     }
 
     pub fn load_key(&mut self, connection_id: ConnectionId, database: u8, key_name: String) {
-        self.connection_id = connection_id;
+        if self.connection_id != connection_id {
+            self.connection_id = connection_id;
+            self.load_connection_profile();
+        }
         self.selected_database = database;
+        self.keys.clear();
+        self.cursor = 0;
+        self.has_more = false;
+        self.error = None;
         self.select_key(key_name.clone());
+        self.scan_keys();
         self.load_key_value(key_name, false);
     }
 
-    pub fn prompt_delete_key(&mut self, connection_id: ConnectionId, database: u8, key_name: String) {
-        self.connection_id = connection_id;
+    pub fn prompt_delete_key(
+        &mut self,
+        connection_id: ConnectionId,
+        database: u8,
+        key_name: String,
+    ) {
+        if self.connection_id != connection_id {
+            self.connection_id = connection_id;
+            self.load_connection_profile();
+        }
         self.selected_database = database;
+        self.keys.clear();
+        self.cursor = 0;
+        self.has_more = false;
+        self.error = None;
         self.select_key(key_name.clone());
+        self.scan_keys();
         self.confirm_delete = Some(key_name);
     }
 
@@ -1657,27 +1660,23 @@ impl RedisBrowserUi {
 
         self.runtime.spawn(async move {
             match manager.profile_with_password(connection_id, None).await {
-                Ok((profile, _)) => {
-                    match RedisConnectorWithAuth::connect(&profile, None).await {
-                        Ok(mut conn) => {
-                            match RedisConnectorWithAuth::get_key_size(
-                                &mut conn, database, &key_name,
-                            )
+                Ok((profile, _)) => match RedisConnectorWithAuth::connect(&profile, None).await {
+                    Ok(mut conn) => {
+                        match RedisConnectorWithAuth::get_key_size(&mut conn, database, &key_name)
                             .await
-                            {
-                                Ok(_size) => {
-                                    let _ = tx.send(BrowserResponse::KeysScanned {
-                                        cursor: 0,
-                                        keys: vec![],
-                                        has_more: false,
-                                    });
-                                }
-                                Err(_) => {}
+                        {
+                            Ok(_size) => {
+                                let _ = tx.send(BrowserResponse::KeysScanned {
+                                    cursor: 0,
+                                    keys: vec![],
+                                    has_more: false,
+                                });
                             }
+                            Err(_) => {}
                         }
-                        Err(_) => {}
                     }
-                }
+                    Err(_) => {}
+                },
                 Err(_) => {}
             }
         });

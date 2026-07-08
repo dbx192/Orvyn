@@ -1,12 +1,14 @@
 mod ui;
 
 use app_core::{
-    connection::ConnectionManager, metadata::MetadataService, query::QueryService,
-    redis_service::RedisService, session::SessionManager,
-    storage::{
-        FileConnectionProfileStore, FileFavoriteQueryStore, FileQueryHistoryStore,
-    },
+    connection::ConnectionManager,
+    metadata::MetadataService,
+    query::QueryService,
+    redis_service::RedisService,
+    session::SessionManager,
+    storage::{FileConnectionProfileStore, FileFavoriteQueryStore, FileQueryHistoryStore},
 };
+use eframe::egui::{vec2, ViewportBuilder};
 use eframe::NativeOptions;
 use secure_store::EncryptedFileStore;
 use std::{path::PathBuf, sync::Arc};
@@ -41,7 +43,12 @@ fn main() -> eframe::Result<()> {
         )),
     );
     let redis_service = RedisService::new(connection_manager.clone());
-    let native_options = NativeOptions::default();
+    let native_options = NativeOptions {
+        viewport: ViewportBuilder::default()
+            .with_inner_size(vec2(1280.0, 800.0))
+            .with_min_inner_size(vec2(960.0, 640.0)),
+        ..Default::default()
+    };
     let runtime_handle = runtime.handle().clone();
 
     eframe::run_native(

@@ -278,6 +278,19 @@ impl MetadataService {
         ))
     }
 
+    pub async fn list_redis_databases(
+        &self,
+        connection_id: ConnectionId,
+        runtime_password: Option<&str>,
+    ) -> Result<Vec<db_common::RedisDatabase>> {
+        let (profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        let reader = self.redis_reader(profile.kind)?;
+        reader.list_databases(&profile, password.as_deref()).await
+    }
+
     async fn relational_children(
         &self,
         profile: &db_common::ConnectionProfile,
