@@ -157,6 +157,10 @@ pub struct QueryHistoryEntry {
 pub struct FavoriteQuery {
     pub id: QueryId,
     pub connection_id: Option<ConnectionId>,
+    #[serde(default)]
+    pub database: Option<String>,
+    #[serde(default)]
+    pub schema: Option<String>,
     pub title: String,
     pub sql: String,
     pub created_at: chrono::DateTime<chrono::Utc>,

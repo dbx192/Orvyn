@@ -1,9 +1,10 @@
 #![allow(clippy::if_same_then_else)]
 #![allow(clippy::collapsible_if)]
 
-use app_core::{metadata::MetadataService, session::SessionManager};
+use app_core::{metadata::MetadataService, query::QueryService, session::SessionManager};
 use db_common::{
-    AppError, ConnectionId, ConnectionStatus, MetadataNode, MetadataNodeKind, MetadataPath,
+    AppError, ConnectionId, ConnectionStatus, FavoriteQuery, MetadataNode, MetadataNodeKind,
+    MetadataPath,
 };
 use eframe::egui::{
     pos2, vec2, Align2, Button, Color32, Context, FontId, Rect, Response, RichText, Rounding,
@@ -89,6 +90,7 @@ impl TreeNode {
 enum TreeEvent {
     RootLoaded(Result<Vec<MetadataNode>, AppError>),
     ChildrenLoaded(NodeKey, Result<Vec<MetadataNode>, AppError>),
+    FavoritesLoaded(Vec<FavoriteQuery>),
     Connected(ConnectionId, Result<(), AppError>),
     StatusPolled(Vec<(ConnectionId, ConnectionStatus)>),
 }
@@ -113,6 +115,13 @@ pub enum ObjectTreeAction {
         connection_id: ConnectionId,
         database: Option<String>,
         schema: Option<String>,
+    },
+    OpenSavedQuery {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        title: String,
+        sql: String,
     },
     ViewKey {
         connection_id: ConnectionId,
@@ -148,12 +157,14 @@ pub enum ObjectTreeAction {
 
 pub struct ObjectTree {
     metadata_service: MetadataService,
+    query_service: QueryService,
     session_manager: SessionManager,
     runtime: Handle,
     tx: Sender<TreeEvent>,
     rx: Receiver<TreeEvent>,
     connections: BTreeMap<ConnectionId, (TreeNode, ConnectionStatus)>,
     child_cache: BTreeMap<NodeKey, Vec<MetadataNode>>,
+    favorite_queries: Vec<FavoriteQuery>,
     expanded: BTreeSet<String>,
     search_query: String,
     selected_node: Option<NodeKey>,
@@ -167,18 +178,21 @@ pub struct ObjectTree {
 impl ObjectTree {
     pub fn new(
         metadata_service: MetadataService,
+        query_service: QueryService,
         session_manager: SessionManager,
         runtime: Handle,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let mut ui = Self {
             metadata_service,
+            query_service,
             session_manager,
             runtime,
             tx,
             rx,
             connections: BTreeMap::new(),
             child_cache: BTreeMap::new(),
+            favorite_queries: Vec::new(),
             expanded: BTreeSet::new(),
             search_query: String::new(),
             selected_node: None,
@@ -189,6 +203,7 @@ impl ObjectTree {
             reconnect_suppressed: BTreeSet::new(),
         };
         ui.load_root();
+        ui.load_favorites();
         ui
     }
 
@@ -223,25 +238,22 @@ impl ObjectTree {
         self.child_cache.clear();
         self.expanded.clear();
         self.redis_pattern.clear();
+        self.load_favorites();
         self.selected_node = None;
         self.status = "Loading connections...".to_string();
         self.load_root();
     }
 
+    pub fn reload_favorites(&mut self) {
+        self.child_cache
+            .retain(|key, _| key.path_kind != MetadataNodeKind::QueriesFolder);
+        self.load_favorites();
+    }
+
     fn search_bar(&mut self, ui: &mut Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Objects").strong().size(13.0));
-            ui.with_layout(
-                eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        RichText::new(format!("{} connections", self.connections.len()))
-                            .small()
-                            .color(muted_text_color(ui)),
-                    );
-                },
-            );
+            ui.label(RichText::new("对象").strong().size(13.0));
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -249,9 +261,8 @@ impl ObjectTree {
             let edit_width = (ui.available_width() - clear_width).max(80.0);
             let response = ui.add_sized(
                 [edit_width, 22.0],
-                TextEdit::singleline(&mut self.search_query).hint_text(format!(
-                    "Search database, table, key (min {SEARCH_MIN_CHARS})"
-                )),
+                TextEdit::singleline(&mut self.search_query)
+                    .hint_text(format!("搜索库、表、查询 (至少 {SEARCH_MIN_CHARS} 字符)")),
             );
             let _ = response.changed();
             if ui
@@ -399,7 +410,7 @@ impl ObjectTree {
         let expanded = self.expanded.contains(&key_str) || self.force_expanded(node);
         let is_leaf = node.leaf;
         let is_selected = self.selected_node == Some(key.clone());
-        let children = self.child_cache.get(&key).cloned();
+        let children = self.children_for_node(node, &key);
         let matched = self.node_matches_search(node);
 
         let node_clone = node.clone();
@@ -421,6 +432,7 @@ impl ObjectTree {
                         | MetadataNodeKind::Schema
                         | MetadataNodeKind::Table
                         | MetadataNodeKind::View
+                        | MetadataNodeKind::QueriesFolder
                         | MetadataNodeKind::RedisDatabase
                 ),
                 connection_status: None,
@@ -464,6 +476,78 @@ impl ObjectTree {
                 }
             }
         }
+    }
+
+    fn children_for_node(&self, node: &MetadataNode, key: &NodeKey) -> Option<Vec<MetadataNode>> {
+        if node.kind == MetadataNodeKind::QueriesFolder {
+            return Some(self.query_nodes_for_folder(node));
+        }
+
+        let mut children = self.child_cache.get(key).cloned()?;
+        if node.kind == MetadataNodeKind::Database {
+            if let Some(folder) = self.query_folder_for_database(node) {
+                children.push(folder);
+            }
+        }
+        Some(children)
+    }
+
+    fn query_folder_for_database(&self, node: &MetadataNode) -> Option<MetadataNode> {
+        let query_count = self
+            .favorite_queries
+            .iter()
+            .filter(|favorite| self.favorite_belongs_to_database(favorite, node))
+            .count();
+        if query_count == 0 {
+            return None;
+        }
+
+        let mut path = MetadataPath::connection(node.path.connection_id)
+            .child(MetadataNodeKind::QueriesFolder);
+        if let Some(database) = node.path.database.clone() {
+            path = path.with_database(database);
+        }
+        if let Some(schema) = node.path.schema.clone() {
+            path = path.with_schema(schema);
+        }
+
+        Some(MetadataNode::new(
+            path,
+            "查询",
+            MetadataNodeKind::QueriesFolder,
+        ))
+    }
+
+    fn query_nodes_for_folder(&self, node: &MetadataNode) -> Vec<MetadataNode> {
+        let mut nodes = self
+            .favorite_queries
+            .iter()
+            .filter(|favorite| self.favorite_belongs_to_database(favorite, node))
+            .map(|favorite| {
+                let mut path = MetadataPath::connection(node.path.connection_id)
+                    .child(MetadataNodeKind::Query);
+                if let Some(database) = favorite.database.clone() {
+                    path = path.with_database(database);
+                }
+                if let Some(schema) = favorite.schema.clone() {
+                    path = path.with_schema(schema);
+                }
+                path = path.with_extra(favorite.id.to_string());
+
+                MetadataNode::new(path, &favorite.title, MetadataNodeKind::Query)
+                    .leaf(true)
+                    .detail(favorite.updated_at.format("%Y-%m-%d").to_string())
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| left.label.cmp(&right.label));
+        nodes
+    }
+
+    fn favorite_belongs_to_database(&self, favorite: &FavoriteQuery, node: &MetadataNode) -> bool {
+        if favorite.connection_id != Some(node.path.connection_id) {
+            return false;
+        }
+        favorite.database.as_deref() == node.path.database.as_deref()
     }
 
     fn connection_context_menu(
@@ -638,6 +722,14 @@ impl ObjectTree {
                 }
                 ui.separator();
             }
+            MetadataNodeKind::Query => {
+                if ui.button("Open Query").clicked() {
+                    self.emit_saved_query_action(node, actions);
+                    *message = Some(format!("Opening query {}", node.label));
+                    ui.close_menu();
+                }
+                ui.separator();
+            }
             MetadataNodeKind::RedisKeysFolder => {
                 let key = NodeKey::from(&node.path);
                 let current = self.redis_pattern.get(&key).cloned().unwrap_or_default();
@@ -768,6 +860,10 @@ impl ObjectTree {
                 );
                 *message = Some(format!("Viewing key {}", node.label));
             }
+            MetadataNodeKind::Query => {
+                self.emit_saved_query_action(node, actions);
+                *message = Some(format!("Opening query {}", node.label));
+            }
             _ => {
                 *message = Some(format!("Selected: {}", node.label));
             }
@@ -809,6 +905,29 @@ impl ObjectTree {
             node.path.database.clone(),
             key,
         ));
+    }
+
+    fn emit_saved_query_action(&self, node: &MetadataNode, actions: &mut Vec<ObjectTreeAction>) {
+        let Some(favorite) = self.favorite_for_node(node) else {
+            return;
+        };
+        let Some(connection_id) = favorite.connection_id else {
+            return;
+        };
+        actions.push(ObjectTreeAction::OpenSavedQuery {
+            connection_id,
+            database: favorite.database.clone(),
+            schema: favorite.schema.clone(),
+            title: favorite.title.clone(),
+            sql: favorite.sql.clone(),
+        });
+    }
+
+    fn favorite_for_node(&self, node: &MetadataNode) -> Option<&FavoriteQuery> {
+        let favorite_id = node.path.extra.as_deref()?;
+        self.favorite_queries
+            .iter()
+            .find(|favorite| favorite.id.to_string() == favorite_id)
     }
 
     fn connection_node(&self, connection_id: ConnectionId) -> Option<MetadataNode> {
@@ -894,6 +1013,16 @@ impl ObjectTree {
         });
     }
 
+    fn load_favorites(&mut self) {
+        let tx = self.tx.clone();
+        let service = self.query_service.clone();
+
+        self.runtime.spawn(async move {
+            let favorites = service.favorites().await;
+            let _ = tx.send(TreeEvent::FavoritesLoaded(favorites));
+        });
+    }
+
     fn load_connection_children(&mut self, connection_id: ConnectionId) {
         if let Some((tree_node, _)) = self.connections.get_mut(&connection_id) {
             tree_node.loading = true;
@@ -919,6 +1048,11 @@ impl ObjectTree {
     fn load_children(&mut self, node: MetadataNode) {
         let key = NodeKey::from(&node.path);
         if self.child_cache.contains_key(&key) {
+            return;
+        }
+        if node.kind == MetadataNodeKind::QueriesFolder {
+            let children = self.query_nodes_for_folder(&node);
+            self.child_cache.insert(key, children);
             return;
         }
         self.load_children_for_path(node.path);
@@ -1102,6 +1236,11 @@ impl ObjectTree {
                             }
                         }
                     }
+                }
+                TreeEvent::FavoritesLoaded(favorites) => {
+                    self.favorite_queries = favorites;
+                    self.child_cache
+                        .retain(|key, _| key.path_kind != MetadataNodeKind::QueriesFolder);
                 }
                 TreeEvent::Connected(id, result) => {
                     if let Some((_, status)) = self.connections.get_mut(&id) {
@@ -1462,6 +1601,7 @@ fn node_kind_badge(kind: MetadataNodeKind, detail: Option<&str>) -> (&'static st
         MetadataNodeKind::TablesFolder => ("TBL", Color32::from_rgb(86, 117, 151)),
         MetadataNodeKind::ViewsFolder => ("VW", Color32::from_rgb(121, 104, 173)),
         MetadataNodeKind::FunctionsFolder => ("FN", Color32::from_rgb(154, 111, 65)),
+        MetadataNodeKind::QueriesFolder => ("Q", Color32::from_rgb(70, 124, 180)),
         MetadataNodeKind::ColumnsFolder => ("COL", Color32::from_rgb(94, 122, 122)),
         MetadataNodeKind::IndexesFolder => ("IX", Color32::from_rgb(113, 116, 160)),
         MetadataNodeKind::ForeignKeysFolder => ("FK", Color32::from_rgb(126, 133, 88)),
@@ -1473,6 +1613,7 @@ fn node_kind_badge(kind: MetadataNodeKind, detail: Option<&str>) -> (&'static st
         MetadataNodeKind::ForeignKey => ("FK", Color32::from_rgb(114, 124, 71)),
         MetadataNodeKind::Trigger => ("TR", Color32::from_rgb(174, 92, 76)),
         MetadataNodeKind::Function => ("ƒ", Color32::from_rgb(161, 100, 48)),
+        MetadataNodeKind::Query => ("Q", Color32::from_rgb(52, 111, 176)),
         MetadataNodeKind::RedisKeysFolder | MetadataNodeKind::RedisKey => {
             ("K", Color32::from_rgb(190, 66, 62))
         }
@@ -1487,6 +1628,7 @@ fn node_kind_name(kind: MetadataNodeKind) -> &'static str {
         MetadataNodeKind::TablesFolder => "Tables",
         MetadataNodeKind::ViewsFolder => "Views",
         MetadataNodeKind::FunctionsFolder => "Functions",
+        MetadataNodeKind::QueriesFolder => "Queries",
         MetadataNodeKind::ColumnsFolder => "Columns",
         MetadataNodeKind::IndexesFolder => "Indexes",
         MetadataNodeKind::ForeignKeysFolder => "Foreign keys",
@@ -1498,6 +1640,7 @@ fn node_kind_name(kind: MetadataNodeKind) -> &'static str {
         MetadataNodeKind::ForeignKey => "Foreign key",
         MetadataNodeKind::Trigger => "Trigger",
         MetadataNodeKind::Function => "Function",
+        MetadataNodeKind::Query => "Query",
         MetadataNodeKind::RedisDatabase => "Redis database",
         MetadataNodeKind::RedisKeysFolder => "Redis keys",
         MetadataNodeKind::RedisKey => "Redis key",

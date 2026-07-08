@@ -127,6 +127,7 @@ impl DesktopApp {
             connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), rt_cm_ui),
             object_tree: ObjectTree::new(
                 metadata_service.clone(),
+                query_service.clone(),
                 session_manager,
                 runtime.clone(),
             ),
@@ -372,6 +373,11 @@ impl DesktopApp {
                     let query_status = self.query_editor.ui(ctx, ui);
                     if let Some(message) = query_status {
                         if !message.is_empty() {
+                            if matches!(message.as_str(), "Favorite saved" | "Favorite removed")
+                                && self.state.status != message
+                            {
+                                self.object_tree.reload_favorites();
+                            }
                             self.state.set_status(message);
                         }
                     }
@@ -584,6 +590,20 @@ impl DesktopApp {
                         .new_query_with_connection(connection_id, database, schema);
                     self.state
                         .set_status(format!("New query on {}", connection_id));
+                }
+                ObjectTreeAction::OpenSavedQuery {
+                    connection_id,
+                    database,
+                    schema,
+                    title,
+                    sql,
+                } => {
+                    let status_title = title.clone();
+                    self.query_editor
+                        .open_saved_query(connection_id, database, schema, title, sql);
+                    self.active_panel = ActivePanel::QueryEditor;
+                    self.state
+                        .set_status(format!("Opened saved query: {status_title}"));
                 }
                 ObjectTreeAction::ViewKey {
                     connection_id,

@@ -265,6 +265,37 @@ impl QueryEditor {
         }
     }
 
+    pub fn open_saved_query(
+        &mut self,
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        title: String,
+        sql: String,
+    ) {
+        let profile = self
+            .connections
+            .iter()
+            .find(|profile| profile.id == connection_id && profile.kind.is_relational())
+            .cloned();
+
+        if let Some(profile) = profile {
+            let tab_id = self.open_new_tab(profile.clone());
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.title = title;
+                tab.database = database.or(profile.database.clone());
+                tab.schema = schema;
+                tab.sql = sql;
+                tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                tab.dirty = false;
+            }
+            self.refresh_metadata_for_tab(tab_id);
+            self.status = "Saved query opened".to_string();
+        } else {
+            self.status = "Saved query connection is unavailable".to_string();
+        }
+    }
+
     pub fn execute_current_statement(&mut self) {
         self.execute_active(QueryExecutionMode::CurrentStatement);
     }
@@ -1428,8 +1459,12 @@ impl QueryEditor {
         let tx = self.tx.clone();
         let sql = tab.sql.clone();
         let connection_id = Some(tab.connection_id);
+        let database = tab.database.clone();
+        let schema = tab.schema.clone();
         self.runtime.spawn(async move {
-            let result = service.add_favorite(connection_id, title, sql).await;
+            let result = service
+                .add_favorite(connection_id, database, schema, title, sql)
+                .await;
             let _ = tx.send(QueryEditorEvent::FavoriteSaved(result));
         });
     }

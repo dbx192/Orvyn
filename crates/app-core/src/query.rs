@@ -408,6 +408,8 @@ impl QueryService {
     pub async fn add_favorite(
         &self,
         connection_id: Option<ConnectionId>,
+        database: Option<String>,
+        schema: Option<String>,
         title: String,
         sql: String,
     ) -> Result<FavoriteQuery> {
@@ -415,6 +417,8 @@ impl QueryService {
         let favorite = FavoriteQuery {
             id: QueryId::new(),
             connection_id,
+            database,
+            schema,
             title,
             sql,
             created_at: now,
@@ -435,6 +439,8 @@ impl QueryService {
         &self,
         id: QueryId,
         connection_id: Option<ConnectionId>,
+        database: Option<String>,
+        schema: Option<String>,
         title: String,
         sql: String,
     ) -> Result<FavoriteQuery> {
@@ -444,6 +450,8 @@ impl QueryService {
             .get_mut(&id)
             .ok_or_else(|| AppError::validation("favorite query not found"))?;
         favorite.connection_id = connection_id;
+        favorite.database = database;
+        favorite.schema = schema;
         favorite.title = title;
         favorite.sql = sql;
         favorite.updated_at = db_common::now_utc();

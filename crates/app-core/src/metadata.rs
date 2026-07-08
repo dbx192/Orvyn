@@ -304,22 +304,8 @@ impl MetadataService {
                 let databases = reader.list_databases(profile, password).await?;
                 Ok(database_nodes(profile.id, databases))
             }
-            MetadataNodeKind::Database => {
-                let schemas = reader
-                    .list_schemas(profile, password, path.database.as_deref())
-                    .await?;
-                Ok(schema_nodes(profile.id, path, schemas))
-            }
-            MetadataNodeKind::Schema => Ok(vec![
-                folder_node(profile.id, path, MetadataNodeKind::TablesFolder, "Tables"),
-                folder_node(profile.id, path, MetadataNodeKind::ViewsFolder, "Views"),
-                folder_node(
-                    profile.id,
-                    path,
-                    MetadataNodeKind::FunctionsFolder,
-                    "Functions",
-                ),
-            ]),
+            MetadataNodeKind::Database => self.database_object_nodes(profile, password, path).await,
+            MetadataNodeKind::Schema => self.schema_object_nodes(profile, password, path).await,
             MetadataNodeKind::TablesFolder => {
                 let tables = reader
                     .list_tables(
@@ -352,22 +338,7 @@ impl MetadataService {
                     MetadataNodeKind::View,
                 ))
             }
-            MetadataNodeKind::Table => Ok(vec![
-                folder_node(profile.id, path, MetadataNodeKind::ColumnsFolder, "Columns"),
-                folder_node(profile.id, path, MetadataNodeKind::IndexesFolder, "Indexes"),
-                folder_node(
-                    profile.id,
-                    path,
-                    MetadataNodeKind::ForeignKeysFolder,
-                    "Foreign Keys",
-                ),
-                folder_node(
-                    profile.id,
-                    path,
-                    MetadataNodeKind::TriggersFolder,
-                    "Triggers",
-                ),
-            ]),
+            MetadataNodeKind::Table | MetadataNodeKind::View => Ok(Vec::new()),
             MetadataNodeKind::ColumnsFolder => {
                 let table = required_object(path)?;
                 let columns = reader
@@ -433,6 +404,65 @@ impl MetadataService {
             }
             _ => Ok(Vec::new()),
         }
+    }
+
+    async fn database_object_nodes(
+        &self,
+        profile: &db_common::ConnectionProfile,
+        password: Option<&str>,
+        path: &MetadataPath,
+    ) -> Result<Vec<MetadataNode>> {
+        let reader = self.relational_reader(profile.kind)?;
+        let schemas = reader
+            .list_schemas(profile, password, path.database.as_deref())
+            .await?;
+
+        let mut nodes = Vec::new();
+        if schemas.is_empty() {
+            append_schema_objects(reader, profile, password, path, None, false, &mut nodes).await?;
+        } else {
+            let show_schema_prefix = schemas.len() > 1;
+            for schema in schemas {
+                append_schema_objects(
+                    reader,
+                    profile,
+                    password,
+                    path,
+                    Some(schema.name.as_str()),
+                    show_schema_prefix,
+                    &mut nodes,
+                )
+                .await?;
+            }
+        }
+
+        nodes.sort_by(|left, right| {
+            node_sort_group(left)
+                .cmp(&node_sort_group(right))
+                .then_with(|| left.label.cmp(&right.label))
+        });
+        Ok(nodes)
+    }
+
+    async fn schema_object_nodes(
+        &self,
+        profile: &db_common::ConnectionProfile,
+        password: Option<&str>,
+        path: &MetadataPath,
+    ) -> Result<Vec<MetadataNode>> {
+        let reader = self.relational_reader(profile.kind)?;
+        let mut nodes = Vec::new();
+        append_schema_objects(
+            reader,
+            profile,
+            password,
+            path,
+            path.schema.as_deref(),
+            false,
+            &mut nodes,
+        )
+        .await?;
+        Ok(nodes)
     }
 
     async fn redis_children(
@@ -516,20 +546,72 @@ fn database_nodes(connection_id: ConnectionId, objects: Vec<DatabaseObject>) -> 
         .collect()
 }
 
-fn schema_nodes(
+async fn append_schema_objects(
+    reader: &Arc<dyn RelationalMetadataReader>,
+    profile: &db_common::ConnectionProfile,
+    password: Option<&str>,
+    parent: &MetadataPath,
+    schema: Option<&str>,
+    show_schema_prefix: bool,
+    nodes: &mut Vec<MetadataNode>,
+) -> Result<()> {
+    let tables = reader
+        .list_tables(profile, password, parent.database.as_deref(), schema)
+        .await?;
+    nodes.extend(direct_object_nodes(
+        profile.id,
+        parent,
+        tables,
+        MetadataNodeKind::Table,
+        schema,
+        show_schema_prefix,
+    ));
+
+    let views = reader
+        .list_views(profile, password, parent.database.as_deref(), schema)
+        .await?;
+    nodes.extend(direct_object_nodes(
+        profile.id,
+        parent,
+        views,
+        MetadataNodeKind::View,
+        schema,
+        show_schema_prefix,
+    ));
+
+    Ok(())
+}
+
+fn direct_object_nodes(
     connection_id: ConnectionId,
     parent: &MetadataPath,
     objects: Vec<DatabaseObject>,
+    kind: MetadataNodeKind,
+    schema: Option<&str>,
+    show_schema_prefix: bool,
 ) -> Vec<MetadataNode> {
     objects
         .into_iter()
         .map(|object| {
-            let mut path = MetadataPath::connection(connection_id).child(MetadataNodeKind::Schema);
-            if let Some(database) = parent.database.clone() {
-                path = path.with_database(database);
+            let object_schema = object
+                .schema
+                .or_else(|| schema.map(ToOwned::to_owned))
+                .filter(|value| !value.is_empty());
+            let label = if show_schema_prefix {
+                object_schema
+                    .as_ref()
+                    .map(|schema| format!("{schema}.{}", object.name))
+                    .unwrap_or_else(|| object.name.clone())
+            } else {
+                object.name.clone()
+            };
+            let mut path = inherit_parent(connection_id, parent)
+                .child(kind)
+                .with_object(object.name);
+            if let Some(schema) = object_schema {
+                path = path.with_schema(schema);
             }
-            path = path.with_schema(object.name.clone());
-            MetadataNode::new(path, object.name, MetadataNodeKind::Schema)
+            MetadataNode::new(path, label, kind).leaf(true)
         })
         .collect()
 }
@@ -549,9 +631,22 @@ fn object_nodes(
             if let Some(schema) = object.schema {
                 path = path.with_schema(schema);
             }
-            MetadataNode::new(path, object.name, kind)
+            let leaf = matches!(
+                kind,
+                MetadataNodeKind::Table | MetadataNodeKind::View | MetadataNodeKind::Function
+            );
+            MetadataNode::new(path, object.name, kind).leaf(leaf)
         })
         .collect()
+}
+
+fn node_sort_group(node: &MetadataNode) -> u8 {
+    match node.kind {
+        MetadataNodeKind::Table => 0,
+        MetadataNodeKind::View => 1,
+        MetadataNodeKind::QueriesFolder | MetadataNodeKind::Query => 2,
+        _ => 9,
+    }
 }
 
 fn column_nodes(

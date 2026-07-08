@@ -486,6 +486,8 @@ mod tests {
         let favorite = FavoriteQuery {
             id: QueryId::new(),
             connection_id: None,
+            database: None,
+            schema: None,
             title: "Test".to_string(),
             sql: "SELECT 1".to_string(),
             created_at: db_common::now_utc(),
