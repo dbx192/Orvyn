@@ -8,7 +8,10 @@ use db_common::{
     ErrorKind, LogicalType, QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result,
     Row, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
-use sqlx::{mysql::MySqlPoolOptions, Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
+use sqlx::{
+    mysql::{MySqlPoolOptions, MySqlRow},
+    Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo,
+};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 
@@ -96,17 +99,20 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             .map_err(mysql_query_error)?;
         pool.close().await;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| row.get::<String, _>(0))
-            .filter(|name| !matches!(name.as_str(), "information_schema" | "performance_schema"))
-            .map(|name| DatabaseObject {
+        let mut databases = Vec::new();
+        for row in rows {
+            let name = mysql_string_at(&row, 0)?;
+            if matches!(name.as_str(), "information_schema" | "performance_schema") {
+                continue;
+            }
+            databases.push(DatabaseObject {
                 kind: DatabaseObjectKind::Database,
                 name,
                 schema: None,
                 parent: None,
-            })
-            .collect())
+            });
+        }
+        Ok(databases)
     }
 
     async fn list_schemas(
@@ -189,22 +195,19 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .map_err(mysql_query_error)?;
         pool.close().await;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| {
-                let comment: Option<String> = row.get("COLUMN_COMMENT");
-                TableColumn {
-                    name: row.get("COLUMN_NAME"),
-                    database_type: row.get("COLUMN_TYPE"),
-                    nullable: row
-                        .get::<String, _>("IS_NULLABLE")
-                        .eq_ignore_ascii_case("YES"),
-                    default_value: row.get("COLUMN_DEFAULT"),
-                    primary_key: row.get::<String, _>("COLUMN_KEY") == "PRI",
-                    comment: comment.filter(|value| !value.is_empty()),
-                }
-            })
-            .collect())
+        let mut columns = Vec::new();
+        for row in rows {
+            let comment = mysql_optional_string(&row, "COLUMN_COMMENT")?;
+            columns.push(TableColumn {
+                name: mysql_string(&row, "COLUMN_NAME")?,
+                database_type: mysql_string(&row, "COLUMN_TYPE")?,
+                nullable: mysql_string(&row, "IS_NULLABLE")?.eq_ignore_ascii_case("YES"),
+                default_value: mysql_optional_string(&row, "COLUMN_DEFAULT")?,
+                primary_key: mysql_string(&row, "COLUMN_KEY")? == "PRI",
+                comment: comment.filter(|value| !value.is_empty()),
+            });
+        }
+        Ok(columns)
     }
 
     async fn list_indexes(
@@ -235,7 +238,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .map_err(mysql_query_error)?;
         pool.close().await;
 
-        Ok(group_mysql_indexes(rows))
+        group_mysql_indexes(rows)
     }
 
     async fn list_foreign_keys(
@@ -271,7 +274,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .map_err(mysql_query_error)?;
         pool.close().await;
 
-        Ok(group_mysql_foreign_keys(rows))
+        group_mysql_foreign_keys(rows)
     }
 
     async fn list_triggers(
@@ -302,15 +305,16 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .map_err(mysql_query_error)?;
         pool.close().await;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| TableTrigger {
-                name: row.get("TRIGGER_NAME"),
-                event: row.get("EVENT_MANIPULATION"),
-                timing: row.get("ACTION_TIMING"),
-                statement: row.get("ACTION_STATEMENT"),
-            })
-            .collect())
+        let mut triggers = Vec::new();
+        for row in rows {
+            triggers.push(TableTrigger {
+                name: mysql_string(&row, "TRIGGER_NAME")?,
+                event: mysql_string(&row, "EVENT_MANIPULATION")?,
+                timing: mysql_string(&row, "ACTION_TIMING")?,
+                statement: mysql_optional_string(&row, "ACTION_STATEMENT")?,
+            });
+        }
+        Ok(triggers)
     }
 
     async fn list_functions(
@@ -339,15 +343,16 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .map_err(mysql_query_error)?;
         pool.close().await;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| DatabaseFunction {
-                name: row.get("ROUTINE_NAME"),
-                return_type: row.get("DTD_IDENTIFIER"),
-                language: row.get("EXTERNAL_LANGUAGE"),
-                kind: row.get("ROUTINE_TYPE"),
-            })
-            .collect())
+        let mut functions = Vec::new();
+        for row in rows {
+            functions.push(DatabaseFunction {
+                name: mysql_string(&row, "ROUTINE_NAME")?,
+                return_type: mysql_optional_string(&row, "DTD_IDENTIFIER")?,
+                language: mysql_optional_string(&row, "EXTERNAL_LANGUAGE")?,
+                kind: mysql_string(&row, "ROUTINE_TYPE")?,
+            });
+        }
+        Ok(functions)
     }
 
     async fn get_create_table_sql(
@@ -372,7 +377,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             .map_err(mysql_query_error)?;
         pool.close().await;
 
-        Ok(row.get(1))
+        mysql_string_at(&row, 1)
     }
 }
 
@@ -521,18 +526,52 @@ async fn list_mysql_objects(
     .map_err(mysql_query_error)?;
     pool.close().await;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let name: String = row.get("TABLE_NAME");
-            DatabaseObject {
-                kind,
-                name,
-                schema: Some(database.to_string()),
-                parent: Some(database.to_string()),
-            }
-        })
-        .collect())
+    let mut objects = Vec::new();
+    for row in rows {
+        objects.push(DatabaseObject {
+            kind,
+            name: mysql_string(&row, "TABLE_NAME")?,
+            schema: Some(database.to_string()),
+            parent: Some(database.to_string()),
+        });
+    }
+    Ok(objects)
+}
+
+fn mysql_string_at(row: &MySqlRow, index: usize) -> Result<String> {
+    mysql_optional_string_at(row, index)?.ok_or_else(|| {
+        AppError::new(ErrorKind::Query, "failed to query MySQL metadata")
+            .with_detail(format!("column {index} was NULL"))
+    })
+}
+
+fn mysql_optional_string_at(row: &MySqlRow, index: usize) -> Result<Option<String>> {
+    if let Ok(value) = row.try_get::<Option<String>, _>(index) {
+        return Ok(value);
+    }
+    if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {
+        return Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()));
+    }
+    row.try_get::<Option<String>, _>(index)
+        .map_err(mysql_query_error)
+}
+
+fn mysql_string(row: &MySqlRow, name: &str) -> Result<String> {
+    mysql_optional_string(row, name)?.ok_or_else(|| {
+        AppError::new(ErrorKind::Query, "failed to query MySQL metadata")
+            .with_detail(format!("column {name} was NULL"))
+    })
+}
+
+fn mysql_optional_string(row: &MySqlRow, name: &str) -> Result<Option<String>> {
+    if let Ok(value) = row.try_get::<Option<String>, _>(name) {
+        return Ok(value);
+    }
+    if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(name) {
+        return Ok(value.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()));
+    }
+    row.try_get::<Option<String>, _>(name)
+        .map_err(mysql_query_error)
 }
 
 fn mysql_rows_to_query_result(statement: &str, rows: Vec<sqlx::mysql::MySqlRow>) -> QueryResult {
@@ -608,13 +647,13 @@ fn mysql_logical_type(type_name: &str) -> LogicalType {
     }
 }
 
-fn group_mysql_indexes(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<TableIndex> {
+fn group_mysql_indexes(rows: Vec<MySqlRow>) -> Result<Vec<TableIndex>> {
     let mut indexes: Vec<TableIndex> = Vec::new();
 
     for row in rows {
-        let name: String = row.get("INDEX_NAME");
-        let column: String = row.get("COLUMN_NAME");
-        let non_unique: i8 = row.get("NON_UNIQUE");
+        let name = mysql_string(&row, "INDEX_NAME")?;
+        let column = mysql_string(&row, "COLUMN_NAME")?;
+        let non_unique: i8 = row.try_get("NON_UNIQUE").map_err(mysql_query_error)?;
 
         if let Some(index) = indexes.iter_mut().find(|index| index.name == name) {
             index.columns.push(column);
@@ -629,19 +668,19 @@ fn group_mysql_indexes(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<TableIndex> {
         });
     }
 
-    indexes
+    Ok(indexes)
 }
 
-fn group_mysql_foreign_keys(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<TableForeignKey> {
+fn group_mysql_foreign_keys(rows: Vec<MySqlRow>) -> Result<Vec<TableForeignKey>> {
     let mut fks: Vec<TableForeignKey> = Vec::new();
 
     for row in rows {
-        let name: String = row.get("CONSTRAINT_NAME");
-        let column: String = row.get("COLUMN_NAME");
-        let ref_table: String = row.get("REFERENCED_TABLE_NAME");
-        let ref_column: String = row.get("REFERENCED_COLUMN_NAME");
-        let on_update: Option<String> = row.get("UPDATE_RULE");
-        let on_delete: Option<String> = row.get("DELETE_RULE");
+        let name = mysql_string(&row, "CONSTRAINT_NAME")?;
+        let column = mysql_string(&row, "COLUMN_NAME")?;
+        let ref_table = mysql_string(&row, "REFERENCED_TABLE_NAME")?;
+        let ref_column = mysql_string(&row, "REFERENCED_COLUMN_NAME")?;
+        let on_update = mysql_optional_string(&row, "UPDATE_RULE")?;
+        let on_delete = mysql_optional_string(&row, "DELETE_RULE")?;
 
         if let Some(fk) = fks.iter_mut().find(|fk| fk.name == name) {
             fk.columns.push(column);
@@ -659,5 +698,5 @@ fn group_mysql_foreign_keys(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<TableForeig
         });
     }
 
-    fks
+    Ok(fks)
 }

@@ -112,14 +112,17 @@ RUST_DB_CLIENT_MASTER_KEY=change-this-master-key
 
 ## DuckDB 本地库
 
-当前仓库默认允许 `libduckdb-sys` 按当前构建目标自动复用或下载 DuckDB 运行库。
+当前仓库默认让 `libduckdb-sys` 直接链接本地 DuckDB 运行库，不触发在线下载。
 
-- 本地库缓存目录示例：`target/duckdb-download/<target-triple>/1.5.4`
+- 项目使用的统一本地库目录：`target/duckdb-download/local/1.5.4`
 - 项目级 Cargo 配置：`.cargo/config.toml`
 
-如果你更换了 DuckDB 版本、切换目标平台或删除了该目录，首次构建会重新准备对应平台的运行库。
+该目录需要包含当前构建目标对应的 DuckDB 库文件：
 
-如果你的环境不能联网，可以提前把对应目标平台的 DuckDB 动态库放到 `target/duckdb-download/<target-triple>/1.5.4`，后续构建会直接复用。
+- Linux x64：`libduckdb.so`、`duckdb.h`
+- Windows x64 MSVC：`duckdb.lib`、`duckdb.dll`、`duckdb.h`
+
+如果更换 DuckDB 版本、切换目标平台或删除了该目录，需要先把对应平台的 DuckDB 本地库放回去，再运行 `cargo check`/`cargo build`。
 
 ## Windows 11 x64 打包
 
@@ -138,9 +141,11 @@ cargo build -p desktop --release --target x86_64-pc-windows-msvc
 
 - `target/x86_64-pc-windows-msvc/release/desktop.exe`
 
-首次为 Windows 目标构建时，DuckDB 运行库会进入：
+当前 `.cargo/config.toml` 固定指向统一本地库目录。为 Windows 目标构建前，需要确认 Windows x64 的 DuckDB 本地库已经放到：
 
-- `target/duckdb-download/x86_64-pc-windows-msvc/1.5.4`
+- `target/duckdb-download/local/1.5.4`
+
+其中至少需要包含 `duckdb.lib`、`duckdb.dll` 和 `duckdb.h`。
 
 如果你要把程序拷贝到另一台 Windows 11 64 位机器使用，需要同时带上与目标构建匹配的 DuckDB 动态库文件。
 

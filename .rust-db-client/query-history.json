@@ -1,0 +1,70 @@
+{
+  "entries": [
+    {
+      "id": "b3699084-838e-4712-8c4a-a2c915be4f47",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `askme`.`idioms` LIMIT 500",
+      "summary": "SELECT * FROM `askme`.`idioms` LIMIT 500",
+      "executed_at": "2026-07-08T07:01:33.193625100Z",
+      "elapsed_ms": 330,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "784c7a47-2208-48db-8ae5-9a326828cd18",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `base_webman`.`verification_codes` LIMIT 500",
+      "summary": "SELECT * FROM `base_webman`.`verification_codes` LIMIT 500",
+      "executed_at": "2026-07-08T07:00:34.101791200Z",
+      "elapsed_ms": 88,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "a458924a-d77b-4e4d-9e88-b8be5408b6c3",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `base_webman`.`acms_comments` LIMIT 500",
+      "summary": "SELECT * FROM `base_webman`.`acms_comments` LIMIT 500",
+      "executed_at": "2026-07-08T07:00:06.249457600Z",
+      "elapsed_ms": 130,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "ed02307a-7bd6-4f31-aad0-bea74283c951",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `base_webman`.`acms_article_tag` LIMIT 500",
+      "summary": "SELECT * FROM `base_webman`.`acms_article_tag` LIMIT 500",
+      "executed_at": "2026-07-08T06:59:58.080406800Z",
+      "elapsed_ms": 323,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "f3e593a8-ae01-4a7c-8476-edc48c9fb661",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "select * from wa_users",
+      "summary": "select * from wa_users",
+      "executed_at": "2026-07-08T06:40:01.188546500Z",
+      "elapsed_ms": 176,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "ebf6c1d4-e283-4c3c-9566-709a2b3ac7a0",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `askme`.`acms_comments` LIMIT 500",
+      "summary": "SELECT * FROM `askme`.`acms_comments` LIMIT 500",
+      "executed_at": "2026-07-08T06:26:57.780224Z",
+      "elapsed_ms": 312,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    }
+  ]
+}

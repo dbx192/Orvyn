@@ -7,14 +7,14 @@ use db_common::{
     SqlHighlightToken, SqlTokenKind, TextRange,
 };
 use eframe::egui::{
-    text::LayoutJob, Button, Color32, ComboBox, FontId, RichText, ScrollArea, TextEdit,
-    TextFormat, Ui, Window,
+    text::LayoutJob, Align, Button, Color32, ComboBox, FontId, Layout, RichText, ScrollArea,
+    TextEdit, TextFormat, Ui, Window,
 };
 use import_export::{export_query_result_to_file, ExportFormat};
 use std::{
     collections::BTreeMap,
-    sync::Arc,
     sync::mpsc::{self, Receiver, Sender},
+    sync::Arc,
 };
 use tokio::runtime::Handle;
 
@@ -119,6 +119,7 @@ pub struct QueryEditor {
     show_execute_all: bool,
     pending_danger_confirm: Option<PendingDangerConfirm>,
     side_tab: QuerySideTab,
+    side_panel_open: bool,
     favorite_name_input: String,
     status: String,
 }
@@ -147,6 +148,7 @@ impl QueryEditor {
             show_execute_all: false,
             pending_danger_confirm: None,
             side_tab: QuerySideTab::History,
+            side_panel_open: false,
             favorite_name_input: String::new(),
             status: String::new(),
         };
@@ -219,6 +221,24 @@ impl QueryEditor {
         } else {
             self.status = "No relational connections available".to_string();
         }
+    }
+
+    pub fn show_history(&mut self) {
+        self.side_tab = QuerySideTab::History;
+        self.side_panel_open = true;
+        if self.tabs.is_empty() {
+            self.new_query();
+        }
+        self.status = "History opened".to_string();
+    }
+
+    pub fn show_favorites(&mut self) {
+        self.side_tab = QuerySideTab::Favorites;
+        self.side_panel_open = true;
+        if self.tabs.is_empty() {
+            self.new_query();
+        }
+        self.status = "Favorites opened".to_string();
     }
 
     pub fn new_query_with_connection(
@@ -518,13 +538,16 @@ impl QueryEditor {
         };
 
         let editor_height = (ui.available_height() * 0.42).max(180.0);
+        let side_width = 280.0;
         ui.horizontal(|ui| {
+            let main_width = if self.side_panel_open {
+                (ui.available_width() - side_width - 12.0).max(360.0)
+            } else {
+                ui.available_width()
+            };
+
             ui.vertical(|ui| {
-                ui.set_width(300.0);
-                self.history_panel(ui, tab_id);
-            });
-            ui.separator();
-            ui.vertical(|ui| {
+                ui.set_width(main_width);
                 let Some(tab) = self.tabs.get_mut(&tab_id) else {
                     return;
                 };
@@ -536,7 +559,10 @@ impl QueryEditor {
                         let tokens = tab.highlighted_sql.clone();
                         let dialect = connection_kind_for(&self.connections, tab.connection_id);
                         let mut layouter =
-                            move |ui: &Ui, text: &str, wrap_width: f32| -> Arc<eframe::egui::Galley> {
+                            move |ui: &Ui,
+                                  text: &str,
+                                  wrap_width: f32|
+                                  -> Arc<eframe::egui::Galley> {
                                 let mut job = highlight_layout_job(text, &tokens, dialect);
                                 job.wrap.max_width = wrap_width;
                                 ui.fonts(|fonts| fonts.layout_job(job))
@@ -565,6 +591,14 @@ impl QueryEditor {
                         }
                     });
             });
+
+            if self.side_panel_open {
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.set_width(side_width);
+                    self.history_panel(ui, tab_id);
+                });
+            }
         });
 
         ui.separator();
@@ -575,6 +609,11 @@ impl QueryEditor {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.side_tab, QuerySideTab::History, "History");
             ui.selectable_value(&mut self.side_tab, QuerySideTab::Favorites, "Favorites");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.small_button("x").clicked() {
+                    self.side_panel_open = false;
+                }
+            });
         });
         ui.add_space(4.0);
 
@@ -648,11 +687,16 @@ impl QueryEditor {
                 );
                 ui.separator();
                 if ui.button("Export CSV").clicked() {
-                    export_request = Some((result.grid.as_ref().map(|grid| grid.result().clone()), ExportFormat::Csv));
+                    export_request = Some((
+                        result.grid.as_ref().map(|grid| grid.result().clone()),
+                        ExportFormat::Csv,
+                    ));
                 }
                 if ui.button("Export JSON").clicked() {
-                    export_request =
-                        Some((result.grid.as_ref().map(|grid| grid.result().clone()), ExportFormat::Json));
+                    export_request = Some((
+                        result.grid.as_ref().map(|grid| grid.result().clone()),
+                        ExportFormat::Json,
+                    ));
                 }
             });
 
@@ -733,9 +777,14 @@ impl QueryEditor {
         let Some(tab) = self.tabs.get(&tab_id) else {
             return;
         };
-        let Some(statement) =
-            selected_sql_for_mode(tab, if tab.has_selection() { QueryExecutionMode::Selection } else { QueryExecutionMode::CurrentStatement })
-        else {
+        let Some(statement) = selected_sql_for_mode(
+            tab,
+            if tab.has_selection() {
+                QueryExecutionMode::Selection
+            } else {
+                QueryExecutionMode::CurrentStatement
+            },
+        ) else {
             self.status = "No statement available for EXPLAIN".to_string();
             return;
         };
@@ -1224,7 +1273,11 @@ impl QueryEditor {
             .max_height(260.0)
             .show(ui, |ui| {
                 if self.history_entries.is_empty() {
-                    ui.label(RichText::new("No history yet").italics().color(Color32::GRAY));
+                    ui.label(
+                        RichText::new("No history yet")
+                            .italics()
+                            .color(Color32::GRAY),
+                    );
                     return;
                 }
 
@@ -1253,9 +1306,11 @@ impl QueryEditor {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new(conn_name).small().color(Color32::GRAY));
                             ui.label(
-                                RichText::new(entry.executed_at.format("%Y-%m-%d %H:%M:%S").to_string())
-                                    .small()
-                                    .color(Color32::GRAY),
+                                RichText::new(
+                                    entry.executed_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                                )
+                                .small()
+                                .color(Color32::GRAY),
                             );
                             ui.label(
                                 RichText::new(format!("{} ms", entry.elapsed_ms))
@@ -1267,7 +1322,11 @@ impl QueryEditor {
                                     .small()
                                     .color(Color32::GRAY),
                             );
-                            ui.label(RichText::new(if entry.success { "OK" } else { "ERR" }).small().color(success_color));
+                            ui.label(
+                                RichText::new(if entry.success { "OK" } else { "ERR" })
+                                    .small()
+                                    .color(success_color),
+                            );
                         });
                     });
                     ui.add_space(4.0);
@@ -1309,7 +1368,11 @@ impl QueryEditor {
             .max_height(260.0)
             .show(ui, |ui| {
                 if self.favorite_entries.is_empty() {
-                    ui.label(RichText::new("No favorites yet").italics().color(Color32::GRAY));
+                    ui.label(
+                        RichText::new("No favorites yet")
+                            .italics()
+                            .color(Color32::GRAY),
+                    );
                     return;
                 }
 
@@ -1326,11 +1389,9 @@ impl QueryEditor {
                             }
                         });
                         ui.label(
-                            RichText::new(
-                                entry.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                            )
-                            .small()
-                            .color(Color32::GRAY),
+                            RichText::new(entry.updated_at.format("%Y-%m-%d %H:%M:%S").to_string())
+                                .small()
+                                .color(Color32::GRAY),
                         );
                     });
                     ui.add_space(4.0);

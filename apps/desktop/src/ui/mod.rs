@@ -1,6 +1,8 @@
 pub mod app;
 pub mod connection_manager;
+pub mod fonts;
 pub mod format;
+pub mod grid;
 pub mod import_wizard;
 pub mod object_tree;
 pub mod query_editor;

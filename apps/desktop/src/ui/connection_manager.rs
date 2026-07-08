@@ -52,7 +52,7 @@ impl ConnectionForm {
             password: String::new(),
             database: String::new(),
             file_path: String::new(),
-            save_password: false,
+            save_password: true,
             has_stored_password: false,
             password_modified: false,
             read_only: false,
@@ -88,6 +88,8 @@ impl ConnectionForm {
             self.host.clear();
             self.username.clear();
             self.database.clear();
+            self.password.clear();
+            self.save_password = false;
         } else if self.host.is_empty() {
             self.host = "localhost".to_string();
         }
@@ -394,6 +396,9 @@ impl ConnectionManagerUi {
                     );
                     if response.changed() {
                         self.form.password_modified = true;
+                        if !self.form.password.is_empty() {
+                            self.form.save_password = true;
+                        }
                     }
                     ui.end_row();
                 }
@@ -624,6 +629,9 @@ impl ConnectionManagerUi {
                 ConnectionEvent::Tested(result) => match result {
                     Ok(report) => {
                         self.status = if report.success {
+                            if !self.form.password.is_empty() {
+                                self.form.save_password = true;
+                            }
                             "Connection test succeeded".to_string()
                         } else {
                             "Connection test failed".to_string()

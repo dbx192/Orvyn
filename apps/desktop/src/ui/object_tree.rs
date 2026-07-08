@@ -12,6 +12,7 @@ use eframe::egui::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::mpsc::{self, Receiver, Sender},
+    time::Duration,
 };
 use tokio::runtime::Handle;
 
@@ -198,6 +199,9 @@ impl ObjectTree {
         self.drain_events(ctx);
         self.maybe_poll_status(ctx);
         self.maybe_retry_reconnects(ctx);
+        if self.has_pending_work() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         ui.spacing_mut().item_spacing.y = 4.0;
         self.search_bar(ui);
@@ -228,13 +232,16 @@ impl ObjectTree {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Objects").strong().size(13.0));
-            ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!("{} connections", self.connections.len()))
-                        .small()
-                        .color(muted_text_color(ui)),
-                );
-            });
+            ui.with_layout(
+                eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        RichText::new(format!("{} connections", self.connections.len()))
+                            .small()
+                            .color(muted_text_color(ui)),
+                    );
+                },
+            );
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -242,8 +249,9 @@ impl ObjectTree {
             let edit_width = (ui.available_width() - clear_width).max(80.0);
             let response = ui.add_sized(
                 [edit_width, 22.0],
-                TextEdit::singleline(&mut self.search_query)
-                    .hint_text(format!("Search database, table, key (min {SEARCH_MIN_CHARS})")),
+                TextEdit::singleline(&mut self.search_query).hint_text(format!(
+                    "Search database, table, key (min {SEARCH_MIN_CHARS})"
+                )),
             );
             let _ = response.changed();
             if ui
@@ -343,9 +351,7 @@ impl ObjectTree {
 
         if response.clicked() && !show_menu {
             self.selected_node = Some(key.clone());
-            if clicked_in_arrow(&response, 0) || response.double_clicked() {
-                self.toggle_connection(connection_id);
-            }
+            self.toggle_connection(connection_id);
         }
 
         if expanded {
@@ -1083,15 +1089,16 @@ impl ObjectTree {
                             }
                         }
                         Err(error) => {
+                            let error_text = tree_error_text(&error);
                             if is_connection {
                                 if let Some((tree_node, _)) =
                                     self.connections.get_mut(&key.connection_id)
                                 {
                                     tree_node.loading = false;
-                                    tree_node.load_error = Some(error.message.clone());
+                                    tree_node.load_error = Some(error_text);
                                 }
                             } else {
-                                self.status = format!("Failed to load children: {}", error.message);
+                                self.status = format!("Failed to load children: {}", error_text);
                             }
                         }
                     }
@@ -1110,8 +1117,9 @@ impl ObjectTree {
                             self.status = "Connected".to_string();
                         }
                         Err(e) => {
+                            let error_text = tree_error_text(&e);
                             self.schedule_reconnect(id, ConnectionStatus::Failed, _ctx);
-                            self.status = format!("Connection failed: {}", e.message);
+                            self.status = format!("Connection failed: {}", error_text);
                         }
                     };
                 }
@@ -1202,6 +1210,13 @@ impl ObjectTree {
         self.search_active() && self.connection_matches_search(tree_node)
     }
 
+    fn has_pending_work(&self) -> bool {
+        self.connections
+            .values()
+            .any(|(node, status)| node.loading || matches!(status, ConnectionStatus::Connecting))
+            || self.reconnects.values().any(|state| state.in_flight)
+    }
+
     fn schedule_reconnect(
         &mut self,
         connection_id: ConnectionId,
@@ -1255,7 +1270,8 @@ struct TreeRowSpec<'a> {
 
 fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
     let width = ui.available_width().max(1.0);
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, TREE_ROW_HEIGHT), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, TREE_ROW_HEIGHT), Sense::click());
     let painter = ui.painter();
 
     let bg_fill = if spec.selected {
@@ -1266,7 +1282,11 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
         Color32::TRANSPARENT
     };
     if bg_fill != Color32::TRANSPARENT {
-        painter.rect_filled(rect.expand2(vec2(1.0, 0.0)), Rounding::same(TREE_ROW_RADIUS), bg_fill);
+        painter.rect_filled(
+            rect.expand2(vec2(1.0, 0.0)),
+            Rounding::same(TREE_ROW_RADIUS),
+            bg_fill,
+        );
     }
     if spec.selected {
         painter.rect_stroke(
@@ -1304,7 +1324,10 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
 
     let (badge, badge_color) = node_kind_badge(spec.kind, spec.detail);
     let badge_width = if badge.len() > 2 { 28.0 } else { 23.0 };
-    let badge_rect = Rect::from_center_size(pos2(x + badge_width * 0.5, center_y), vec2(badge_width, 15.0));
+    let badge_rect = Rect::from_center_size(
+        pos2(x + badge_width * 0.5, center_y),
+        vec2(badge_width, 15.0),
+    );
     painter.rect_filled(badge_rect, Rounding::same(3.0), badge_color);
     painter.text(
         badge_rect.center(),
@@ -1545,6 +1568,13 @@ fn connection_status_label(status: &ConnectionStatus) -> &'static str {
         ConnectionStatus::Connected => "Connected",
         ConnectionStatus::Failed => "Connection failed",
         ConnectionStatus::Disconnected => "Disconnected",
+    }
+}
+
+fn tree_error_text(error: &AppError) -> String {
+    match error.detail.as_deref() {
+        Some(detail) if !detail.is_empty() => format!("{} - {}", error.message, detail),
+        _ => error.message.clone(),
     }
 }
 

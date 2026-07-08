@@ -49,9 +49,10 @@ UI 模块只持有界面状态和用户操作状态，真实连接、查询、�
 
 ### 2.4 本地构建约束
 
-- DuckDB 运行库按当前构建目标自动复用或下载，缓存目录为 `target/duckdb-download/<target-triple>/1.5.4`。
-- 项目通过 `.cargo/config.toml` 设置 `DUCKDB_DOWNLOAD_LIB=1`，避免把仓库绑定到单一平台的动态库路径。
-- 如果升级 DuckDB crate 版本、切换目标平台、或清理掉 `target/duckdb-download`，需要同步检查 README 中的构建说明是否仍然正确。
+- DuckDB 运行库通过 `.cargo/config.toml` 显式指向统一本地目录 `target/duckdb-download/local/1.5.4`。
+- 项目强制设置 `DUCKDB_DOWNLOAD_LIB=0`，避免 `libduckdb-sys` 从 GitHub Releases 下载运行库。
+- 当前目录同时放置 Linux x64 和 Windows x64 MSVC 的 DuckDB 本地库文件；切换其他目标平台时，需要把对应平台库文件同步放入该目录。
+- 如果升级 DuckDB crate 版本、切换目标平台、或清理掉 `target/duckdb-download`，需要同步更新 `.cargo/config.toml` 和 README 中的构建说明。
 
 ## 3. 功能范围
 

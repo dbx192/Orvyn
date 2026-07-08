@@ -54,7 +54,8 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         app_name,
         native_options,
-        Box::new(move |_| {
+        Box::new(move |cc| {
+            ui::fonts::install_cjk_fonts(&cc.egui_ctx);
             Box::new(DesktopApp::new(
                 app_name.to_string(),
                 connection_manager,

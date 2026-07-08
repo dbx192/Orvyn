@@ -3,14 +3,18 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
+use crate::ui::grid::{
+    estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_outline,
+    resizable_header_cell, row_fill, text_edit_cell,
+};
 use app_core::{metadata::MetadataService, query::QueryService};
 use db_common::{
     CellValue, ConnectionId, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest,
     QueryId, QueryResult, Result, Row, TableColumn,
 };
 use eframe::egui::{
-    Align, Button, Color32, DragValue, Frame, Label, Layout, RichText, ScrollArea, Sense, Stroke,
-    TextEdit, Ui, Vec2, Window,
+    vec2, Button, Color32, DragValue, Frame, Margin, RichText, ScrollArea, Sense, Stroke, TextEdit,
+    Ui, Window,
 };
 use std::{
     collections::BTreeMap,
@@ -22,7 +26,9 @@ use tokio::runtime::Handle;
 const DEFAULT_PAGE_SIZE: usize = 100;
 const MIN_COLUMN_WIDTH: f32 = 72.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
+const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
 const ROW_HEIGHT: f32 = 28.0;
+const HEADER_HEIGHT: f32 = 32.0;
 const ACTION_WIDTH: f32 = 96.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,10 +129,7 @@ impl TableEditor {
         result: QueryResult,
         dialect: Box<dyn Dialect>,
     ) -> Self {
-        let column_widths = columns
-            .iter()
-            .map(|column| ((column.name.len() as f32 * 8.0) + 72.0).clamp(MIN_COLUMN_WIDTH, 180.0))
-            .collect();
+        let column_widths = estimate_column_widths(&columns, &result);
 
         Self {
             schema: Some(schema.into()),
@@ -207,43 +210,48 @@ impl TableEditor {
         }
 
         self.toolbar(ui, &mut message);
-        ui.add_space(8.0);
+        ui.add_space(4.0);
 
         if !self.has_primary_key() && !self.allow_risk_without_pk {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 "No primary key detected. Existing rows are read-only until risk mode is enabled.",
             );
-            ui.add_space(8.0);
+            ui.add_space(4.0);
         }
 
-        Frame::group(ui.style()).show(ui, |ui| {
-            ScrollArea::horizontal()
-                .id_source("table_editor_horizontal")
-                .show(ui, |ui| {
-                    self.header(ui);
-                    ui.separator();
-                    ScrollArea::vertical()
-                        .id_source("table_editor_vertical")
-                        .max_height(ui.available_height().max(280.0))
-                        .auto_shrink([false, false])
-                        .show_rows(
-                            ui,
-                            ROW_HEIGHT,
-                            self.visible_rows().len(),
-                            |ui, row_range| {
-                                let visible_rows = self.visible_rows();
-                                for visible_index in row_range {
-                                    let Some(row_key) = visible_rows.get(visible_index).copied()
-                                    else {
-                                        continue;
-                                    };
-                                    self.row(ui, row_key);
-                                }
-                            },
-                        );
-                });
-        });
+        Frame::default()
+            .fill(ui.visuals().extreme_bg_color)
+            .stroke(grid_stroke(ui))
+            .inner_margin(Margin::same(0.0))
+            .show(ui, |ui| {
+                ScrollArea::horizontal()
+                    .id_source("table_editor_horizontal")
+                    .show(ui, |ui| {
+                        self.header(ui);
+                        ui.separator();
+                        ScrollArea::vertical()
+                            .id_source("table_editor_vertical")
+                            .max_height(ui.available_height().max(280.0))
+                            .auto_shrink([false, false])
+                            .show_rows(
+                                ui,
+                                ROW_HEIGHT,
+                                self.visible_rows().len(),
+                                |ui, row_range| {
+                                    let visible_rows = self.visible_rows();
+                                    for visible_index in row_range {
+                                        let Some(row_key) =
+                                            visible_rows.get(visible_index).copied()
+                                        else {
+                                            continue;
+                                        };
+                                        self.row(ui, row_key, visible_index);
+                                    }
+                                },
+                            );
+                    });
+            });
 
         message
     }
@@ -346,10 +354,7 @@ impl TableEditor {
         columns: Vec<TableColumn>,
         result: QueryResult,
     ) {
-        self.column_widths = columns
-            .iter()
-            .map(|col| ((col.name.len() as f32 * 8.0) + 72.0).clamp(MIN_COLUMN_WIDTH, 180.0))
-            .collect();
+        self.column_widths = estimate_column_widths(&columns, &result);
         self.schema = schema;
         self.table = table;
         self.columns = columns;
@@ -381,21 +386,17 @@ impl TableEditor {
 
     fn toolbar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!(
-                "{}.{}",
-                self.schema.as_deref().unwrap_or(""),
-                self.table
-            ));
+            ui.label(RichText::new(self.table_name()).strong());
+            ui.label(
+                RichText::new(format!("{} rows", self.filtered_existing_rows().len()))
+                    .small()
+                    .color(Color32::GRAY),
+            );
             ui.separator();
-            ui.label(format!(
-                "Page {} / {}",
-                self.page + 1,
-                self.total_pages().max(1)
-            ));
-
             if ui.add_enabled(self.page > 0, Button::new("Prev")).clicked() {
                 self.page -= 1;
             }
+            ui.label(format!("{} / {}", self.page + 1, self.total_pages().max(1)));
             if ui
                 .add_enabled(self.page + 1 < self.total_pages(), Button::new("Next"))
                 .clicked()
@@ -403,7 +404,6 @@ impl TableEditor {
                 self.page += 1;
             }
 
-            ui.label("Rows/page");
             let old_page_size = self.page_size;
             ui.add(
                 DragValue::new(&mut self.page_size)
@@ -413,6 +413,35 @@ impl TableEditor {
             if old_page_size != self.page_size {
                 self.page_size = self.page_size.clamp(25, 1000);
                 self.page = self.page.min(self.total_pages().saturating_sub(1));
+            }
+
+            ui.separator();
+            ui.label("Filter");
+            if !self.columns.is_empty() {
+                self.filter_column = self.filter_column.min(self.columns.len() - 1);
+                let selected = &self.columns[self.filter_column].name;
+                eframe::egui::ComboBox::from_id_source("table_filter_column")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        for (index, column) in self.columns.iter().enumerate() {
+                            ui.selectable_value(&mut self.filter_column, index, &column.name);
+                        }
+                    });
+            }
+            let response = ui.add(
+                TextEdit::singleline(&mut self.filter_text)
+                    .desired_width(180.0)
+                    .hint_text("contains"),
+            );
+            if response.changed() {
+                self.page = 0;
+            }
+            if ui
+                .add_enabled(!self.filter_text.is_empty(), Button::new("Clear"))
+                .clicked()
+            {
+                self.filter_text.clear();
+                self.page = 0;
             }
 
             ui.separator();
@@ -446,41 +475,20 @@ impl TableEditor {
                 *message = Some("Uncommitted table changes rolled back".to_string());
             }
 
-            ui.separator();
-            ui.checkbox(&mut self.allow_risk_without_pk, "Risk mode");
+            if !self.has_primary_key() {
+                ui.separator();
+                ui.checkbox(&mut self.allow_risk_without_pk, "Risk mode");
+            }
             if self.is_committing() {
                 ui.colored_label(Color32::YELLOW, "Committing...");
             }
-            ui.label(format!("{} pending changes", self.pending_change_count()));
-        });
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Filter");
-            if !self.columns.is_empty() {
-                self.filter_column = self.filter_column.min(self.columns.len() - 1);
-                let selected = &self.columns[self.filter_column].name;
-                eframe::egui::ComboBox::from_id_source("table_filter_column")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for (index, column) in self.columns.iter().enumerate() {
-                            ui.selectable_value(&mut self.filter_column, index, &column.name);
-                        }
-                    });
-            }
-            let response = ui.add(
-                TextEdit::singleline(&mut self.filter_text)
-                    .desired_width(220.0)
-                    .hint_text("contains text"),
-            );
-            if response.changed() {
-                self.page = 0;
-            }
-            if ui
-                .add_enabled(!self.filter_text.is_empty(), Button::new("Clear"))
-                .clicked()
-            {
-                self.filter_text.clear();
-                self.page = 0;
+            let pending = self.pending_change_count();
+            if pending > 0 {
+                ui.label(
+                    RichText::new(format!("{pending} pending"))
+                        .small()
+                        .color(Color32::from_rgb(70, 110, 190)),
+                );
             }
         });
     }
@@ -831,12 +839,14 @@ impl TableEditor {
 
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                Vec2::new(ACTION_WIDTH, 46.0),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    ui.label(RichText::new("Actions").strong());
-                },
+            label_cell(
+                ui,
+                ACTION_WIDTH,
+                HEADER_HEIGHT,
+                RichText::new("Actions").strong(),
+                Sense::hover(),
+                header_fill(ui),
+                grid_stroke(ui),
             );
 
             for column_index in 0..self.columns.len() {
@@ -852,36 +862,27 @@ impl TableEditor {
                         ""
                     }
                 );
-                let width = self.column_widths[column_index];
 
-                ui.allocate_ui_with_layout(
-                    Vec2::new(width, 46.0),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        let title = format!("{}{}", column_name, self.sort_marker(column_index));
-                        if ui
-                            .add_sized([width, 22.0], Button::new(RichText::new(title).strong()))
-                            .on_hover_text(column_hover)
-                            .clicked()
-                        {
-                            self.toggle_sort(column_index);
-                            self.page = 0;
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("W");
-                            ui.add(
-                                DragValue::new(&mut self.column_widths[column_index])
-                                    .speed(2.0)
-                                    .clamp_range(MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH),
-                            );
-                        });
-                    },
+                let title = format!("{}{}", column_name, self.sort_marker(column_index));
+                let header = resizable_header_cell(
+                    ui,
+                    &mut self.column_widths[column_index],
+                    HEADER_HEIGHT,
+                    RichText::new(title).strong(),
+                    format!("{column_hover}\nClick to sort"),
+                    ui.make_persistent_id(("table_column_resize", column_index)),
+                    MIN_COLUMN_WIDTH,
+                    MAX_COLUMN_WIDTH,
                 );
+                if header.response.clicked() && !header.resizing {
+                    self.toggle_sort(column_index);
+                    self.page = 0;
+                }
             }
         });
     }
 
-    fn row(&mut self, ui: &mut Ui, row_key: RowKey) {
+    fn row(&mut self, ui: &mut Ui, row_key: RowKey, visible_index: usize) {
         let deleted =
             matches!(row_key, RowKey::Existing(index) if self.deleted_rows.contains_key(&index));
 
@@ -900,9 +901,17 @@ impl TableEditor {
                 );
             }
 
-            ui.allocate_ui_with_layout(
-                Vec2::new(ACTION_WIDTH, ROW_HEIGHT),
-                Layout::left_to_right(Align::Center),
+            let action_cell = label_cell(
+                ui,
+                ACTION_WIDTH,
+                ROW_HEIGHT,
+                RichText::new(""),
+                Sense::hover(),
+                table_cell_fill(ui, visible_index, deleted),
+                grid_stroke(ui),
+            );
+            ui.allocate_ui_at_rect(
+                action_cell.rect.shrink2(vec2(6.0, 2.0)),
                 |ui| match row_key {
                     RowKey::Existing(row_index) => {
                         let can_delete = self.can_edit_existing_rows() && !deleted;
@@ -932,10 +941,18 @@ impl TableEditor {
 
                 match row_key {
                     RowKey::Existing(row_index) => {
-                        self.existing_cell(ui, row_index, column_index, width, editable, deleted);
+                        self.existing_cell(
+                            ui,
+                            row_index,
+                            column_index,
+                            width,
+                            editable,
+                            deleted,
+                            visible_index,
+                        );
                     }
                     RowKey::New(row_index) => {
-                        self.new_cell(ui, row_index, column_index, width);
+                        self.new_cell(ui, row_index, column_index, width, visible_index);
                     }
                 }
             }
@@ -950,6 +967,7 @@ impl TableEditor {
         width: f32,
         editable: bool,
         deleted: bool,
+        visible_index: usize,
     ) {
         let key = CellKey {
             row: row_index,
@@ -968,11 +986,15 @@ impl TableEditor {
                 .get(&key)
                 .cloned()
                 .unwrap_or_else(|| copy_cell_value(original));
-            let response = ui.add_sized(
-                [width, ROW_HEIGHT],
-                TextEdit::singleline(&mut value).desired_width(width),
+            let cell = text_edit_cell(
+                ui,
+                width,
+                ROW_HEIGHT,
+                &mut value,
+                table_cell_fill(ui, visible_index, deleted),
+                grid_stroke(ui),
             );
-            if response.changed() {
+            if cell.response.changed() {
                 if value == copy_cell_value(original) {
                     self.edits.remove(&key);
                 } else {
@@ -980,25 +1002,43 @@ impl TableEditor {
                 }
             }
             if self.edits.contains_key(&key) {
-                let rect = response.rect;
-                ui.painter().rect_stroke(rect, 2.0, (1.0, Color32::YELLOW));
+                paint_cell_outline(ui, cell.rect, Stroke::new(1.0, Color32::YELLOW));
             }
         } else {
             let mut rich = cell_rich_text(original, display_cell_value(original));
             if deleted {
                 rich = rich.strikethrough();
             }
-            ui.add_sized([width, ROW_HEIGHT], Label::new(rich).sense(Sense::hover()))
-                .on_hover_text(copy_cell_value(original));
+            let cell = label_cell(
+                ui,
+                width,
+                ROW_HEIGHT,
+                rich,
+                Sense::hover(),
+                table_cell_fill(ui, visible_index, deleted),
+                grid_stroke(ui),
+            );
+            cell.response.on_hover_text(copy_cell_value(original));
         }
     }
 
-    fn new_cell(&mut self, ui: &mut Ui, row_index: usize, column_index: usize, width: f32) {
+    fn new_cell(
+        &mut self,
+        ui: &mut Ui,
+        row_index: usize,
+        column_index: usize,
+        width: f32,
+        visible_index: usize,
+    ) {
         if let Some(row) = self.new_rows.get_mut(row_index) {
             if let Some(value) = row.values.get_mut(column_index) {
-                ui.add_sized(
-                    [width, ROW_HEIGHT],
-                    TextEdit::singleline(value).desired_width(width),
+                text_edit_cell(
+                    ui,
+                    width,
+                    ROW_HEIGHT,
+                    value,
+                    table_cell_fill(ui, visible_index, false),
+                    grid_stroke(ui),
                 );
             }
         }
@@ -1279,6 +1319,38 @@ fn sql_literal(value: &str) -> String {
         "NULL".to_string()
     } else {
         format!("'{}'", value.replace('\'', "''"))
+    }
+}
+
+fn estimate_column_widths(columns: &[TableColumn], result: &QueryResult) -> Vec<f32> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(column_index, column)| {
+            let mut estimated = estimate_text_width(&column.name)
+                .max(estimate_text_width(&column.database_type))
+                .max(MIN_COLUMN_WIDTH);
+
+            for row in result.rows.iter().take(200) {
+                if let Some(value) = row.values.get(column_index) {
+                    estimated = estimated.max(estimate_text_width(&display_cell_value(value)));
+                }
+            }
+
+            estimated.clamp(MIN_COLUMN_WIDTH, INITIAL_MAX_COLUMN_WIDTH)
+        })
+        .collect()
+}
+
+fn table_cell_fill(ui: &Ui, row: usize, deleted: bool) -> Color32 {
+    if deleted {
+        if ui.visuals().dark_mode {
+            Color32::from_rgb(42, 30, 30)
+        } else {
+            Color32::from_rgb(255, 238, 238)
+        }
+    } else {
+        row_fill(ui, row, false)
     }
 }
 

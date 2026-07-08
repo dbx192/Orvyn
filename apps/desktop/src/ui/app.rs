@@ -7,7 +7,7 @@ use crate::ui::{
     query_editor::QueryEditor,
     redis_browser::RedisBrowserUi,
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
-    state::{AppState, AppTheme, TaskStatus, UiError},
+    state::{AppState, AppTheme, TaskState, TaskStatus},
     table_editor::TableEditor,
     table_structure::TableStructureView,
 };
@@ -22,8 +22,8 @@ use db_common::{
     QueryId, QueryResult, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
 use eframe::egui::{
-    Align, Button, CentralPanel, Color32, Context, Frame, Key, Layout, Modifiers, RichText,
-    SidePanel, TopBottomPanel, Window,
+    vec2, Align, Button, CentralPanel, Color32, Context, Frame, Key, Layout, Margin, Modifiers,
+    RichText, Rounding, SidePanel, Stroke, TopBottomPanel, Ui, Visuals, Window,
 };
 use import_export::{export_query_result_to_file, ExportFormat};
 use std::sync::{Arc, Mutex};
@@ -260,6 +260,49 @@ fn platform_modifiers() -> Modifiers {
     }
 }
 
+fn apply_app_style(ctx: &Context, theme: AppTheme) {
+    let mut visuals = match theme {
+        AppTheme::Light => Visuals::light(),
+        AppTheme::Dark => Visuals::dark(),
+    };
+
+    match theme {
+        AppTheme::Light => {
+            visuals.panel_fill = Color32::from_rgb(246, 247, 249);
+            visuals.extreme_bg_color = Color32::from_rgb(238, 240, 244);
+            visuals.faint_bg_color = Color32::from_rgb(232, 236, 241);
+            visuals.widgets.noninteractive.bg_stroke =
+                Stroke::new(1.0, Color32::from_rgb(210, 216, 224));
+            visuals.selection.bg_fill = Color32::from_rgb(45, 103, 168);
+        }
+        AppTheme::Dark => {
+            visuals.panel_fill = Color32::from_rgb(20, 23, 28);
+            visuals.extreme_bg_color = Color32::from_rgb(13, 15, 19);
+            visuals.faint_bg_color = Color32::from_rgb(31, 36, 43);
+            visuals.widgets.noninteractive.bg_stroke =
+                Stroke::new(1.0, Color32::from_rgb(50, 58, 68));
+            visuals.selection.bg_fill = Color32::from_rgb(48, 108, 172);
+        }
+    }
+
+    visuals.window_rounding = Rounding::same(6.0);
+    visuals.menu_rounding = Rounding::same(6.0);
+    visuals.widgets.noninteractive.rounding = Rounding::same(4.0);
+    visuals.widgets.inactive.rounding = Rounding::same(4.0);
+    visuals.widgets.hovered.rounding = Rounding::same(4.0);
+    visuals.widgets.active.rounding = Rounding::same(4.0);
+    visuals.widgets.open.rounding = Rounding::same(4.0);
+
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = vec2(8.0, 6.0);
+    style.spacing.button_padding = vec2(8.0, 3.0);
+    style.spacing.interact_size = vec2(44.0, 24.0);
+    style.spacing.window_margin = Margin::symmetric(10.0, 8.0);
+    ctx.set_style(style);
+}
+
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Poll any pending async data loads first
@@ -268,11 +311,7 @@ impl eframe::App for DesktopApp {
         // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
 
-        // Apply theme
-        ctx.set_visuals(match self.state.theme {
-            AppTheme::Light => eframe::egui::Visuals::light(),
-            AppTheme::Dark => eframe::egui::Visuals::dark(),
-        });
+        apply_app_style(ctx, self.state.theme);
 
         self.top_toolbar(ctx);
         self.left_tree(ctx);
@@ -285,30 +324,48 @@ impl eframe::App for DesktopApp {
 }
 
 impl DesktopApp {
+    fn workspace_tabs(&mut self, ui: &mut Ui) {
+        ui.horizontal_wrapped(|ui| {
+            self.workspace_tab(ui, ActivePanel::QueryEditor, "Query");
+            if self.table_editor.is_some() {
+                self.workspace_tab(ui, ActivePanel::TableEditor, "Data");
+            }
+            if self.table_structure.is_some() {
+                self.workspace_tab(ui, ActivePanel::TableStructure, "Structure");
+            }
+            if self.import_wizard.is_some() {
+                self.workspace_tab(ui, ActivePanel::ImportWizard, "Import");
+            }
+            if self.redis_browser.is_some() {
+                self.workspace_tab(ui, ActivePanel::RedisBrowser, "Redis");
+            }
+        });
+    }
+
+    fn workspace_tab(&mut self, ui: &mut Ui, panel: ActivePanel, label: &str) {
+        let selected = self.active_panel == panel;
+        if ui.selectable_label(selected, label).clicked() {
+            self.active_panel = panel;
+        }
+    }
+
     fn central_panel(&mut self, ctx: &Context) {
-        CentralPanel::default().show(ctx, |ui| {
+        CentralPanel::default()
+            .frame(
+                Frame::default()
+                    .fill(ctx.style().visuals.panel_fill)
+                    .inner_margin(Margin::symmetric(6.0, 4.0)),
+            )
+            .show(ctx, |ui| {
             if matches!(self.active_panel, ActivePanel::RedisBrowser) && self.redis_browser.is_none()
             {
                 self.active_panel = ActivePanel::QueryEditor;
             }
 
-            // Tab bar to switch between panels
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut self.active_panel, ActivePanel::QueryEditor, "📝 Query Editor");
-                if self.table_editor.is_some() {
-                    ui.selectable_value(&mut self.active_panel, ActivePanel::TableEditor, "📋 Table Editor");
-                }
-                if self.table_structure.is_some() {
-                    ui.selectable_value(&mut self.active_panel, ActivePanel::TableStructure, "📐 Table Structure");
-                }
-                if self.import_wizard.is_some() {
-                    ui.selectable_value(&mut self.active_panel, ActivePanel::ImportWizard, "📥 Import CSV");
-                }
-                if self.redis_browser.is_some() {
-                    ui.selectable_value(&mut self.active_panel, ActivePanel::RedisBrowser, "🔑 Redis Browser");
-                }
-            });
+            self.workspace_tabs(ui);
+            ui.add_space(2.0);
             ui.separator();
+            ui.add_space(2.0);
 
             match self.active_panel {
                 ActivePanel::QueryEditor => {
@@ -331,7 +388,7 @@ impl DesktopApp {
                     None => {
                         ui.vertical_centered(|ui| {
                             ui.add_space(60.0);
-                            ui.label(RichText::new("📋").size(48.0));
+                            ui.label(RichText::new("Table Data").size(24.0).strong());
                             ui.add_space(12.0);
                             ui.label("No table open. Double-click a table in the object tree to load data.");
                             ui.add_space(8.0);
@@ -353,7 +410,7 @@ impl DesktopApp {
                     None => {
                         ui.vertical_centered(|ui| {
                             ui.add_space(60.0);
-                            ui.label(RichText::new("📐").size(48.0));
+                            ui.label(RichText::new("Table Structure").size(24.0).strong());
                             ui.add_space(12.0);
                             ui.label("Loading table structure...");
                         });
@@ -382,77 +439,106 @@ impl DesktopApp {
                     }
                 }
             }
-        });
+            });
     }
 
     fn top_toolbar(&mut self, ctx: &Context) {
-        TopBottomPanel::top("top_toolbar").show(ctx, |ui| {
-            let show_shortcuts = ui.available_width() >= 1160.0;
-            ui.horizontal_wrapped(|ui| {
-                ui.heading(&self.app_name);
-                ui.separator();
-
-                if ui.button("New Connection").clicked() {
-                    self.connection_manager_ui.new_connection();
-                    self.state.set_status("New connection editor opened");
-                }
-                if ui.button("New Query").clicked() {
-                    self.query_editor.new_query();
-                    self.state.set_status("New query tab opened");
-                }
-                if ui.button("Refresh").clicked() {
-                    self.state.set_status("Refresh requested");
-                }
-
-                // Theme toggle button
-                let theme_icon = match self.state.theme {
-                    AppTheme::Light => "🌙",
-                    AppTheme::Dark => "☀️",
-                };
-                if ui
-                    .button(theme_icon)
-                    .on_hover_text("Toggle Theme (Ctrl+T)")
-                    .clicked()
-                {
-                    self.state.toggle_theme();
-                }
-
-                // Show error button for demo
-                if ui.button("Show Error").clicked() {
-                    self.state.push_error(
-                        UiError::new("Connection Error", "Failed to connect to database server.")
-                            .with_detail(
-                                "Error details:\n\
-                         - Host: localhost:3306\n\
-                         - Error code: 1045\n\
-                         - Access denied for user 'root'@'localhost'\n\
-                         - This may indicate incorrect password or insufficient privileges\n\
-                         \n\
-                         Stack trace:\n\
-                         at Connection.connect() line 45\n\
-                         at SessionManager.connect() line 78\n\
-                         at DesktopApp.handle_connect() line 123",
-                            ),
-                    );
-                    self.error_window_open = true;
-                }
-
-                ui.separator();
-                ui.label(RichText::new(&self.state.status).strong());
-
-                if show_shortcuts {
+        let stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
+        TopBottomPanel::top("top_toolbar")
+            .frame(
+                Frame::default()
+                    .fill(ctx.style().visuals.panel_fill)
+                    .stroke(Stroke::new(1.0, stroke.color))
+                    .inner_margin(Margin::symmetric(10.0, 6.0)),
+            )
+            .show(ctx, |ui| {
+                let compact = ui.available_width() < 920.0;
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new(&self.app_name).size(18.0));
                     ui.separator();
-                    self.shortcut_label(ui);
-                }
+
+                    let connection_label = if compact { "Connect" } else { "New Connection" };
+                    if ui
+                        .add_sized([112.0, 28.0], Button::new(connection_label))
+                        .on_hover_text("Create or edit saved database connections")
+                        .clicked()
+                    {
+                        self.connection_manager_ui.new_connection();
+                        self.state.set_status("New connection editor opened");
+                    }
+                    if ui
+                        .add_sized([92.0, 28.0], Button::new("New Query"))
+                        .on_hover_text("Open a new SQL editor tab")
+                        .clicked()
+                    {
+                        self.query_editor.new_query();
+                        self.state.set_status("New query tab opened");
+                    }
+                    if ui
+                        .add_sized([72.0, 28.0], Button::new("History"))
+                        .on_hover_text("Show executed SQL history")
+                        .clicked()
+                    {
+                        self.query_editor.show_history();
+                        self.active_panel = ActivePanel::QueryEditor;
+                        self.state.set_status("History opened");
+                    }
+                    if ui
+                        .add_sized([82.0, 28.0], Button::new("Favorites"))
+                        .on_hover_text("Show saved SQL snippets")
+                        .clicked()
+                    {
+                        self.query_editor.show_favorites();
+                        self.active_panel = ActivePanel::QueryEditor;
+                        self.state.set_status("Favorites opened");
+                    }
+                    if ui
+                        .add_sized([76.0, 28.0], Button::new("Refresh"))
+                        .on_hover_text("Refresh the active browser or workspace")
+                        .clicked()
+                    {
+                        self.state.set_status("Refresh requested");
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let theme_label = match self.state.theme {
+                            AppTheme::Light => "Dark",
+                            AppTheme::Dark => "Light",
+                        };
+                        if ui
+                            .add_sized([58.0, 28.0], Button::new(theme_label))
+                            .on_hover_text("Toggle theme")
+                            .clicked()
+                        {
+                            self.state.toggle_theme();
+                        }
+
+                        let error_count = self.state.errors.len();
+                        if error_count > 0
+                            && ui
+                                .add_sized(
+                                    [86.0, 28.0],
+                                    Button::new(format!("Errors {error_count}")),
+                                )
+                                .on_hover_text("Open error details")
+                                .clicked()
+                        {
+                            self.error_window_open = true;
+                        }
+
+                        ui.separator();
+                        ui.label(RichText::new(&self.state.status).small().strong())
+                            .on_hover_text(&self.state.status);
+                    });
+                });
             });
-        });
     }
 
     fn left_tree(&mut self, ctx: &Context) {
         SidePanel::left("connection_object_tree")
             .resizable(true)
-            .default_width(340.0)
-            .width_range(280.0..=560.0)
+            .default_width(250.0)
+            .width_range(200.0..=420.0)
             .show(ctx, |ui| {
                 let (message, actions) = self.object_tree.ui(ctx, ui);
                 if let Some(message) = message {
@@ -464,11 +550,9 @@ impl DesktopApp {
                 self.handle_tree_actions(actions);
                 if !self.last_tree_status.is_empty() {
                     ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-                        ui.label(
-                            RichText::new(&self.last_tree_status)
-                                .small()
-                                .color(Color32::GRAY),
-                        );
+                        let status = compact_status_text(&self.last_tree_status, 72);
+                        ui.label(RichText::new(status).small().color(Color32::GRAY))
+                            .on_hover_text(&self.last_tree_status);
                     });
                 }
             });
@@ -1119,26 +1203,25 @@ impl DesktopApp {
     fn bottom_status(&mut self, ctx: &Context) {
         TopBottomPanel::bottom("bottom_status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!("Tabs: {}", self.state.tabs.len()));
-                ui.separator();
-                ui.label(format!("Tasks: {}", self.state.tasks.len()));
-                for task in &self.state.tasks {
-                    ui.separator();
-                    ui.label(format!(
-                        "{}: {}",
-                        task_status_label(task.status),
-                        task.label
-                    ));
-                }
+                ui.label(RichText::new(&self.state.status).small())
+                    .on_hover_text(&self.state.status);
+
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let error_count = self.state.errors.len();
                     if error_count > 0 {
-                        if ui.button(format!("⚠ Errors: {}", error_count)).clicked() {
+                        if ui.button(format!("Errors: {}", error_count)).clicked() {
                             self.error_window_open = true;
                         }
                     } else {
                         ui.label(format!("Errors: {}", error_count));
                     }
+                    ui.separator();
+                    ui.label(format!(
+                        "Workspace: {}",
+                        active_panel_label(self.active_panel)
+                    ));
+                    ui.separator();
+                    ui.label(task_summary(&self.state.tasks));
                 });
             });
         });
@@ -1243,33 +1326,6 @@ impl DesktopApp {
             self.error_window_open = false;
         }
     }
-
-    fn shortcut_label(&self, ui: &mut eframe::egui::Ui) {
-        #[cfg(target_os = "macos")]
-        let modifier = "⌘";
-        #[cfg(not(target_os = "macos"))]
-        let modifier = "Ctrl";
-
-        let shortcuts = [
-            (format!("{}N", modifier), "New"),
-            (format!("{}Enter", modifier), "Run"),
-            (format!("{}⇧↵", modifier), "RunSel"),
-            (format!("{}S", modifier), "Save"),
-            (format!("{}R", modifier), "Refresh"),
-            (format!("{}F", modifier), "Search"),
-            (format!("{}L", modifier), "Focus"),
-            ("Esc".to_string(), "Close"),
-            (format!("{}T", modifier), "Theme"),
-        ];
-
-        for (key, label) in shortcuts {
-            ui.label(
-                RichText::new(format!("{} {}", key, label))
-                    .small()
-                    .color(Color32::GRAY),
-            );
-        }
-    }
 }
 
 fn task_status_label(status: TaskStatus) -> &'static str {
@@ -1280,4 +1336,46 @@ fn task_status_label(status: TaskStatus) -> &'static str {
         TaskStatus::Failed => "Failed",
         TaskStatus::Cancelled => "Cancelled",
     }
+}
+
+fn active_panel_label(panel: ActivePanel) -> &'static str {
+    match panel {
+        ActivePanel::QueryEditor => "Query",
+        ActivePanel::TableEditor => "Table Data",
+        ActivePanel::TableStructure => "Structure",
+        ActivePanel::ImportWizard => "Import",
+        ActivePanel::RedisBrowser => "Redis",
+    }
+}
+
+fn task_summary(tasks: &[TaskState]) -> String {
+    if let Some(task) = tasks
+        .iter()
+        .find(|task| matches!(task.status, TaskStatus::Queued | TaskStatus::Running))
+    {
+        return format!("{}: {}", task_status_label(task.status), task.label);
+    }
+
+    let failed = tasks
+        .iter()
+        .filter(|task| matches!(task.status, TaskStatus::Failed))
+        .count();
+    if failed > 0 {
+        return format!("Tasks: {} failed", failed);
+    }
+
+    format!("Tasks: {}", tasks.len())
+}
+
+fn compact_status_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut text = value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    text.push_str("...");
+    text
 }
