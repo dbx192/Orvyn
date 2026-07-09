@@ -183,6 +183,8 @@ pub struct ObjectTree {
     rx: Receiver<TreeEvent>,
     connections: BTreeMap<ConnectionId, (TreeNode, ConnectionStatus)>,
     child_cache: BTreeMap<NodeKey, Vec<MetadataNode>>,
+    child_load_errors: BTreeMap<NodeKey, String>,
+    loading_children: BTreeSet<NodeKey>,
     favorite_queries: Vec<FavoriteQuery>,
     expanded: BTreeSet<String>,
     search_query: String,
@@ -211,6 +213,8 @@ impl ObjectTree {
             rx,
             connections: BTreeMap::new(),
             child_cache: BTreeMap::new(),
+            child_load_errors: BTreeMap::new(),
+            loading_children: BTreeSet::new(),
             favorite_queries: Vec::new(),
             expanded: BTreeSet::new(),
             search_query: String::new(),
@@ -259,6 +263,8 @@ impl ObjectTree {
 
     pub fn reload_root(&mut self) {
         self.child_cache.clear();
+        self.child_load_errors.clear();
+        self.loading_children.clear();
         self.expanded.clear();
         self.redis_pattern.clear();
         self.load_favorites();
@@ -270,6 +276,10 @@ impl ObjectTree {
     pub fn reload_favorites(&mut self) {
         self.child_cache
             .retain(|key, _| key.path_kind != MetadataNodeKind::QueriesFolder);
+        self.child_load_errors
+            .retain(|key, _| key.path_kind != MetadataNodeKind::QueriesFolder);
+        self.loading_children
+            .retain(|key| key.path_kind != MetadataNodeKind::QueriesFolder);
         self.load_favorites();
     }
 
@@ -496,7 +506,20 @@ impl ObjectTree {
                     }
                 }
                 None => {
-                    tree_message_row(ui, depth + 1, "Loading...", false);
+                    if let Some(error) = self.child_load_errors.get(&key).cloned() {
+                        tree_message_row(ui, depth + 1, &format!("Error: {error}"), true);
+                        ui.horizontal(|ui| {
+                            ui.add_space(((depth + 1) as f32 * TREE_INDENT) + TREE_ARROW_WIDTH);
+                            if ui.small_button("Retry").clicked() {
+                                self.load_children(node.clone());
+                            }
+                        });
+                    } else if self.loading_children.contains(&key) {
+                        tree_message_row(ui, depth + 1, "Loading...", false);
+                    } else {
+                        self.load_children(node.clone());
+                        tree_message_row(ui, depth + 1, "Loading...", false);
+                    }
                 }
             }
         }
@@ -1045,6 +1068,8 @@ impl ObjectTree {
         }
         // Invalidate and re-fetch with the new pattern.
         self.child_cache.remove(&key);
+        self.child_load_errors.remove(&key);
+        self.loading_children.remove(&key);
 
         // Recompute the path with extra set to the pattern.
         if let Some((conn_id, _)) = self.find_connection_id_for(&key) {
@@ -1056,7 +1081,7 @@ impl ObjectTree {
                 if !is_empty {
                     path = path.with_extra(&pattern_trimmed);
                 }
-                self.load_children_for_path(path);
+                self.load_children_for_path_with_key(path, key.clone());
             }
         }
     }
@@ -1099,6 +1124,7 @@ impl ObjectTree {
         };
 
         let key = NodeKey::from(&node.path);
+        self.child_load_errors.remove(&key);
         let tx = self.tx.clone();
         let service = self.metadata_service.clone();
         let path = node.path;
@@ -1110,8 +1136,8 @@ impl ObjectTree {
     }
 
     fn load_children(&mut self, node: MetadataNode) {
-        let key = NodeKey::from(&node.path);
-        if self.child_cache.contains_key(&key) {
+        let (path, key) = self.child_request_path(&node);
+        if self.child_cache.contains_key(&key) || self.loading_children.contains(&key) {
             return;
         }
         if node.kind == MetadataNodeKind::QueriesFolder {
@@ -1119,11 +1145,12 @@ impl ObjectTree {
             self.child_cache.insert(key, children);
             return;
         }
-        self.load_children_for_path(node.path);
+        self.load_children_for_path_with_key(path, key);
     }
 
-    fn load_children_for_path(&mut self, path: MetadataPath) {
-        let key = NodeKey::from(&path);
+    fn load_children_for_path_with_key(&mut self, path: MetadataPath, key: NodeKey) {
+        self.loading_children.insert(key.clone());
+        self.child_load_errors.remove(&key);
         let tx = self.tx.clone();
         let service = self.metadata_service.clone();
 
@@ -1131,6 +1158,24 @@ impl ObjectTree {
             let result = service.children(&path, None).await;
             let _ = tx.send(TreeEvent::ChildrenLoaded(key, result));
         });
+    }
+
+    fn child_request_path(&self, node: &MetadataNode) -> (MetadataPath, NodeKey) {
+        let key = NodeKey::from(&node.path);
+        if node.kind != MetadataNodeKind::RedisKeysFolder {
+            return (node.path.clone(), key);
+        }
+
+        let mut path = node.path.clone();
+        if let Some(pattern) = self
+            .redis_pattern
+            .get(&key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            path = path.with_extra(pattern.to_string());
+        }
+        (path, key)
     }
 
     fn refresh_connection(&mut self, connection_id: ConnectionId) {
@@ -1142,6 +1187,10 @@ impl ObjectTree {
         // Drop caches that are descendants of this connection.
         self.child_cache
             .retain(|k, _| k.connection_id != connection_id);
+        self.child_load_errors
+            .retain(|k, _| k.connection_id != connection_id);
+        self.loading_children
+            .retain(|k| k.connection_id != connection_id);
         self.expanded
             .retain(|s| !s.contains(&connection_id.as_uuid().to_string()));
 
@@ -1162,15 +1211,36 @@ impl ObjectTree {
     }
 
     fn refresh_node(&mut self, node: MetadataNode) {
-        let key = NodeKey::from(&node.path);
+        let mut path = refresh_path_for_node(&node);
+        let key = NodeKey::from(&path);
+        if matches!(
+            node.kind,
+            MetadataNodeKind::RedisKeysFolder | MetadataNodeKind::RedisKey
+        ) {
+            if let Some(pattern) = self
+                .redis_pattern
+                .get(&key)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| node.path.extra.clone())
+            {
+                path = path.with_extra(pattern);
+            }
+        }
         self.child_cache.remove(&key);
+        self.child_load_errors.remove(&key);
+        self.loading_children.remove(&key);
 
         // Drop descendant caches for non-leaf refresh.
         self.child_cache.retain(|k, _| !is_descendant(k, &key));
+        self.child_load_errors
+            .retain(|k, _| !is_descendant(k, &key));
+        self.loading_children.retain(|k| !is_descendant(k, &key));
 
         let tx = self.tx.clone();
         let service = self.metadata_service.clone();
-        let path = node.path;
+        self.loading_children.insert(key.clone());
 
         self.runtime.spawn(async move {
             let result = service.children(&path, None).await;
@@ -1272,8 +1342,10 @@ impl ObjectTree {
                 },
                 TreeEvent::ChildrenLoaded(key, result) => {
                     let is_connection = matches!(key.path_kind, MetadataNodeKind::Connection);
+                    self.loading_children.remove(&key);
                     match result {
                         Ok(children) => {
+                            self.child_load_errors.remove(&key);
                             if is_connection {
                                 if let Some((tree_node, status)) =
                                     self.connections.get_mut(&key.connection_id)
@@ -1299,6 +1371,7 @@ impl ObjectTree {
                                     tree_node.load_error = Some(error_text);
                                 }
                             } else {
+                                self.child_load_errors.insert(key, error_text.clone());
                                 self.status = format!("Failed to load children: {}", error_text);
                             }
                         }
@@ -1425,6 +1498,7 @@ impl ObjectTree {
         self.connections
             .values()
             .any(|(node, status)| node.loading || matches!(status, ConnectionStatus::Connecting))
+            || !self.loading_children.is_empty()
             || self.reconnects.values().any(|state| state.in_flight)
     }
 
@@ -1735,6 +1809,43 @@ fn muted_text_color(ui: &Ui) -> Color32 {
     } else {
         Color32::from_rgb(96, 103, 112)
     }
+}
+
+fn refresh_path_for_node(node: &MetadataNode) -> MetadataPath {
+    let base = MetadataPath::connection(node.path.connection_id);
+    let mut path = match node.kind {
+        MetadataNodeKind::Table | MetadataNodeKind::View => {
+            if let Some(schema) = node.path.schema.clone() {
+                base.child(MetadataNodeKind::Schema).with_schema(schema)
+            } else {
+                base.child(MetadataNodeKind::Database)
+            }
+        }
+        MetadataNodeKind::Column => base
+            .child(MetadataNodeKind::ColumnsFolder)
+            .with_object(node.path.object.clone().unwrap_or_default()),
+        MetadataNodeKind::Index => base
+            .child(MetadataNodeKind::IndexesFolder)
+            .with_object(node.path.object.clone().unwrap_or_default()),
+        MetadataNodeKind::ForeignKey => base
+            .child(MetadataNodeKind::ForeignKeysFolder)
+            .with_object(node.path.object.clone().unwrap_or_default()),
+        MetadataNodeKind::Trigger => base
+            .child(MetadataNodeKind::TriggersFolder)
+            .with_object(node.path.object.clone().unwrap_or_default()),
+        MetadataNodeKind::RedisKey => base.child(MetadataNodeKind::RedisKeysFolder),
+        _ => node.path.clone(),
+    };
+
+    if let Some(database) = node.path.database.clone() {
+        path = path.with_database(database);
+    }
+    if !matches!(node.kind, MetadataNodeKind::Table | MetadataNodeKind::View) {
+        if let Some(schema) = node.path.schema.clone() {
+            path = path.with_schema(schema);
+        }
+    }
+    path
 }
 
 fn tree_guide_color(ui: &Ui) -> Color32 {

@@ -133,7 +133,6 @@ pub struct TableEditor {
     deleted_rows: BTreeMap<usize, Row>,
     selected_row: Option<RowKey>,
     selected_rows: BTreeSet<RowKey>,
-    allow_risk_without_pk: bool,
     query_service: Option<QueryService>,
     metadata_service: Option<MetadataService>,
     connection_id: Option<ConnectionId>,
@@ -148,6 +147,9 @@ pub struct TableEditor {
     error_row_index: Option<usize>,
     last_commit_result: Option<(usize, Vec<usize>)>,
     pending_refresh_page: Option<usize>,
+    table_hovered_last_frame: bool,
+    hovered_dirty_cell: Option<CellKey>,
+    hovered_dirty_new_row: Option<usize>,
 }
 
 impl TableEditor {
@@ -178,7 +180,6 @@ impl TableEditor {
             deleted_rows: BTreeMap::new(),
             selected_row: None,
             selected_rows: BTreeSet::new(),
-            allow_risk_without_pk: false,
             query_service: None,
             metadata_service: None,
             connection_id: None,
@@ -193,6 +194,9 @@ impl TableEditor {
             error_row_index: None,
             last_commit_result: None,
             pending_refresh_page: None,
+            table_hovered_last_frame: false,
+            hovered_dirty_cell: None,
+            hovered_dirty_new_row: None,
         }
     }
 
@@ -252,16 +256,11 @@ impl TableEditor {
         self.toolbar(ui, &mut message);
         self.handle_row_shortcuts(ui, &mut message);
 
-        if !self.has_primary_key() && !self.allow_risk_without_pk {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                "No primary key detected. Existing rows are read-only until risk mode is enabled.",
-            );
-        }
-
         let grid_height = (ui.available_height() - 30.0).max(0.0);
         let visible_rows = self.visible_rows();
-        Frame::default()
+        let previous_hovered_dirty_cell = self.hovered_dirty_cell.take();
+        let previous_hovered_dirty_new_row = self.hovered_dirty_new_row.take();
+        let table_frame = Frame::default()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(grid_stroke(ui))
             .inner_margin(Margin::same(0.0))
@@ -297,6 +296,23 @@ impl TableEditor {
                 };
                 self.scroll_x = output.state.offset.x;
             });
+        let table_hovered = ui.ctx().input(|input| {
+            input
+                .pointer
+                .hover_pos()
+                .is_some_and(|pos| table_frame.response.rect.contains(pos))
+        });
+        if previous_hovered_dirty_cell.is_some_and(|key| {
+            self.hovered_dirty_cell != Some(key) && self.edits.contains_key(&key)
+        }) || previous_hovered_dirty_new_row.is_some_and(|row_index| {
+            self.hovered_dirty_new_row != Some(row_index) && self.new_row_has_values(row_index)
+        }) {
+            self.auto_save_pending_changes(&mut message);
+        }
+        if self.table_hovered_last_frame && !table_hovered {
+            self.auto_save_pending_changes(&mut message);
+        }
+        self.table_hovered_last_frame = table_hovered;
 
         self.row_actions_bar(ui, &mut message);
 
@@ -429,7 +445,10 @@ impl TableEditor {
 
     /// Returns true when a commit is in flight and UI actions that mutate data should be disabled.
     fn is_committing(&self) -> bool {
-        matches!(&self.commit_state, CommitState::Committing(_))
+        matches!(
+            &self.commit_state,
+            CommitState::Committing(_) | CommitState::Refreshing(_)
+        )
     }
 
     fn toolbar(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
@@ -498,17 +517,13 @@ impl TableEditor {
                 self.page = 0;
             }
 
-            if !self.has_primary_key() {
-                ui.separator();
-                ui.checkbox(&mut self.allow_risk_without_pk, "Risk mode");
-            }
             if self.is_committing() {
-                ui.colored_label(Color32::YELLOW, "Committing...");
+                ui.colored_label(Color32::YELLOW, "Saving...");
             }
             let pending = self.pending_change_count();
             if pending > 0 {
                 ui.label(
-                    RichText::new(format!("{pending} pending"))
+                    RichText::new(format!("{pending} unsaved"))
                         .small()
                         .color(Color32::from_rgb(70, 110, 190)),
                 );
@@ -550,15 +565,6 @@ impl TableEditor {
             if ui
                 .add_enabled(
                     self.has_changes() && !self.is_committing(),
-                    Button::new("Commit"),
-                )
-                .clicked()
-            {
-                self.show_commit_dialog = true;
-            }
-            if ui
-                .add_enabled(
-                    self.has_changes() && !self.is_committing(),
                     Button::new("Rollback"),
                 )
                 .clicked()
@@ -582,7 +588,7 @@ impl TableEditor {
                 let pending = self.pending_change_count();
                 if pending > 0 {
                     ui.label(
-                        RichText::new(format!("{pending} pending"))
+                        RichText::new(format!("{pending} unsaved"))
                             .small()
                             .color(Color32::from_rgb(70, 110, 190)),
                     );
@@ -959,11 +965,11 @@ impl TableEditor {
                 ui.label(RichText::new("Delete selected row(s)?").strong());
                 ui.add_space(8.0);
                 ui.label(format!(
-                    "{delete_count} row(s) will be marked for delete or removed."
+                    "{delete_count} row(s) will be deleted from the database."
                 ));
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("Existing rows are not deleted from the database until Commit.")
+                    RichText::new("This action is saved immediately.")
                         .small()
                         .color(Color32::GRAY),
                 );
@@ -980,6 +986,7 @@ impl TableEditor {
 
         if confirm {
             self.remove_or_restore_rows(confirm_state.rows, message);
+            self.auto_save_pending_changes(message);
             self.row_delete_confirm = None;
         }
 
@@ -989,6 +996,9 @@ impl TableEditor {
     }
 
     fn execute_commit(&mut self, message: &mut Option<String>) {
+        if self.is_committing() {
+            return;
+        }
         if self.query_service.is_none() || self.connection_id.is_none() {
             *message = Some("Query service not configured".to_string());
             return;
@@ -1074,6 +1084,18 @@ impl TableEditor {
         });
 
         self.commit_state = CommitState::Committing(result_cell);
+        *message = Some("Saving table changes...".to_string());
+    }
+
+    fn auto_save_pending_changes(&mut self, message: &mut Option<String>) {
+        if !self.has_changes() || self.is_committing() {
+            return;
+        }
+        if !self.can_commit() {
+            self.commit_error = Some("No pending table changes".to_string());
+            return;
+        }
+        self.execute_commit(message);
     }
 
     fn start_refresh_after_commit(&mut self) {
@@ -1223,11 +1245,6 @@ impl TableEditor {
         if !self.has_changes() {
             return false;
         }
-        if !self.can_edit_existing_rows()
-            && (!self.edits.is_empty() || !self.deleted_rows.is_empty())
-        {
-            return false;
-        }
         true
     }
 
@@ -1325,8 +1342,10 @@ impl TableEditor {
             for column_index in 0..self.display_column_count() {
                 let width = self.column_widths[column_index];
                 let editable = match row_key {
-                    RowKey::Existing(_) => self.can_edit_existing_rows() && !deleted,
-                    RowKey::New(_) => true,
+                    RowKey::Existing(_) => {
+                        !self.is_committing() && self.can_edit_existing_rows() && !deleted
+                    }
+                    RowKey::New(_) => !self.is_committing(),
                 };
 
                 let cell = match row_key {
@@ -1345,6 +1364,7 @@ impl TableEditor {
                         row_index,
                         column_index,
                         width,
+                        editable,
                         row_selected,
                         visible_index,
                     ),
@@ -1482,7 +1502,14 @@ impl TableEditor {
                     self.edits.insert(key, value);
                 }
             }
+            if cell.response.lost_focus() && self.edits.contains_key(&key) {
+                let mut ignored = None;
+                self.auto_save_pending_changes(&mut ignored);
+            }
             if self.edits.contains_key(&key) {
+                if cell.response.hovered() {
+                    self.hovered_dirty_cell = Some(key);
+                }
                 paint_cell_outline(ui, cell.rect, Stroke::new(1.0, Color32::YELLOW));
             }
             cell
@@ -1513,6 +1540,7 @@ impl TableEditor {
         row_index: usize,
         column_index: usize,
         width: f32,
+        editable: bool,
         row_selected: bool,
         visible_index: usize,
     ) -> GridCellResponse {
@@ -1522,6 +1550,18 @@ impl TableEditor {
             .and_then(|row| row.values.get(column_index))
             .cloned()
             .unwrap_or_default();
+
+        if !editable {
+            return label_cell(
+                ui,
+                width,
+                TABLE_ROW_HEIGHT,
+                RichText::new(current_value),
+                Sense::click(),
+                table_cell_fill(ui, visible_index, false, row_selected),
+                grid_stroke(ui),
+            );
+        }
 
         let mut value = current_value.clone();
         let cell = if self.temporal_kind_for_column(column_index).is_some() {
@@ -1550,6 +1590,13 @@ impl TableEditor {
                     *target = value;
                 }
             }
+        }
+        if cell.response.lost_focus() && self.new_row_has_values(row_index) {
+            let mut ignored = None;
+            self.auto_save_pending_changes(&mut ignored);
+        }
+        if cell.response.hovered() && self.new_row_has_values(row_index) {
+            self.hovered_dirty_new_row = Some(row_index);
         }
 
         cell
@@ -1697,6 +1744,9 @@ impl TableEditor {
         if let Some(value) = apply_value {
             self.set_cell_text(picker.row, picker.column, value);
             *message = Some("Cell date/time updated".to_string());
+            if matches!(picker.row, RowKey::Existing(_)) {
+                self.auto_save_pending_changes(message);
+            }
         } else if open {
             self.time_picker = Some(picker);
         }
@@ -1786,6 +1836,9 @@ impl TableEditor {
         let filter = self.filter_text.trim().to_ascii_lowercase();
         (0..self.result.rows.len())
             .filter(|row_index| {
+                if self.deleted_rows.contains_key(row_index) {
+                    return false;
+                }
                 if filter.is_empty() {
                     return true;
                 }
@@ -1861,7 +1914,7 @@ impl TableEditor {
     }
 
     fn can_edit_existing_rows(&self) -> bool {
-        self.has_primary_key() || self.allow_risk_without_pk
+        true
     }
 
     fn has_primary_key(&self) -> bool {
@@ -1870,6 +1923,13 @@ impl TableEditor {
 
     fn has_changes(&self) -> bool {
         !self.edits.is_empty() || !self.new_rows.is_empty() || !self.deleted_rows.is_empty()
+    }
+
+    fn new_row_has_values(&self, row_index: usize) -> bool {
+        self.new_rows
+            .get(row_index)
+            .map(|row| row.values.iter().any(|value| !value.trim().is_empty()))
+            .unwrap_or(false)
     }
 
     fn pending_change_count(&self) -> usize {
@@ -1886,18 +1946,11 @@ impl TableEditor {
         self.time_picker = None;
         self.commit_error = None;
         self.error_row_index = None;
+        self.hovered_dirty_cell = None;
+        self.hovered_dirty_new_row = None;
     }
 
     fn build_commit_sql(&self) -> std::result::Result<String, String> {
-        if !self.can_edit_existing_rows()
-            && (!self.edits.is_empty() || !self.deleted_rows.is_empty())
-        {
-            return Err(
-                "Table has no primary key; enable risk mode before editing existing rows"
-                    .to_string(),
-            );
-        }
-
         let mut statements = Vec::new();
         statements.extend(self.build_insert_sql()?);
         statements.extend(self.build_update_sql()?);
@@ -2010,10 +2063,7 @@ impl TableEditor {
             if matches!(value, CellValue::Null) {
                 predicates.push(format!("{identifier} IS NULL"));
             } else {
-                predicates.push(format!(
-                    "{identifier} = {}",
-                    sql_literal(&copy_cell_value(value))
-                ));
+                predicates.push(format!("{identifier} = {}", sql_literal_for_cell(value)));
             }
         }
         Ok(predicates.join(" AND "))
@@ -2108,6 +2158,16 @@ fn sql_literal(value: &str) -> String {
         "NULL".to_string()
     } else {
         format!("'{}'", value.replace('\'', "''"))
+    }
+}
+
+fn sql_literal_for_cell(value: &CellValue) -> String {
+    match value {
+        CellValue::Null => "NULL".to_string(),
+        CellValue::Text(value) | CellValue::Decimal(value) => {
+            format!("'{}'", value.replace('\'', "''"))
+        }
+        _ => sql_literal(&copy_cell_value(value)),
     }
 }
 
@@ -2257,15 +2317,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_existing_row_edits_without_primary_key_until_risk_mode() {
+    fn builds_existing_row_edits_without_primary_key_using_full_row_match() {
         let mut editor = test_editor(false);
         editor
             .edits
             .insert(CellKey { row: 0, column: 1 }, "Bob".to_string());
 
-        assert!(editor.build_commit_sql().is_err());
-
-        editor.allow_risk_without_pk = true;
         let sql = editor.build_commit_sql().unwrap();
         assert!(sql.contains("WHERE `id` = '1' AND `name` = 'Alice';"));
     }

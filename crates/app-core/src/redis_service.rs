@@ -67,6 +67,16 @@ impl RedisService {
         db_redis::RedisConnectorWithAuth::get_key_info(&mut conn, database, key).await
     }
 
+    pub async fn get_key_size(
+        &self,
+        connection_id: ConnectionId,
+        database: u8,
+        key: &str,
+    ) -> Result<u64> {
+        let mut conn = self.get_connection(connection_id).await?;
+        db_redis::RedisConnectorWithAuth::get_key_size(&mut conn, database, key).await
+    }
+
     pub async fn load_key(
         &self,
         connection_id: ConnectionId,

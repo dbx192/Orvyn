@@ -199,7 +199,7 @@ fn redis_connection_error(error: redis::RedisError) -> AppError {
 }
 
 fn redis_query_error(error: redis::RedisError) -> AppError {
-    AppError::new(ErrorKind::Query, "failed to query Redis metadata")
+    AppError::new(ErrorKind::Query, "failed to query Redis")
         .with_detail(redact_connection_url(&error.to_string()))
 }
 
@@ -239,6 +239,20 @@ async fn select_database(conn: &mut redis::aio::MultiplexedConnection, database:
         .await
         .map_err(redis_query_error)?;
     Ok(())
+}
+
+fn redis_cell(bytes: Vec<u8>) -> CellValue {
+    match String::from_utf8(bytes) {
+        Ok(text) => CellValue::Text(text),
+        Err(error) => CellValue::Bytes(error.into_bytes()),
+    }
+}
+
+fn redis_field_name(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => BASE64.encode(error.into_bytes()),
+    }
 }
 
 #[async_trait]
@@ -361,7 +375,7 @@ impl RedisConnectorWithAuth {
                     .query_async(conn)
                     .await
                     .map_err(redis_query_error)?;
-                let items: Vec<String> = redis::cmd("LRANGE")
+                let items: Vec<Vec<u8>> = redis::cmd("LRANGE")
                     .arg(key)
                     .arg(0)
                     .arg(len.saturating_sub(1))
@@ -369,21 +383,21 @@ impl RedisConnectorWithAuth {
                     .await
                     .map_err(redis_query_error)?;
                 Ok(RedisValue::List(
-                    items.into_iter().map(CellValue::Text).collect(),
+                    items.into_iter().map(redis_cell).collect(),
                 ))
             }
             "set" => {
-                let members: Vec<String> = redis::cmd("SMEMBERS")
+                let members: Vec<Vec<u8>> = redis::cmd("SMEMBERS")
                     .arg(key)
                     .query_async(conn)
                     .await
                     .map_err(redis_query_error)?;
                 Ok(RedisValue::Set(
-                    members.into_iter().map(CellValue::Text).collect(),
+                    members.into_iter().map(redis_cell).collect(),
                 ))
             }
             "zset" => {
-                let members: Vec<(String, f64)> = redis::cmd("ZRANGE")
+                let members: Vec<(Vec<u8>, f64)> = redis::cmd("ZRANGE")
                     .arg(key)
                     .arg(0)
                     .arg(-1)
@@ -394,12 +408,12 @@ impl RedisConnectorWithAuth {
                 Ok(RedisValue::SortedSet(
                     members
                         .into_iter()
-                        .map(|(m, s)| (CellValue::Text(m), s))
+                        .map(|(m, s)| (redis_cell(m), s))
                         .collect(),
                 ))
             }
             "hash" => {
-                let entries: Vec<(String, String)> = redis::cmd("HGETALL")
+                let entries: Vec<(Vec<u8>, Vec<u8>)> = redis::cmd("HGETALL")
                     .arg(key)
                     .query_async(conn)
                     .await
@@ -407,7 +421,7 @@ impl RedisConnectorWithAuth {
                 Ok(RedisValue::Hash(
                     entries
                         .into_iter()
-                        .map(|(k, v)| (k, CellValue::Text(v)))
+                        .map(|(k, v)| (redis_field_name(k), redis_cell(v)))
                         .collect(),
                 ))
             }
