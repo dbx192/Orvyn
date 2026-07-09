@@ -6,7 +6,7 @@ use crate::ui::format::{
 };
 use crate::ui::grid::{
     estimate_text_width, grid_stroke, label_cell, paint_cell_outline, resizable_header_cell,
-    row_fill,
+    row_fill, TABLE_HEADER_HEIGHT, TABLE_ROW_HEIGHT,
 };
 use db_common::{CellValue, QueryResult};
 use eframe::egui::{
@@ -17,12 +17,10 @@ use import_export::{export_query_result, export_query_result_to_file, ExportForm
 use std::cmp::Ordering;
 use tokio::runtime::Handle;
 
-const DEFAULT_PAGE_SIZE: usize = 100;
+const DEFAULT_PAGE_SIZE: usize = 500;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 320.0;
-const ROW_HEIGHT: f32 = 20.0;
-const HEADER_HEIGHT: f32 = 22.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -89,7 +87,6 @@ impl ResultSetGrid {
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
         let mut message = None;
         self.toolbar(ui, &mut message);
-        ui.add_space(4.0);
 
         if self.result.columns.is_empty() {
             ui.vertical_centered(|ui| {
@@ -124,7 +121,7 @@ impl ResultSetGrid {
                     .id_source("result_set_body")
                     .max_height(body_height)
                     .auto_shrink([false, false])
-                    .show_rows(ui, ROW_HEIGHT, page_rows.len(), |ui, row_range| {
+                    .show_rows(ui, TABLE_ROW_HEIGHT, page_rows.len(), |ui, row_range| {
                         ui.set_min_width(content_width);
                         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                         for visible_row_index in row_range {
@@ -302,10 +299,11 @@ impl ResultSetGrid {
 
     fn header(&mut self, ui: &mut Ui) {
         let viewport_width = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(vec2(viewport_width, HEADER_HEIGHT), Sense::hover());
+        let (rect, _) =
+            ui.allocate_exact_size(vec2(viewport_width, TABLE_HEADER_HEIGHT), Sense::hover());
         let header_rect = Rect::from_min_size(
             pos2(rect.left() - self.scroll_x, rect.top()),
-            vec2(self.content_width(), HEADER_HEIGHT),
+            vec2(self.content_width(), TABLE_HEADER_HEIGHT),
         );
         let mut header_ui = ui.child_ui(header_rect, Layout::left_to_right(Align::Center));
         header_ui.set_clip_rect(rect);
@@ -339,7 +337,7 @@ impl ResultSetGrid {
                 let header = resizable_header_cell(
                     ui,
                     &mut self.column_widths[column_index],
-                    HEADER_HEIGHT,
+                    TABLE_HEADER_HEIGHT,
                     title,
                     format!("{column_hover}\nClick to sort"),
                     ui.make_persistent_id(("result_column_resize", column_index)),
@@ -382,7 +380,7 @@ impl ResultSetGrid {
                 let cell = label_cell(
                     ui,
                     width,
-                    ROW_HEIGHT,
+                    TABLE_ROW_HEIGHT,
                     rich_text,
                     Sense::click(),
                     row_fill(ui, visible_row_index, selected),

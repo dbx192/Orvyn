@@ -5,7 +5,8 @@
 use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
 use crate::ui::grid::{
     estimate_text_width, grid_stroke, label_cell, paint_cell_frame, paint_cell_outline,
-    resizable_header_cell, row_fill, text_edit_cell, GridCellResponse,
+    resizable_header_cell, row_fill, text_edit_cell, GridCellResponse, TABLE_HEADER_HEIGHT,
+    TABLE_ROW_HEIGHT,
 };
 use app_core::{metadata::MetadataService, query::QueryService};
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
@@ -24,12 +25,10 @@ use std::{
 };
 use tokio::runtime::Handle;
 
-const DEFAULT_PAGE_SIZE: usize = 100;
+const DEFAULT_PAGE_SIZE: usize = 500;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
-const ROW_HEIGHT: f32 = 20.0;
-const HEADER_HEIGHT: f32 = 22.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -273,7 +272,7 @@ impl TableEditor {
                         .id_source("table_editor_body")
                         .max_height(grid_height)
                         .auto_shrink([false, false])
-                        .show_rows(ui, ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
+                        .show_rows(ui, TABLE_ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
                             ui.set_min_width(content_width);
                             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                             for visible_index in row_range {
@@ -1141,10 +1140,11 @@ impl TableEditor {
 
     fn header(&mut self, ui: &mut Ui) {
         let viewport_width = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(vec2(viewport_width, HEADER_HEIGHT), Sense::hover());
+        let (rect, _) =
+            ui.allocate_exact_size(vec2(viewport_width, TABLE_HEADER_HEIGHT), Sense::hover());
         let header_rect = Rect::from_min_size(
             pos2(rect.left() - self.scroll_x, rect.top()),
-            vec2(self.content_width(), HEADER_HEIGHT),
+            vec2(self.content_width(), TABLE_HEADER_HEIGHT),
         );
         let mut header_ui = ui.child_ui(header_rect, Layout::left_to_right(Align::Center));
         header_ui.set_clip_rect(rect);
@@ -1159,7 +1159,7 @@ impl TableEditor {
                 let header = resizable_header_cell(
                     ui,
                     &mut self.column_widths[column_index],
-                    HEADER_HEIGHT,
+                    TABLE_HEADER_HEIGHT,
                     RichText::new(title).strong(),
                     format!("{column_hover}\nClick to sort"),
                     ui.make_persistent_id(("table_column_resize", column_index)),
@@ -1185,7 +1185,7 @@ impl TableEditor {
         grid_height: f32,
         message: &mut Option<String>,
     ) {
-        let height = grid_height.max(ROW_HEIGHT * 6.0);
+        let height = grid_height.max(TABLE_ROW_HEIGHT * 6.0);
         let (rect, response) = ui.allocate_exact_size(
             vec2(content_width.max(ui.available_width()), height),
             Sense::click(),
@@ -1374,7 +1374,7 @@ impl TableEditor {
                 text_edit_cell(
                     ui,
                     width,
-                    ROW_HEIGHT,
+                    TABLE_ROW_HEIGHT,
                     &mut value,
                     table_cell_fill(ui, visible_index, deleted, row_selected),
                     grid_stroke(ui),
@@ -1399,7 +1399,7 @@ impl TableEditor {
             let cell = label_cell(
                 ui,
                 width,
-                ROW_HEIGHT,
+                TABLE_ROW_HEIGHT,
                 rich,
                 Sense::click(),
                 table_cell_fill(ui, visible_index, deleted, row_selected),
@@ -1442,7 +1442,7 @@ impl TableEditor {
             text_edit_cell(
                 ui,
                 width,
-                ROW_HEIGHT,
+                TABLE_ROW_HEIGHT,
                 &mut value,
                 table_cell_fill(ui, visible_index, false, row_selected),
                 grid_stroke(ui),
@@ -1470,25 +1470,25 @@ impl TableEditor {
         fill: Color32,
     ) -> GridCellResponse {
         let (rect, background_response) =
-            ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::hover());
+            ui.allocate_exact_size(vec2(width, TABLE_ROW_HEIGHT), Sense::hover());
         paint_cell_frame(ui, rect, fill, grid_stroke(ui));
 
-        let button_width = 20.0;
+        let button_width = 16.0;
         let edit_rect = Rect::from_min_max(
             rect.left_top() + vec2(crate::ui::grid::CELL_PADDING_X, 0.0),
-            rect.right_bottom()
-                + vec2(-(button_width + 1.0 + crate::ui::grid::CELL_PADDING_X), 0.0),
+            rect.right_bottom() + vec2(-(button_width + crate::ui::grid::CELL_PADDING_X), 0.0),
         );
         let button_rect = Rect::from_min_max(
-            rect.right_top() + vec2(-(button_width + 1.0), 1.0),
-            rect.right_bottom() + vec2(-1.0, -1.0),
+            rect.right_top() + vec2(-button_width, 0.0),
+            rect.right_bottom(),
         );
 
         let mut edit_ui = ui.child_ui(edit_rect, Layout::left_to_right(Align::Center));
         edit_ui.set_clip_rect(edit_rect);
         edit_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        edit_ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
         let edit_response = edit_ui.add_sized(
-            [edit_rect.width(), ROW_HEIGHT],
+            [edit_rect.width(), TABLE_ROW_HEIGHT],
             TextEdit::singleline(value)
                 .desired_width(edit_rect.width())
                 .frame(false),

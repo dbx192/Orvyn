@@ -4,6 +4,8 @@ use eframe::egui::{
 };
 
 pub const CELL_PADDING_X: f32 = 0.0;
+pub const TABLE_ROW_HEIGHT: f32 = 16.0;
+pub const TABLE_HEADER_HEIGHT: f32 = 18.0;
 const TEXT_UNIT_WIDTH: f32 = 7.4;
 
 pub struct GridCellResponse {
@@ -90,6 +92,7 @@ pub fn text_edit_cell(
     let mut child_ui = ui.child_ui(inner_rect, Layout::left_to_right(Align::Center));
     child_ui.set_clip_rect(inner_rect);
     child_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    child_ui.spacing_mut().interact_size = vec2(0.0, height);
 
     let edit_response = child_ui.add_sized(
         [inner_rect.width(), height],

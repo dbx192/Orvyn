@@ -371,7 +371,7 @@ impl TableStructureView {
                 Grid::new("structure_columns_grid")
                     .striped(true)
                     .num_columns(5)
-                    .spacing([14.0, 2.0])
+                    .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Type", "Null", "Default", "Key"] {
                             ui.label(RichText::new(*label).strong());
@@ -404,7 +404,7 @@ impl TableStructureView {
                 Grid::new("structure_indexes_grid")
                     .striped(true)
                     .num_columns(4)
-                    .spacing([14.0, 2.0])
+                    .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Columns", "Unique", "Primary"] {
                             ui.label(RichText::new(*label).strong());
@@ -435,7 +435,7 @@ impl TableStructureView {
                 Grid::new("structure_fks_grid")
                     .striped(true)
                     .num_columns(6)
-                    .spacing([14.0, 2.0])
+                    .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &[
                             "Name",
@@ -475,7 +475,7 @@ impl TableStructureView {
                 Grid::new("structure_triggers_grid")
                     .striped(true)
                     .num_columns(4)
-                    .spacing([14.0, 2.0])
+                    .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Event", "Timing", "Statement"] {
                             ui.label(RichText::new(*label).strong());
@@ -512,7 +512,7 @@ impl TableStructureView {
                 Grid::new("structure_functions_grid")
                     .striped(true)
                     .num_columns(3)
-                    .spacing([14.0, 2.0])
+                    .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Return Type", "Kind"] {
                             ui.label(RichText::new(*label).strong());

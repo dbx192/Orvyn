@@ -1,0 +1,546 @@
+use super::{
+    export_sql::{
+        build_create_index_sql, database_export_mode_label, export_database_sql,
+        qualified_table_label,
+    },
+    payloads::{
+        DatabaseExportPayload, IndexCreatePayload, PendingTask, TableDataPayload,
+        TableExportPayload, TableExportRequest, TableStructurePayload,
+    },
+    ActivePanel, DesktopApp,
+};
+use crate::ui::{
+    table_editor::TableEditor,
+    table_structure::{CreateIndexRequest, TableStructureView},
+};
+use db_common::{
+    dialect::{BacktickDialect, DoubleQuoteDialect},
+    AppError, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest, QueryId,
+    QueryResult,
+};
+use import_export::{export_query_result_to_file, ExportFormat};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
+impl DesktopApp {
+    /// Poll pending async loads. Called at the top of each frame.
+    pub(super) fn poll_pending_loads(&mut self) {
+        let table_cell = self.pending_table_load.take();
+        if let Some(cell) = table_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            let row_count = payload.result.rows.len();
+                            let table_name = payload.table.clone();
+                            let conn_id = payload.connection_id;
+                            self.object_tree.mark_connected(conn_id);
+                            self.table_structure = Some(TableStructureView::from_columns(
+                                conn_id,
+                                payload.database.clone(),
+                                payload.schema.clone(),
+                                payload.table.clone(),
+                                payload.columns.clone(),
+                            ));
+                            let editor = TableEditor::with_services(
+                                payload.schema.clone(),
+                                &payload.table,
+                                payload.columns,
+                                payload.result,
+                                payload.dialect,
+                                self.query_service.clone(),
+                                self.metadata_service.clone(),
+                                conn_id,
+                                payload.database,
+                                self.runtime.clone(),
+                            );
+                            self.table_editor = Some(editor);
+                            self.state.set_status(format!(
+                                "Loaded table {} ({} rows)",
+                                table_name, row_count
+                            ));
+                        }
+                        Err(e) => {
+                            self.state
+                                .set_status(format!("Failed to load table: {}", e.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_table_load = Some(cell);
+            }
+        }
+
+        let structure_cell = self.pending_structure_load.take();
+        if let Some(cell) = structure_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            self.object_tree.mark_connected(payload.connection_id);
+                            let view = TableStructureView::new(
+                                payload.connection_id,
+                                payload.database,
+                                payload.schema,
+                                payload.table,
+                                payload.columns,
+                                payload.indexes,
+                                payload.foreign_keys,
+                                payload.triggers,
+                                payload.functions,
+                                payload.create_sql,
+                            );
+                            let table_name = view.table_name();
+                            self.table_structure = Some(view);
+                            self.state
+                                .set_status(format!("Loaded structure for {}", table_name));
+                        }
+                        Err(e) => {
+                            self.state
+                                .set_status(format!("Failed to load structure: {}", e.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_structure_load = Some(cell);
+            }
+        }
+
+        let export_cell = self.pending_table_export.take();
+        if let Some(cell) = export_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            let format_label = match payload.format {
+                                ExportFormat::Csv => "CSV",
+                                ExportFormat::Json => "JSON",
+                                ExportFormat::ExcelCompatible => "Excel",
+                            };
+                            self.state.set_status(format!(
+                                "{} export completed: {} -> {}",
+                                format_label,
+                                payload.table_name,
+                                payload.path.display()
+                            ));
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Export failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_table_export = Some(cell);
+            }
+        }
+
+        let database_export_cell = self.pending_database_export.take();
+        if let Some(cell) = database_export_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            let mode_label = database_export_mode_label(payload.mode);
+                            self.state.set_status(format!(
+                                "{} export completed: {} table(s), {} row(s) -> {}",
+                                mode_label,
+                                payload.table_count,
+                                payload.row_count,
+                                payload.path.display()
+                            ));
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Database export failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_database_export = Some(cell);
+            }
+        }
+
+        let index_create_cell = self.pending_index_create.take();
+        if let Some(cell) = index_create_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            self.state
+                                .set_status(format!("Index created: {}", payload.name));
+                            self.spawn_structure_load(
+                                payload.connection_id,
+                                payload.database,
+                                payload.schema,
+                                payload.table,
+                            );
+                            self.active_panel = ActivePanel::TableStructure;
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Create index failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_index_create = Some(cell);
+            }
+        }
+    }
+
+    /// Spawn an async task to load table data (columns + paginated SELECT).
+    pub(super) fn spawn_table_data_load(
+        &mut self,
+        connection_id: db_common::ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    ) {
+        let metadata_service = self.metadata_service.clone();
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+
+        let cell: PendingTask<TableDataPayload> = Arc::new(Mutex::new(None));
+        self.pending_table_load = Some(cell.clone());
+
+        let db = database.clone();
+        let sch = schema.clone();
+        let tbl = table.clone();
+
+        runtime.spawn(async move {
+            let dialect: Box<dyn Dialect> =
+                match connection_manager.get_profile(connection_id).await {
+                    Ok(Some(profile)) => match profile.kind {
+                        DataSourceKind::MySql => Box::new(BacktickDialect),
+                        _ => Box::new(DoubleQuoteDialect),
+                    },
+                    _ => Box::new(DoubleQuoteDialect),
+                };
+
+            let qualified = match &sch {
+                Some(s) if !s.is_empty() => {
+                    format!(
+                        "{}.{}",
+                        dialect.quote_identifier(&db_common::Identifier::new(s.as_str()).unwrap()),
+                        dialect
+                            .quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
+                    )
+                }
+                _ => dialect.quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
+            };
+            let sql = format!("SELECT * FROM {} LIMIT 500", qualified);
+
+            let columns_future = metadata_service.table_columns(
+                connection_id,
+                db.as_deref(),
+                sch.as_deref(),
+                &tbl,
+                None,
+            );
+            let request = QueryExecutionRequest {
+                tab_id: QueryId::new(),
+                connection_id,
+                sql,
+                mode: QueryExecutionMode::All,
+                cursor_offset: 0,
+                selection: None,
+                timeout_ms: 30000,
+            };
+            let query_future = query_service.execute(request, None);
+
+            let (columns_result, query_result) = tokio::join!(columns_future, query_future);
+
+            let result = match (columns_result, query_result) {
+                (Ok(columns), Ok(report)) => {
+                    let data = report
+                        .results
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| QueryResult {
+                            statement: String::new(),
+                            columns: Vec::new(),
+                            rows: Vec::new(),
+                            affected_rows: 0,
+                            execution_time_ms: 0,
+                            notices: Vec::new(),
+                            metadata: Default::default(),
+                        });
+                    Ok(TableDataPayload {
+                        connection_id,
+                        database: db,
+                        schema: sch,
+                        table: tbl,
+                        columns,
+                        result: data,
+                        dialect,
+                    })
+                }
+                (Err(e), _) => Err(e),
+                (_, Err(e)) => Err(e),
+            };
+
+            *cell.lock().unwrap() = Some(result);
+        });
+    }
+
+    /// Spawn an async task to load full table structure metadata.
+    pub(super) fn spawn_structure_load(
+        &mut self,
+        connection_id: db_common::ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    ) {
+        let metadata_service = self.metadata_service.clone();
+        let runtime = self.runtime.clone();
+
+        let cell: PendingTask<TableStructurePayload> = Arc::new(Mutex::new(None));
+        self.pending_structure_load = Some(cell.clone());
+
+        let db = database.clone();
+        let sch = schema.clone();
+        let tbl = table.clone();
+
+        runtime.spawn(async move {
+            let db_ref = db.as_deref();
+            let sch_ref = sch.as_deref();
+
+            let (
+                columns_result,
+                indexes_result,
+                fks_result,
+                triggers_result,
+                functions_result,
+                sql_result,
+            ) = tokio::join!(
+                metadata_service.table_columns(connection_id, db_ref, sch_ref, &tbl, None),
+                metadata_service.table_indexes(connection_id, db_ref, sch_ref, &tbl, None),
+                metadata_service.table_foreign_keys(connection_id, db_ref, sch_ref, &tbl, None),
+                metadata_service.table_triggers(connection_id, db_ref, sch_ref, &tbl, None),
+                metadata_service.schema_functions(connection_id, db_ref, sch_ref, None),
+                metadata_service.get_create_table_sql(connection_id, db_ref, sch_ref, &tbl, None),
+            );
+
+            let result = match (
+                columns_result,
+                indexes_result,
+                fks_result,
+                triggers_result,
+                functions_result,
+                sql_result,
+            ) {
+                (
+                    Ok(columns),
+                    Ok(indexes),
+                    Ok(foreign_keys),
+                    Ok(triggers),
+                    Ok(functions),
+                    Ok(create_sql),
+                ) => Ok(TableStructurePayload {
+                    connection_id,
+                    database: db,
+                    schema: sch,
+                    table: tbl,
+                    columns,
+                    indexes,
+                    foreign_keys,
+                    triggers,
+                    functions,
+                    create_sql,
+                }),
+                (Err(e), ..) => Err(e),
+                (_, Err(e), ..) => Err(e),
+                (_, _, Err(e), ..) => Err(e),
+                (_, _, _, Err(e), ..) => Err(e),
+                (_, _, _, _, Err(e), _) => Err(e),
+                (_, _, _, _, _, Err(e)) => Err(e),
+            };
+
+            *cell.lock().unwrap() = Some(result);
+        });
+    }
+
+    pub(super) fn spawn_table_export(&mut self, request: TableExportRequest, path: PathBuf) {
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: PendingTask<TableExportPayload> = Arc::new(Mutex::new(None));
+        self.pending_table_export = Some(cell.clone());
+
+        runtime.spawn(async move {
+            let profile_kind = connection_manager
+                .get_profile(request.connection_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|profile| profile.kind);
+            let dialect: Box<dyn Dialect> = match profile_kind {
+                Some(DataSourceKind::MySql) => Box::new(BacktickDialect),
+                _ => Box::new(DoubleQuoteDialect),
+            };
+
+            let qualifier = request
+                .schema
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    matches!(profile_kind, Some(DataSourceKind::MySql))
+                        .then_some(request.database.as_deref())
+                        .flatten()
+                        .filter(|value| !value.is_empty())
+                });
+            let qualified = match qualifier {
+                Some(schema) => format!(
+                    "{}.{}",
+                    dialect.quote_identifier(&db_common::Identifier::new(schema).unwrap()),
+                    dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap()),
+                ),
+                None => {
+                    dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap())
+                }
+            };
+            let sql = format!("SELECT * FROM {}", qualified);
+            let execute_result = query_service
+                .execute(
+                    QueryExecutionRequest {
+                        tab_id: QueryId::new(),
+                        connection_id: request.connection_id,
+                        sql,
+                        mode: QueryExecutionMode::All,
+                        cursor_offset: 0,
+                        selection: None,
+                        timeout_ms: 60_000,
+                    },
+                    None,
+                )
+                .await;
+
+            let result = match execute_result {
+                Ok(report) => {
+                    let result = report
+                        .results
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| QueryResult::empty(""));
+                    let path_for_write = path.clone();
+                    let format = request.format;
+                    let table_name = qualified_table_label(qualifier, &request.table);
+                    let write_result = tokio::task::spawn_blocking(move || {
+                        export_query_result_to_file(&result, format, &path_for_write).map(|_| {
+                            TableExportPayload {
+                                table_name,
+                                path,
+                                format,
+                            }
+                        })
+                    })
+                    .await;
+
+                    match write_result {
+                        Ok(payload) => payload,
+                        Err(error) => Err(AppError::internal(error.to_string())),
+                    }
+                }
+                Err(error) => Err(error),
+            };
+
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status("Table export started");
+    }
+
+    pub(super) fn spawn_database_export(
+        &mut self,
+        connection_id: db_common::ConnectionId,
+        mode: crate::ui::object_tree::DatabaseExportMode,
+        path: PathBuf,
+    ) {
+        let metadata_service = self.metadata_service.clone();
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: PendingTask<DatabaseExportPayload> = Arc::new(Mutex::new(None));
+        self.pending_database_export = Some(cell.clone());
+
+        runtime.spawn(async move {
+            let result = export_database_sql(
+                metadata_service,
+                query_service,
+                connection_manager,
+                connection_id,
+                mode,
+                path,
+            )
+            .await;
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status(format!(
+            "{} export started",
+            database_export_mode_label(mode)
+        ));
+    }
+
+    pub(super) fn spawn_index_create(&mut self, request: CreateIndexRequest) {
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: PendingTask<IndexCreatePayload> = Arc::new(Mutex::new(None));
+        self.pending_index_create = Some(cell.clone());
+
+        runtime.spawn(async move {
+            let result = async {
+                let profile = connection_manager
+                    .get_profile(request.connection_id)
+                    .await?
+                    .ok_or_else(|| AppError::validation("connection profile not found"))?;
+                let sql = build_create_index_sql(&request, profile.kind)?;
+                query_service
+                    .execute(
+                        QueryExecutionRequest {
+                            tab_id: QueryId::new(),
+                            connection_id: request.connection_id,
+                            sql,
+                            mode: QueryExecutionMode::All,
+                            cursor_offset: 0,
+                            selection: None,
+                            timeout_ms: 60_000,
+                        },
+                        None,
+                    )
+                    .await?;
+                Ok(IndexCreatePayload {
+                    connection_id: request.connection_id,
+                    database: request.database,
+                    schema: request.schema,
+                    table: request.table,
+                    name: request.name,
+                })
+            }
+            .await;
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status("Creating index...");
+    }
+}
