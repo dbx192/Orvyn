@@ -1,14 +1,14 @@
 use crate::ui::result_grid::ResultSetGrid;
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::{
-    looks_like_unqualified_mutation, statement_at_offset, AppError, ConnectionId,
+    looks_like_unqualified_mutation, split_statements, statement_at_offset, AppError, ConnectionId,
     ConnectionProfile, DataSourceKind, DatabaseObject, ErrorKind, FavoriteQuery,
     QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
     SqlHighlightToken, SqlTokenKind, TextRange,
 };
 use eframe::egui::{
-    text::LayoutJob, Align, Button, Color32, ComboBox, FontId, Layout, RichText, ScrollArea,
-    TextEdit, TextFormat, Ui, Window,
+    text::LayoutJob, Align, Button, Color32, ComboBox, FontId, Frame, Layout, Margin, RichText,
+    ScrollArea, Stroke, TextEdit, TextFormat, Ui, Window,
 };
 use import_export::{export_query_result_to_file, ExportFormat};
 use std::{
@@ -373,6 +373,13 @@ impl QueryEditor {
                 if ui.button("Run All").clicked() {
                     self.show_execute_all = true;
                 }
+                if ui.button("Format SQL").clicked() {
+                    if self.format_current_sql().is_some() {
+                        self.status = "SQL formatted".to_string();
+                    } else {
+                        self.status = "SQL already formatted".to_string();
+                    }
+                }
                 if ui.button("Explain").clicked() {
                     self.execute_explain(false);
                 }
@@ -583,43 +590,74 @@ impl QueryEditor {
                     return;
                 };
 
-                ScrollArea::vertical()
-                    .id_source("query_editor_sql_scroll")
-                    .max_height(editor_height)
+                Frame::default()
+                    .fill(ui.visuals().extreme_bg_color)
+                    .stroke(Stroke::new(
+                        1.0,
+                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                    ))
+                    .inner_margin(Margin::same(6.0))
                     .show(ui, |ui| {
-                        let tokens = tab.highlighted_sql.clone();
-                        let dialect = connection_kind_for(&self.connections, tab.connection_id);
-                        let mut layouter =
-                            move |ui: &Ui,
-                                  text: &str,
-                                  wrap_width: f32|
-                                  -> Arc<eframe::egui::Galley> {
-                                let mut job = highlight_layout_job(text, &tokens, dialect);
-                                job.wrap.max_width = wrap_width;
-                                ui.fonts(|fonts| fonts.layout_job(job))
-                            };
-
-                        let output = TextEdit::multiline(&mut tab.sql)
-                            .font(FontId::monospace(14.0))
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(14)
-                            .code_editor()
-                            .layouter(&mut layouter)
-                            .show(ui);
-
-                        if output.response.changed() {
-                            tab.dirty = true;
-                            tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
-                        }
-
-                        if let Some(range) = output.cursor_range {
-                            tab.cursor_offset = range.primary.ccursor.index;
-                            let selection = TextRange::new(
-                                range.primary.ccursor.index,
-                                range.secondary.ccursor.index,
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("SQL").strong().monospace());
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} statement(s)",
+                                    split_statements(&tab.sql).len()
+                                ))
+                                .small()
+                                .color(Color32::GRAY),
                             );
-                            tab.selection = (!selection.is_empty()).then_some(selection);
-                        }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let selected = tab.selection.is_some();
+                                ui.label(
+                                    RichText::new(if selected { "selection" } else { "cursor" })
+                                        .small()
+                                        .color(Color32::GRAY),
+                                );
+                            });
+                        });
+                        ui.separator();
+                        ScrollArea::vertical()
+                            .id_source("query_editor_sql_scroll")
+                            .max_height((editor_height - 32.0).max(120.0))
+                            .show(ui, |ui| {
+                                let tokens = tab.highlighted_sql.clone();
+                                let dialect =
+                                    connection_kind_for(&self.connections, tab.connection_id);
+                                let mut layouter =
+                                    move |ui: &Ui,
+                                          text: &str,
+                                          wrap_width: f32|
+                                          -> Arc<eframe::egui::Galley> {
+                                        let mut job = highlight_layout_job(text, &tokens, dialect);
+                                        job.wrap.max_width = wrap_width;
+                                        ui.fonts(|fonts| fonts.layout_job(job))
+                                    };
+
+                                let output = TextEdit::multiline(&mut tab.sql)
+                                    .font(FontId::monospace(14.0))
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(16)
+                                    .code_editor()
+                                    .frame(false)
+                                    .layouter(&mut layouter)
+                                    .show(ui);
+
+                                if output.response.changed() {
+                                    tab.dirty = true;
+                                    tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                                }
+
+                                if let Some(range) = output.cursor_range {
+                                    tab.cursor_offset = range.primary.ccursor.index;
+                                    let selection = TextRange::new(
+                                        range.primary.ccursor.index,
+                                        range.secondary.ccursor.index,
+                                    );
+                                    tab.selection = (!selection.is_empty()).then_some(selection);
+                                }
+                            });
                     });
             });
 
@@ -1055,7 +1093,7 @@ impl QueryEditor {
                                     .enumerate()
                                     .map(|(index, result)| QueryResultView {
                                         statement: result.statement.clone(),
-                                        summary: format!("Result {}", index + 1),
+                                        summary: result_tab_summary(index, result),
                                         grid: (!result.columns.is_empty()).then(|| {
                                             ResultSetGrid::new(result.clone())
                                                 .with_runtime(self.runtime.clone())
@@ -1070,8 +1108,10 @@ impl QueryEditor {
                                 tab.results = results;
                                 tab.dirty = false;
                                 self.status = format!(
-                                    "Execution completed in {} ms, {} rows affected",
-                                    report.elapsed_ms, report.affected_rows
+                                    "Execution completed in {} ms, {} statement result(s), {} rows affected",
+                                    report.elapsed_ms,
+                                    report.results.len(),
+                                    report.affected_rows
                                 );
                             }
                             Err(error) => {
@@ -1197,6 +1237,16 @@ impl QueryEditor {
                 .show(ctx, |ui| {
                     ui.label("This will execute every statement in the current tab.");
                     ui.label("Default execution runs only the current statement.");
+                    if let Some(tab) = self.active_tab.and_then(|id| self.tabs.get(&id)) {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} statement(s) detected",
+                                split_statements(&tab.sql).len()
+                            ))
+                            .small()
+                            .color(Color32::GRAY),
+                        );
+                    }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
@@ -1522,6 +1572,36 @@ fn selected_sql_for_mode(tab: &QueryEditorTab, mode: QueryExecutionMode) -> Opti
         }),
         QueryExecutionMode::All => Some(tab.sql.clone()),
     }
+}
+
+fn result_tab_summary(index: usize, result: &db_common::QueryResult) -> String {
+    let statement = compact_statement_preview(&result.statement, 32);
+    if !result.columns.is_empty() {
+        format!("{} {} ({} rows)", index + 1, statement, result.rows.len())
+    } else {
+        format!(
+            "{} {} ({} affected)",
+            index + 1,
+            statement,
+            result.affected_rows
+        )
+    }
+}
+
+fn compact_statement_preview(statement: &str, max_chars: usize) -> String {
+    let compact = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return "Statement".to_string();
+    }
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    let mut preview = compact
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    preview.push_str("...");
+    preview
 }
 
 fn should_confirm_dangerous_sql(sql: &str) -> bool {

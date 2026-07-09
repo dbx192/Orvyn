@@ -14,8 +14,8 @@ use db_common::{
     QueryExecutionRequest, QueryId, QueryResult, Result, Row, TableColumn,
 };
 use eframe::egui::{
-    vec2, Align, Button, Color32, DragValue, Frame, Key, Layout, Margin, Modifiers, Rect, Response,
-    RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Window,
+    pos2, vec2, Align, Button, Color32, DragValue, Frame, Key, Layout, Margin, Modifiers, Rect,
+    Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Window,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -123,6 +123,7 @@ pub struct TableEditor {
     filter_column: usize,
     filter_text: String,
     sort: Option<SortState>,
+    scroll_x: f32,
     edits: BTreeMap<CellKey, String>,
     new_rows: Vec<NewRow>,
     deleted_rows: BTreeMap<usize, Row>,
@@ -166,6 +167,7 @@ impl TableEditor {
             filter_column: 0,
             filter_text: String::new(),
             sort: None,
+            scroll_x: 0.0,
             edits: BTreeMap::new(),
             new_rows: Vec::new(),
             deleted_rows: BTreeMap::new(),
@@ -247,31 +249,42 @@ impl TableEditor {
             );
         }
 
-        let grid_height = (ui.available_height() - 34.0).max(240.0);
+        let grid_height = (ui.available_height() - 30.0).max(0.0);
         let visible_rows = self.visible_rows();
         Frame::default()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(grid_stroke(ui))
             .inner_margin(Margin::same(0.0))
             .show(ui, |ui| {
-                ScrollArea::horizontal()
-                    .id_source("table_editor_horizontal")
-                    .show(ui, |ui| {
-                        self.header(ui);
-                        ScrollArea::vertical()
-                            .id_source("table_editor_vertical")
-                            .max_height(grid_height)
-                            .auto_shrink([false, false])
-                            .show_rows(ui, ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
-                                for visible_index in row_range {
-                                    let Some(row_key) = visible_rows.get(visible_index).copied()
-                                    else {
-                                        continue;
-                                    };
-                                    self.row(ui, row_key, visible_index, &visible_rows);
-                                }
-                            });
-                    });
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                self.header(ui);
+                let content_width = self.content_width();
+                let output = if visible_rows.is_empty() {
+                    ScrollArea::both()
+                        .id_source("table_editor_body")
+                        .max_height(grid_height)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_min_width(content_width);
+                            self.empty_rows_body(ui, content_width, grid_height, &mut message);
+                        })
+                } else {
+                    ScrollArea::both()
+                        .id_source("table_editor_body")
+                        .max_height(grid_height)
+                        .auto_shrink([false, false])
+                        .show_rows(ui, ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
+                            ui.set_min_width(content_width);
+                            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                            for visible_index in row_range {
+                                let Some(row_key) = visible_rows.get(visible_index).copied() else {
+                                    continue;
+                                };
+                                self.row(ui, row_key, visible_index, &visible_rows);
+                            }
+                        })
+                };
+                self.scroll_x = output.state.offset.x;
             });
 
         self.row_actions_bar(ui, &mut message);
@@ -389,6 +402,7 @@ impl TableEditor {
             .min(self.total_pages().saturating_sub(1));
         self.filter_text.clear();
         self.sort = None;
+        self.scroll_x = 0.0;
         self.clear_changes();
         self.commit_state = CommitState::Idle;
         self.last_commit_result = None;
@@ -1126,9 +1140,18 @@ impl TableEditor {
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let viewport_width = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(vec2(viewport_width, HEADER_HEIGHT), Sense::hover());
+        let header_rect = Rect::from_min_size(
+            pos2(rect.left() - self.scroll_x, rect.top()),
+            vec2(self.content_width(), HEADER_HEIGHT),
+        );
+        let mut header_ui = ui.child_ui(header_rect, Layout::left_to_right(Align::Center));
+        header_ui.set_clip_rect(rect);
+        header_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
+        header_ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             for column_index in 0..self.display_column_count() {
                 let column_name = self.display_column_name(column_index);
                 let column_hover = self.display_column_hover(column_index);
@@ -1147,6 +1170,33 @@ impl TableEditor {
                     self.toggle_sort(column_index);
                     self.page = 0;
                 }
+            }
+        });
+    }
+
+    fn content_width(&self) -> f32 {
+        self.column_widths.iter().sum()
+    }
+
+    fn empty_rows_body(
+        &mut self,
+        ui: &mut Ui,
+        content_width: f32,
+        grid_height: f32,
+        message: &mut Option<String>,
+    ) {
+        let height = grid_height.max(ROW_HEIGHT * 6.0);
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(content_width.max(ui.available_width()), height),
+            Sense::click(),
+        );
+        ui.painter().rect_filled(rect, 0.0, row_fill(ui, 0, false));
+        ui.painter()
+            .rect_stroke(rect.shrink(0.5), 0.0, grid_stroke(ui));
+        response.context_menu(|ui| {
+            if ui.button("Insert Row").clicked() {
+                self.append_row(message);
+                ui.close_menu();
             }
         });
     }

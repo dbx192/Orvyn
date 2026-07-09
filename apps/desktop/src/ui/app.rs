@@ -9,7 +9,7 @@ use crate::ui::{
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
     state::{AppState, AppTheme, TaskState, TaskStatus},
     table_editor::TableEditor,
-    table_structure::TableStructureView,
+    table_structure::{CreateIndexRequest, TableStructureView},
 };
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
@@ -56,6 +56,8 @@ pub struct DesktopApp {
         Option<Arc<Mutex<Option<Result<TableExportPayload, db_common::AppError>>>>>,
     pending_database_export:
         Option<Arc<Mutex<Option<Result<DatabaseExportPayload, db_common::AppError>>>>>,
+    pending_index_create:
+        Option<Arc<Mutex<Option<Result<IndexCreatePayload, db_common::AppError>>>>>,
     export_request: Option<TableExportRequest>,
     import_table_request: Option<ImportTableRequest>,
     // Cloned service handles for spawning async loads.
@@ -119,6 +121,14 @@ struct ImportTableRequest {
     table: String,
 }
 
+struct IndexCreatePayload {
+    connection_id: ConnectionId,
+    database: Option<String>,
+    schema: Option<String>,
+    table: String,
+    name: String,
+}
+
 struct DatabaseExportTarget {
     database: Option<String>,
     schema: Option<String>,
@@ -177,6 +187,7 @@ impl DesktopApp {
             pending_structure_load: None,
             pending_table_export: None,
             pending_database_export: None,
+            pending_index_create: None,
             export_request: None,
             import_table_request: None,
             connection_manager: cm,
@@ -457,10 +468,14 @@ impl DesktopApp {
                 ActivePanel::TableStructure => match &mut self.table_structure {
                     Some(view) => {
                         let message = view.ui(ui);
+                        let create_index = view.take_create_index_request();
                         if let Some(msg) = message {
                             if !msg.is_empty() {
                                 self.state.set_status(msg);
                             }
+                        }
+                        if let Some(request) = create_index {
+                            self.spawn_index_create(request);
                         }
                     }
                     None => {
@@ -983,6 +998,36 @@ impl DesktopApp {
                 self.pending_database_export = Some(cell);
             }
         }
+
+        let index_create_cell = self.pending_index_create.take();
+        if let Some(cell) = index_create_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            self.state
+                                .set_status(format!("Index created: {}", payload.name));
+                            self.spawn_structure_load(
+                                payload.connection_id,
+                                payload.database,
+                                payload.schema,
+                                payload.table,
+                            );
+                            self.active_panel = ActivePanel::TableStructure;
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Create index failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_index_create = Some(cell);
+            }
+        }
     }
 
     /// Spawn an async task to load table data (columns + paginated SELECT).
@@ -1477,6 +1522,50 @@ impl DesktopApp {
         ));
     }
 
+    fn spawn_index_create(&mut self, request: CreateIndexRequest) {
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: Arc<Mutex<Option<Result<IndexCreatePayload, AppError>>>> =
+            Arc::new(Mutex::new(None));
+        self.pending_index_create = Some(cell.clone());
+
+        runtime.spawn(async move {
+            let result = async {
+                let profile = connection_manager
+                    .get_profile(request.connection_id)
+                    .await?
+                    .ok_or_else(|| AppError::validation("connection profile not found"))?;
+                let sql = build_create_index_sql(&request, profile.kind)?;
+                query_service
+                    .execute(
+                        QueryExecutionRequest {
+                            tab_id: QueryId::new(),
+                            connection_id: request.connection_id,
+                            sql,
+                            mode: QueryExecutionMode::All,
+                            cursor_offset: 0,
+                            selection: None,
+                            timeout_ms: 60_000,
+                        },
+                        None,
+                    )
+                    .await?;
+                Ok(IndexCreatePayload {
+                    connection_id: request.connection_id,
+                    database: request.database,
+                    schema: request.schema,
+                    table: request.table,
+                    name: request.name,
+                })
+            }
+            .await;
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status("Creating index...");
+    }
+
     fn bottom_status(&mut self, ctx: &Context) {
         TopBottomPanel::bottom("bottom_status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1840,6 +1929,32 @@ fn append_insert_sql(
     }
 
     Ok(result.rows.len())
+}
+
+fn build_create_index_sql(
+    request: &CreateIndexRequest,
+    kind: DataSourceKind,
+) -> Result<String, AppError> {
+    let dialect = dialect_for_kind(kind);
+    let table_sql = qualified_table_sql(
+        dialect.as_ref(),
+        kind,
+        request.database.as_deref(),
+        request.schema.as_deref(),
+        &request.table,
+    )?;
+    let index_sql = quote_identifier(dialect.as_ref(), &request.name)?;
+    let columns = request
+        .columns
+        .iter()
+        .map(|column| quote_identifier(dialect.as_ref(), column))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let unique = if request.unique { "UNIQUE " } else { "" };
+
+    Ok(format!(
+        "CREATE {unique}INDEX {index_sql} ON {table_sql} ({columns})"
+    ))
 }
 
 fn dialect_for_kind(kind: DataSourceKind) -> Box<dyn Dialect> {

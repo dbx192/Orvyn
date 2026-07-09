@@ -8,9 +8,10 @@ use crate::ui::grid::{
     estimate_text_width, grid_stroke, label_cell, paint_cell_outline, resizable_header_cell,
     row_fill,
 };
-use db_common::{CellValue, Column, QueryResult};
+use db_common::{CellValue, QueryResult};
 use eframe::egui::{
-    vec2, Button, Color32, DragValue, Frame, Margin, RichText, ScrollArea, Sense, Stroke, Ui,
+    pos2, vec2, Align, Button, Color32, DragValue, Frame, Layout, Margin, Rect, RichText,
+    ScrollArea, Sense, Stroke, Ui,
 };
 use import_export::{export_query_result, export_query_result_to_file, ExportFormat};
 use std::cmp::Ordering;
@@ -49,6 +50,7 @@ pub struct ResultSetGrid {
     selected: Option<SelectedCell>,
     sort: Option<SortState>,
     runtime: Option<Handle>,
+    scroll_x: f32,
 }
 
 impl ResultSetGrid {
@@ -61,6 +63,7 @@ impl ResultSetGrid {
             selected: None,
             sort: None,
             runtime: None,
+            scroll_x: 0.0,
         }
     }
 
@@ -76,6 +79,7 @@ impl ResultSetGrid {
         self.page_size = DEFAULT_PAGE_SIZE;
         self.selected = None;
         self.sort = None;
+        self.scroll_x = 0.0;
     }
 
     pub fn result(&self) -> &QueryResult {
@@ -112,25 +116,25 @@ impl ResultSetGrid {
             .stroke(grid_stroke(ui))
             .inner_margin(Margin::same(0.0))
             .show(ui, |ui| {
-                ScrollArea::horizontal()
-                    .id_source("result_set_horizontal")
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                self.header(ui);
+                let body_height = ui.available_height().max(0.0);
+                let content_width = self.content_width();
+                let output = ScrollArea::both()
+                    .id_source("result_set_body")
+                    .max_height(body_height)
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        self.header(ui);
-                        ScrollArea::vertical()
-                            .id_source("result_set_vertical")
-                            .max_height(ui.available_height().max(240.0))
-                            .auto_shrink([false, false])
-                            .show_rows(ui, ROW_HEIGHT, page_rows.len(), |ui, row_range| {
-                                for visible_row_index in row_range {
-                                    let Some(row_index) = page_rows.get(visible_row_index).copied()
-                                    else {
-                                        continue;
-                                    };
-                                    self.row(ui, row_index, visible_row_index);
-                                }
-                            });
+                    .show_rows(ui, ROW_HEIGHT, page_rows.len(), |ui, row_range| {
+                        ui.set_min_width(content_width);
+                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                        for visible_row_index in row_range {
+                            let Some(row_index) = page_rows.get(visible_row_index).copied() else {
+                                continue;
+                            };
+                            self.row(ui, row_index, visible_row_index);
+                        }
                     });
+                self.scroll_x = output.state.offset.x;
             });
 
         message
@@ -297,9 +301,18 @@ impl ResultSetGrid {
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let viewport_width = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(vec2(viewport_width, HEADER_HEIGHT), Sense::hover());
+        let header_rect = Rect::from_min_size(
+            pos2(rect.left() - self.scroll_x, rect.top()),
+            vec2(self.content_width(), HEADER_HEIGHT),
+        );
+        let mut header_ui = ui.child_ui(header_rect, Layout::left_to_right(Align::Center));
+        header_ui.set_clip_rect(rect);
+        header_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
+        header_ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             for column_index in 0..self.result.columns.len() {
                 let column = self.result.columns[column_index].clone();
                 let sort_dir = self.sort_direction_for(column_index);
@@ -340,6 +353,10 @@ impl ResultSetGrid {
                 }
             }
         });
+    }
+
+    fn content_width(&self) -> f32 {
+        self.column_widths.iter().sum()
     }
 
     fn row(&mut self, ui: &mut Ui, row_index: usize, visible_row_index: usize) {
@@ -503,13 +520,10 @@ impl ResultSetGrid {
     }
 
     fn copy_header_text(&self) -> String {
-        std::iter::once("#".to_string())
-            .chain(
-                self.result
-                    .columns
-                    .iter()
-                    .map(|column: &Column| column.name.clone()),
-            )
+        self.result
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
             .collect::<Vec<_>>()
             .join("\t")
     }
@@ -517,13 +531,13 @@ impl ResultSetGrid {
     fn copy_row_values(&self, row_index: usize) -> Option<String> {
         let row = self.result.rows.get(row_index)?;
         Some(
-            std::iter::once((row_index + 1).to_string())
-                .chain((0..self.result.columns.len()).map(|column_index| {
+            (0..self.result.columns.len())
+                .map(|column_index| {
                     row.values
                         .get(column_index)
                         .map(copy_cell_value)
                         .unwrap_or_else(|| "NULL".to_string())
-                }))
+                })
                 .collect::<Vec<_>>()
                 .join("\t"),
         )
