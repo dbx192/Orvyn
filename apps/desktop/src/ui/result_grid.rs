@@ -124,6 +124,7 @@ impl ResultSetGrid {
                     .show_rows(ui, TABLE_ROW_HEIGHT, page_rows.len(), |ui, row_range| {
                         ui.set_min_width(content_width);
                         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                        ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
                         for visible_row_index in row_range {
                             let Some(row_index) = page_rows.get(visible_row_index).copied() else {
                                 continue;
@@ -358,8 +359,10 @@ impl ResultSetGrid {
     }
 
     fn row(&mut self, ui: &mut Ui, row_index: usize, visible_row_index: usize) {
+        ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
 
             for column_index in 0..self.result.columns.len() {
                 let width = self.column_widths[column_index];

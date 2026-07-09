@@ -25,8 +25,10 @@ pub struct MySqlMetadataReader;
 
 #[derive(Debug, Clone, Default)]
 pub struct MySqlQueryExecutor {
-    pools: Arc<Mutex<BTreeMap<ConnectionId, MySqlPool>>>,
+    pools: Arc<Mutex<BTreeMap<MySqlPoolKey, MySqlPool>>>,
 }
+
+type MySqlPoolKey = (ConnectionId, Option<String>);
 
 impl MySqlQueryExecutor {
     pub fn new() -> Self {
@@ -39,12 +41,13 @@ impl MySqlQueryExecutor {
         password: Option<&str>,
         config: ConnectionPoolConfig,
     ) -> Result<MySqlPool> {
-        if let Some(pool) = self.pools.lock().await.get(&profile.id).cloned() {
+        let key = mysql_pool_key(profile);
+        if let Some(pool) = self.pools.lock().await.get(&key).cloned() {
             return Ok(pool);
         }
 
         let pool = mysql_pool(profile, password, config).await?;
-        self.pools.lock().await.insert(profile.id, pool.clone());
+        self.pools.lock().await.insert(key, pool.clone());
         Ok(pool)
     }
 }
@@ -425,25 +428,60 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
     }
 
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
-        let Some(pool) = self.pools.lock().await.get(&connection_id).cloned() else {
+        let pools = self
+            .pools
+            .lock()
+            .await
+            .iter()
+            .filter(|(key, _)| key.0 == connection_id)
+            .map(|(_, pool)| pool.clone())
+            .collect::<Vec<_>>();
+        if pools.is_empty() {
             return Ok(None);
-        };
+        }
 
-        Ok(Some(ConnectionPoolStats {
+        let mut stats = ConnectionPoolStats {
             connection_id,
-            size: pool.size(),
-            idle: pool.num_idle() as u32,
-            max_connections: pool.options().get_max_connections(),
-        }))
+            size: 0,
+            idle: 0,
+            max_connections: 0,
+        };
+        for pool in pools {
+            stats.size += pool.size();
+            stats.idle += pool.num_idle() as u32;
+            stats.max_connections += pool.options().get_max_connections();
+        }
+        Ok(Some(stats))
     }
 
     async fn close_pool(&self, connection_id: ConnectionId) -> Result<()> {
-        let pool = self.pools.lock().await.remove(&connection_id);
-        if let Some(pool) = pool {
+        let pools = {
+            let mut pools = self.pools.lock().await;
+            let keys = pools
+                .keys()
+                .filter(|key| key.0 == connection_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| pools.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        for pool in pools {
             pool.close().await;
         }
         Ok(())
     }
+}
+
+fn mysql_pool_key(profile: &ConnectionProfile) -> MySqlPoolKey {
+    (
+        profile.id,
+        profile
+            .database
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned),
+    )
 }
 
 fn mysql_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<String> {

@@ -83,6 +83,10 @@ pub enum QueryExecutionMode {
 pub struct QueryExecutionRequest {
     pub tab_id: QueryId,
     pub connection_id: ConnectionId,
+    #[serde(default)]
+    pub database: Option<String>,
+    #[serde(default)]
+    pub schema: Option<String>,
     pub sql: String,
     pub mode: QueryExecutionMode,
     pub cursor_offset: usize,
@@ -95,6 +99,8 @@ impl QueryExecutionRequest {
         Self {
             tab_id,
             connection_id,
+            database: None,
+            schema: None,
             sql: sql.into(),
             mode: QueryExecutionMode::All,
             cursor_offset: 0,

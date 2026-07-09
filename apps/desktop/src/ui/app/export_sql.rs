@@ -102,6 +102,8 @@ pub(super) async fn export_database_sql(
                     QueryExecutionRequest {
                         tab_id: QueryId::new(),
                         connection_id,
+                        database: target.database.clone(),
+                        schema: target.schema.clone(),
                         sql,
                         mode: QueryExecutionMode::All,
                         cursor_offset: 0,

@@ -15,8 +15,8 @@ use db_common::{
     QueryExecutionRequest, QueryId, QueryResult, Result, Row, TableColumn,
 };
 use eframe::egui::{
-    pos2, vec2, Align, Button, Color32, DragValue, Frame, Key, Layout, Margin, Modifiers, Rect,
-    Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Window,
+    pos2, vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Key, Layout, Margin,
+    Modifiers, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Window,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -48,7 +48,7 @@ struct CellKey {
     column: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum RowKey {
     Existing(usize),
     New(usize),
@@ -77,6 +77,11 @@ struct TimePickerState {
     hour: u32,
     minute: u32,
     second: u32,
+}
+
+#[derive(Debug, Clone)]
+struct RowDeleteConfirm {
+    rows: Vec<RowKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +141,7 @@ pub struct TableEditor {
     runtime: Option<Handle>,
     show_commit_dialog: bool,
     show_close_warning: bool,
+    row_delete_confirm: Option<RowDeleteConfirm>,
     time_picker: Option<TimePickerState>,
     commit_state: CommitState,
     commit_error: Option<String>,
@@ -180,6 +186,7 @@ impl TableEditor {
             runtime: None,
             show_commit_dialog: false,
             show_close_warning: false,
+            row_delete_confirm: None,
             time_picker: None,
             commit_state: CommitState::Idle,
             commit_error: None,
@@ -226,6 +233,10 @@ impl TableEditor {
 
         if self.show_close_warning {
             self.close_warning_dialog(ui);
+        }
+
+        if self.row_delete_confirm.is_some() {
+            self.row_delete_confirm_dialog(ui, &mut message);
         }
 
         self.time_picker_window(ui, &mut message);
@@ -275,6 +286,7 @@ impl TableEditor {
                         .show_rows(ui, TABLE_ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
                             ui.set_min_width(content_width);
                             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                            ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
                             for visible_index in row_range {
                                 let Some(row_key) = visible_rows.get(visible_index).copied() else {
                                     continue;
@@ -531,7 +543,7 @@ impl TableEditor {
                 .on_hover_text("Delete selected row(s), restore delete mark, or remove staged rows")
                 .clicked()
             {
-                self.remove_or_restore_rows(selected_rows, message);
+                self.request_remove_or_restore_rows(selected_rows, message);
             }
 
             ui.separator();
@@ -602,6 +614,27 @@ impl TableEditor {
 
     fn row_is_deleted(&self, row: RowKey) -> bool {
         matches!(row, RowKey::Existing(index) if self.deleted_rows.contains_key(&index))
+    }
+
+    fn request_remove_or_restore_rows(&mut self, rows: Vec<RowKey>, message: &mut Option<String>) {
+        if rows.is_empty() {
+            return;
+        }
+
+        if self.rows_need_delete_confirmation(&rows) {
+            self.row_delete_confirm = Some(RowDeleteConfirm { rows });
+        } else {
+            self.remove_or_restore_rows(rows, message);
+        }
+    }
+
+    fn rows_need_delete_confirmation(&self, rows: &[RowKey]) -> bool {
+        rows.iter().any(|row| match *row {
+            RowKey::Existing(row_index) => {
+                self.can_edit_existing_rows() && !self.deleted_rows.contains_key(&row_index)
+            }
+            RowKey::New(row_index) => row_index < self.new_rows.len(),
+        })
     }
 
     fn remove_or_restore_rows(&mut self, rows: Vec<RowKey>, message: &mut Option<String>) {
@@ -749,7 +782,7 @@ impl TableEditor {
         }
         if delete_pressed {
             let rows = self.selected_rows.iter().copied().collect::<Vec<_>>();
-            self.remove_or_restore_rows(rows, message);
+            self.request_remove_or_restore_rows(rows, message);
         }
         if a_pressed && command_modifier(modifiers) {
             self.selected_rows = self.visible_rows().into_iter().collect();
@@ -901,6 +934,60 @@ impl TableEditor {
         }
     }
 
+    fn row_delete_confirm_dialog(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+        let Some(confirm_state) = self.row_delete_confirm.clone() else {
+            return;
+        };
+
+        let delete_count = confirm_state
+            .rows
+            .iter()
+            .filter(|row| match **row {
+                RowKey::Existing(row_index) => !self.deleted_rows.contains_key(&row_index),
+                RowKey::New(row_index) => row_index < self.new_rows.len(),
+            })
+            .count();
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+
+        Window::new("Confirm Row Delete")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.label(RichText::new("Delete selected row(s)?").strong());
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "{delete_count} row(s) will be marked for delete or removed."
+                ));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Existing rows are not deleted from the database until Commit.")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Delete Row(s)").clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if confirm {
+            self.remove_or_restore_rows(confirm_state.rows, message);
+            self.row_delete_confirm = None;
+        }
+
+        if cancel || !open {
+            self.row_delete_confirm = None;
+        }
+    }
+
     fn execute_commit(&mut self, message: &mut Option<String>) {
         if self.query_service.is_none() || self.connection_id.is_none() {
             *message = Some("Query service not configured".to_string());
@@ -919,6 +1006,8 @@ impl TableEditor {
         let connection_id = self.connection_id.unwrap();
         let runtime = self.runtime.clone().unwrap();
         let insert_count = self.new_rows.len();
+        let database = self.database.clone();
+        let schema = self.schema.clone();
 
         let result_cell: Arc<Mutex<Option<Result<db_common::QueryExecutionReport>>>> =
             Arc::new(Mutex::new(None));
@@ -930,6 +1019,8 @@ impl TableEditor {
                     db_common::QueryExecutionRequest {
                         tab_id: QueryId::new(),
                         connection_id,
+                        database,
+                        schema,
                         sql,
                         mode: db_common::QueryExecutionMode::All,
                         cursor_offset: 0,
@@ -1033,6 +1124,8 @@ impl TableEditor {
                 QueryExecutionRequest {
                     tab_id: QueryId::new(),
                     connection_id,
+                    database: database.clone(),
+                    schema: schema.clone(),
                     sql,
                     mode: QueryExecutionMode::All,
                     cursor_offset: 0,
@@ -1212,8 +1305,10 @@ impl TableEditor {
                 RowKey::New(i) => self.result.rows.len() + i,
             });
 
+        ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
 
             if is_error_row {
                 ui.painter().rect_stroke(
@@ -1272,7 +1367,7 @@ impl TableEditor {
             if remove_requested {
                 let mut ignored = None;
                 let rows = self.selected_rows.iter().copied().collect::<Vec<_>>();
-                self.remove_or_restore_rows(rows, &mut ignored);
+                self.request_remove_or_restore_rows(rows, &mut ignored);
             }
             if clear_selection_requested {
                 self.selected_row = None;
@@ -1495,14 +1590,23 @@ impl TableEditor {
         );
 
         let button_response = ui
-            .allocate_ui_at_rect(button_rect, |ui| {
-                ui.add_sized(
-                    [button_rect.width(), button_rect.height()],
-                    Button::new("..."),
-                )
-            })
-            .inner
+            .interact(
+                button_rect,
+                ui.make_persistent_id(("temporal_picker_button", row, column_index)),
+                Sense::click(),
+            )
             .on_hover_text("Choose date/time");
+        if button_response.hovered() {
+            ui.painter()
+                .rect_filled(button_rect, 0.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        ui.painter().text(
+            button_rect.center(),
+            Align2::CENTER_CENTER,
+            "...",
+            FontId::proportional(10.0),
+            ui.visuals().text_color(),
+        );
 
         if button_response.clicked() {
             if let Some(kind) = self.temporal_kind_for_column(column_index) {
@@ -1778,6 +1882,7 @@ impl TableEditor {
         self.deleted_rows.clear();
         self.selected_row = None;
         self.selected_rows.clear();
+        self.row_delete_confirm = None;
         self.time_picker = None;
         self.commit_error = None;
         self.error_row_index = None;

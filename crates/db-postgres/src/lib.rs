@@ -22,8 +22,10 @@ pub struct PostgresMetadataReader;
 
 #[derive(Debug, Clone, Default)]
 pub struct PostgresQueryExecutor {
-    pools: Arc<Mutex<BTreeMap<ConnectionId, Arc<PostgresPool>>>>,
+    pools: Arc<Mutex<BTreeMap<PostgresPoolKey, Arc<PostgresPool>>>>,
 }
+
+type PostgresPoolKey = (ConnectionId, Option<String>);
 
 impl PostgresQueryExecutor {
     pub fn new() -> Self {
@@ -36,12 +38,13 @@ impl PostgresQueryExecutor {
         password: Option<&str>,
         config: ConnectionPoolConfig,
     ) -> Result<Arc<PostgresPool>> {
-        if let Some(pool) = self.pools.lock().await.get(&profile.id).cloned() {
+        let key = postgres_pool_key(profile);
+        if let Some(pool) = self.pools.lock().await.get(&key).cloned() {
             return Ok(pool);
         }
 
         let pool = Arc::new(PostgresPool::new(profile, password, config)?);
-        self.pools.lock().await.insert(profile.id, pool.clone());
+        self.pools.lock().await.insert(key, pool.clone());
         Ok(pool)
     }
 }
@@ -232,18 +235,29 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        let client = postgres_client(profile, password).await?;
+        let client = postgres_client_for_database(profile, password, database).await?;
         let rows = client
             .query(
-                "SELECT schema_name FROM information_schema.schemata \
-                 WHERE schema_name NOT LIKE 'pg_%' AND schema_name <> 'information_schema' \
-                 ORDER BY schema_name",
+                "SELECT n.nspname \
+                 FROM pg_namespace n \
+                 WHERE n.nspname NOT LIKE 'pg_%' \
+                   AND n.nspname <> 'information_schema' \
+                   AND NOT EXISTS ( \
+                       SELECT 1 \
+                       FROM pg_depend d \
+                       JOIN pg_extension e ON e.oid = d.refobjid \
+                       WHERE d.classid = 'pg_namespace'::regclass \
+                         AND d.objid = n.oid \
+                         AND d.deptype = 'e' \
+                   ) \
+                 ORDER BY n.nspname",
                 &[],
             )
             .await
             .map_err(query_error)?;
+        let parent = selected_database(profile, database);
 
         Ok(rows
             .into_iter()
@@ -251,7 +265,7 @@ impl RelationalMetadataReader for PostgresMetadataReader {
                 kind: DatabaseObjectKind::Schema,
                 name: row.get(0),
                 schema: None,
-                parent: profile.database.clone(),
+                parent: parent.clone(),
             })
             .collect())
     }
@@ -260,12 +274,13 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
         schema: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
         list_postgres_objects(
             profile,
             password,
+            database,
             schema,
             "BASE TABLE",
             DatabaseObjectKind::Table,
@@ -277,22 +292,30 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
         schema: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        list_postgres_objects(profile, password, schema, "VIEW", DatabaseObjectKind::View).await
+        list_postgres_objects(
+            profile,
+            password,
+            database,
+            schema,
+            "VIEW",
+            DatabaseObjectKind::View,
+        )
+        .await
     }
 
     async fn list_columns(
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableColumn>> {
         let schema = schema.unwrap_or("public");
-        let client = postgres_client(profile, password).await?;
+        let client = postgres_client_for_database(profile, password, database).await?;
         let rows = client
             .query(
                 "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, \
@@ -331,12 +354,12 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableIndex>> {
         let schema = schema.unwrap_or("public");
-        let client = postgres_client(profile, password).await?;
+        let client = postgres_client_for_database(profile, password, database).await?;
         let rows = client
             .query(
                 "SELECT indexname, indexdef FROM pg_indexes \
@@ -366,12 +389,12 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableForeignKey>> {
         let schema = schema.unwrap_or("public");
-        let client = postgres_client(profile, password).await?;
+        let client = postgres_client_for_database(profile, password, database).await?;
         let rows = client
             .query(
                 "SELECT tc.constraint_name, kcu.column_name, \
@@ -403,12 +426,12 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableTrigger>> {
         let schema = schema.unwrap_or("public");
-        let client = postgres_client(profile, password).await?;
+        let client = postgres_client_for_database(profile, password, database).await?;
         let rows = client
             .query(
                 "SELECT trigger_name, event_manipulation, action_timing, action_statement \
@@ -435,11 +458,11 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
         schema: Option<&str>,
     ) -> Result<Vec<DatabaseFunction>> {
         let schema = schema.unwrap_or("public");
-        let client = postgres_client(profile, password).await?;
+        let client = postgres_client_for_database(profile, password, database).await?;
         let rows = client
             .query(
                 "SELECT p.proname AS function_name, \
@@ -478,12 +501,12 @@ impl RelationalMetadataReader for PostgresMetadataReader {
         &self,
         profile: &ConnectionProfile,
         password: Option<&str>,
-        _database: Option<&str>,
+        database: Option<&str>,
         schema: Option<&str>,
         table: &str,
     ) -> Result<String> {
         let schema = schema.unwrap_or("public");
-        let client = postgres_client(profile, password).await?;
+        let client = postgres_client_for_database(profile, password, database).await?;
 
         let ddl = pg_get_create_table(&client, schema, table).await?;
         Ok(ddl)
@@ -532,14 +555,38 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
     }
 
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
-        let Some(pool) = self.pools.lock().await.get(&connection_id).cloned() else {
+        let pools = self
+            .pools
+            .lock()
+            .await
+            .iter()
+            .filter(|(key, _)| key.0 == connection_id)
+            .map(|(_, pool)| pool.clone())
+            .collect::<Vec<_>>();
+        if pools.is_empty() {
             return Ok(None);
+        }
+
+        let mut stats = ConnectionPoolStats {
+            connection_id,
+            size: 0,
+            idle: 0,
+            max_connections: 0,
         };
-        Ok(Some(pool.stats().await))
+        for pool in pools {
+            let pool_stats = pool.stats().await;
+            stats.size += pool_stats.size;
+            stats.idle += pool_stats.idle;
+            stats.max_connections += pool_stats.max_connections;
+        }
+        Ok(Some(stats))
     }
 
     async fn close_pool(&self, connection_id: ConnectionId) -> Result<()> {
-        self.pools.lock().await.remove(&connection_id);
+        self.pools
+            .lock()
+            .await
+            .retain(|key, _| key.0 != connection_id);
         Ok(())
     }
 }
@@ -548,7 +595,15 @@ async fn postgres_client(
     profile: &ConnectionProfile,
     password: Option<&str>,
 ) -> Result<tokio_postgres::Client> {
-    let config = postgres_config(profile, password)?;
+    postgres_client_for_database(profile, password, None).await
+}
+
+async fn postgres_client_for_database(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+    database: Option<&str>,
+) -> Result<tokio_postgres::Client> {
+    let config = postgres_config_for_database(profile, password, database)?;
 
     let (client, connection) = config.connect(NoTls).await.map_err(|error| {
         AppError::new(ErrorKind::Connection, "failed to connect to PostgreSQL")
@@ -563,6 +618,14 @@ async fn postgres_client(
 }
 
 fn postgres_config(profile: &ConnectionProfile, password: Option<&str>) -> Result<Config> {
+    postgres_config_for_database(profile, password, None)
+}
+
+fn postgres_config_for_database(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+    database: Option<&str>,
+) -> Result<Config> {
     profile.validate()?;
     let mut config = Config::new();
     config.host(profile.required_host()?);
@@ -578,10 +641,9 @@ fn postgres_config(profile: &ConnectionProfile, password: Option<&str>) -> Resul
     if let Some(password) = password.filter(|value| !value.is_empty()) {
         config.password(password);
     }
-    if let Some(database) = profile
-        .database
-        .as_deref()
-        .filter(|value| !value.is_empty())
+    if let Some(database) = database
+        .or(profile.database.as_deref())
+        .filter(|value| !value.trim().is_empty())
     {
         config.dbname(database);
     }
@@ -589,15 +651,34 @@ fn postgres_config(profile: &ConnectionProfile, password: Option<&str>) -> Resul
     Ok(config)
 }
 
+fn selected_database(profile: &ConnectionProfile, database: Option<&str>) -> Option<String> {
+    database
+        .or(profile.database.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn postgres_pool_key(profile: &ConnectionProfile) -> PostgresPoolKey {
+    (
+        profile.id,
+        profile
+            .database
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned),
+    )
+}
+
 async fn list_postgres_objects(
     profile: &ConnectionProfile,
     password: Option<&str>,
+    database: Option<&str>,
     schema: Option<&str>,
     table_type: &str,
     kind: DatabaseObjectKind,
 ) -> Result<Vec<DatabaseObject>> {
     let schema = schema.unwrap_or("public");
-    let client = postgres_client(profile, password).await?;
+    let client = postgres_client_for_database(profile, password, database).await?;
     let rows = client
         .query(
             "SELECT table_name FROM information_schema.tables \
@@ -614,7 +695,7 @@ async fn list_postgres_objects(
             kind,
             name: row.get(0),
             schema: Some(schema.to_string()),
-            parent: profile.database.clone(),
+            parent: selected_database(profile, database),
         })
         .collect())
 }

@@ -5,8 +5,8 @@
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::dialect::DoubleQuoteDialect;
 use db_common::{
-    ConnectionId, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest, QueryId,
-    Result, TableColumn,
+    ConnectionId, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest, QueryId, Result,
+    TableColumn,
 };
 use eframe::egui::{Button, Color32, ComboBox, Frame, RichText, ScrollArea, Ui};
 use import_export::import_csv::{
@@ -669,6 +669,8 @@ impl ImportWizard {
         let stop_on_error = self.stop_on_error;
         let query_service = self.query_service.clone();
         let connection_id = self.connection_id;
+        let database = self.database.clone();
+        let schema = self.schema.clone();
         let rt = self.runtime.clone();
 
         self.loading = true;
@@ -699,6 +701,8 @@ impl ImportWizard {
                                 QueryExecutionRequest {
                                     tab_id: QueryId::new(),
                                     connection_id,
+                                    database: database.clone(),
+                                    schema: schema.clone(),
                                     sql: batch_sql.clone(),
                                     mode: QueryExecutionMode::All,
                                     cursor_offset: 0,

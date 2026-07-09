@@ -71,3 +71,16 @@ pub(super) struct IndexCreatePayload {
     pub(super) table: String,
     pub(super) name: String,
 }
+
+pub(super) struct DropTableRequest {
+    pub(super) connection_id: ConnectionId,
+    pub(super) database: Option<String>,
+    pub(super) schema: Option<String>,
+    pub(super) table: String,
+}
+
+pub(super) struct DropTablePayload {
+    pub(super) database: Option<String>,
+    pub(super) schema: Option<String>,
+    pub(super) table: String,
+}

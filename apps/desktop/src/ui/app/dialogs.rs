@@ -1,0 +1,432 @@
+use super::{
+    export_sql::{database_export_mode_label, qualified_table_label},
+    ActivePanel, DesktopApp,
+};
+use crate::ui::{
+    import_wizard::ImportWizard,
+    object_tree::DatabaseExportMode,
+    state::{TaskState, TaskStatus},
+};
+use db_common::ConnectionId;
+use eframe::egui::{
+    vec2, Align, Button, Color32, Context, Frame, Layout, RichText, TextEdit, TopBottomPanel,
+    Window,
+};
+use import_export::ExportFormat;
+
+impl DesktopApp {
+    pub(super) fn import_table_window(&mut self, ctx: &Context) {
+        let Some(request) = self.import_table_request.as_mut() else {
+            return;
+        };
+
+        let mut open = true;
+        let mut start_import = false;
+        let mut cancel = false;
+
+        Window::new("Import Table")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Target table");
+                ui.add_space(6.0);
+                eframe::egui::Grid::new("connection_import_target_grid")
+                    .num_columns(2)
+                    .spacing(vec2(8.0, 6.0))
+                    .show(ui, |ui| {
+                        ui.label("Database");
+                        ui.add(TextEdit::singleline(&mut request.database).desired_width(220.0));
+                        ui.end_row();
+                        ui.label("Schema");
+                        ui.add(TextEdit::singleline(&mut request.schema).desired_width(220.0));
+                        ui.end_row();
+                        ui.label("Table");
+                        ui.add(TextEdit::singleline(&mut request.table).desired_width(220.0));
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Leave database/schema empty to use the connection default.")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui
+                        .add_enabled(!request.table.trim().is_empty(), Button::new("Continue"))
+                        .clicked()
+                    {
+                        start_import = true;
+                    }
+                });
+            });
+
+        if start_import {
+            if let Some(request) = self.import_table_request.take() {
+                let table = request.table.trim().to_string();
+                let wizard = ImportWizard::new(
+                    request.connection_id,
+                    trimmed_option(request.database),
+                    trimmed_option(request.schema),
+                    table,
+                    self.metadata_service.clone(),
+                    self.query_service.clone(),
+                    self.connection_manager.clone(),
+                    self.runtime.clone(),
+                );
+                let table_name = wizard.table_name();
+                self.import_wizard = Some(wizard);
+                self.active_panel = ActivePanel::ImportWizard;
+                self.state
+                    .set_status(format!("Import CSV to {}", table_name));
+            }
+        }
+
+        if cancel || !open {
+            self.import_table_request = None;
+        }
+    }
+
+    pub(super) fn request_database_export(
+        &mut self,
+        connection_id: ConnectionId,
+        mode: DatabaseExportMode,
+    ) {
+        let mode_label = database_export_mode_label(mode);
+        let file_name = match mode {
+            DatabaseExportMode::Structure => "database_structure.sql",
+            DatabaseExportMode::StructureAndData => "database_structure_data.sql",
+        };
+        let path = rfd::FileDialog::new()
+            .set_title(mode_label)
+            .set_file_name(file_name)
+            .add_filter("SQL", &["sql"])
+            .save_file();
+
+        if let Some(path) = path {
+            self.spawn_database_export(connection_id, mode, path);
+        }
+    }
+
+    pub(super) fn table_export_window(&mut self, ctx: &Context) {
+        let Some(request) = self.export_request.as_mut() else {
+            return;
+        };
+
+        let mut open = true;
+        let table_name = qualified_table_label(
+            request
+                .schema
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    request
+                        .database
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                }),
+            &request.table,
+        );
+        let table_file_name = request.table.clone();
+        let mut submit_export = None;
+        let mut cancel_export = false;
+
+        Window::new("Export Table Data")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("Table: {}", table_name));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Format");
+                    eframe::egui::ComboBox::from_id_source("table_export_format")
+                        .selected_text(match request.format {
+                            ExportFormat::Csv => "CSV",
+                            ExportFormat::Json => "JSON",
+                            ExportFormat::ExcelCompatible => "Excel",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut request.format, ExportFormat::Csv, "CSV");
+                            ui.selectable_value(&mut request.format, ExportFormat::Json, "JSON");
+                        });
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Export runs in the background and writes directly to file.")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel_export = true;
+                    }
+                    if ui.button("Export").clicked() {
+                        let format = request.format;
+                        let ext = match format {
+                            ExportFormat::Csv => "csv",
+                            ExportFormat::Json => "json",
+                            ExportFormat::ExcelCompatible => "tsv",
+                        };
+                        let path = rfd::FileDialog::new()
+                            .set_title("Export Table Data")
+                            .set_file_name(format!("{}.{}", table_file_name, ext))
+                            .add_filter(
+                                match format {
+                                    ExportFormat::Csv => "CSV",
+                                    ExportFormat::Json => "JSON",
+                                    ExportFormat::ExcelCompatible => "Excel",
+                                },
+                                &[ext],
+                            )
+                            .save_file();
+
+                        if let Some(path) = path {
+                            submit_export = Some(path);
+                        }
+                    }
+                });
+            });
+
+        if let Some(path) = submit_export {
+            if let Some(export_request) = self.export_request.take() {
+                self.spawn_table_export(export_request, path);
+            }
+        }
+
+        if cancel_export {
+            self.export_request = None;
+        }
+
+        if !open {
+            self.export_request = None;
+        }
+    }
+
+    pub(super) fn drop_table_window(&mut self, ctx: &Context) {
+        let Some(request) = self.drop_table_request.as_ref() else {
+            return;
+        };
+
+        let table_name = qualified_table_label(
+            request
+                .schema
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    request
+                        .database
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                }),
+            &request.table,
+        );
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+
+        Window::new("Drop Table")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Drop this table?").strong());
+                ui.add_space(8.0);
+                ui.label(RichText::new(&table_name).monospace());
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("This will execute DROP TABLE and cannot be undone here.")
+                        .small()
+                        .color(ui.visuals().warn_fg_color),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Drop Table").clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if confirm {
+            if let Some(request) = self.drop_table_request.take() {
+                self.spawn_table_drop(request);
+            }
+        }
+
+        if cancel || !open {
+            self.drop_table_request = None;
+        }
+    }
+
+    pub(super) fn bottom_status(&mut self, ctx: &Context) {
+        TopBottomPanel::bottom("bottom_status").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&self.state.status).small())
+                    .on_hover_text(&self.state.status);
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let error_count = self.state.errors.len();
+                    if error_count > 0 {
+                        if ui.button(format!("Errors: {}", error_count)).clicked() {
+                            self.error_window_open = true;
+                        }
+                    } else {
+                        ui.label(format!("Errors: {}", error_count));
+                    }
+                    ui.separator();
+                    ui.label(format!(
+                        "Workspace: {}",
+                        active_panel_label(self.active_panel)
+                    ));
+                    ui.separator();
+                    ui.label(task_summary(&self.state.tasks));
+                });
+            });
+        });
+    }
+
+    pub(super) fn error_window(&mut self, ctx: &Context) {
+        if self.state.errors.is_empty() && !self.error_window_open {
+            return;
+        }
+
+        let mut open = self.error_window_open;
+        Window::new("Error Details")
+            .open(&mut open)
+            .collapsible(true)
+            .resizable(true)
+            .default_width(500.0)
+            .show(ctx, |ui| {
+                use eframe::egui::ScrollArea;
+                ScrollArea::vertical().show(ui, |ui| {
+                    for error in &mut self.state.errors {
+                        ui.add_space(4.0);
+
+                        Frame::group(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("●").color(Color32::RED).strong());
+                                ui.label(RichText::new(&error.title).strong());
+                            });
+
+                            ui.separator();
+                            ui.label(RichText::new(&error.message).color(Color32::WHITE));
+
+                            if let Some(detail) = &error.detail {
+                                ui.add_space(8.0);
+
+                                let toggle_text = if error.expanded {
+                                    "▼ Hide Details"
+                                } else {
+                                    "▶ Show Details"
+                                };
+                                if ui.button(toggle_text).clicked() {
+                                    error.expanded = !error.expanded;
+                                }
+
+                                if error.expanded {
+                                    ui.add_space(4.0);
+                                    Frame::default().fill(Color32::from_rgb(40, 40, 40)).show(
+                                        ui,
+                                        |ui| {
+                                            ScrollArea::horizontal().show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new(detail)
+                                                        .monospace()
+                                                        .small()
+                                                        .color(Color32::GRAY),
+                                                );
+                                            });
+                                        },
+                                    );
+                                }
+                            }
+                        });
+
+                        ui.separator();
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!self.state.errors.is_empty(), Button::new("Clear All"))
+                            .clicked()
+                        {
+                            self.state.errors.clear();
+                            self.error_window_open = false;
+                        }
+
+                        if ui.button("Copy All").clicked() {
+                            let error_text: String = self
+                                .state
+                                .errors
+                                .iter()
+                                .map(|e| {
+                                    let detail = e.detail.as_deref().unwrap_or("");
+                                    format!("{}: {}\n{}", e.title, e.message, detail)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n\n");
+                            ui.output_mut(|o| o.copied_text = error_text);
+                            self.state.set_status("Errors copied to clipboard");
+                        }
+                    });
+                });
+            });
+
+        self.error_window_open = open;
+        if !open && self.state.errors.is_empty() {
+            self.error_window_open = false;
+        }
+    }
+}
+
+fn trimmed_option(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn task_status_label(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Queued => "Queued",
+        TaskStatus::Running => "Running",
+        TaskStatus::Completed => "Completed",
+        TaskStatus::Failed => "Failed",
+        TaskStatus::Cancelled => "Cancelled",
+    }
+}
+
+fn active_panel_label(panel: ActivePanel) -> &'static str {
+    match panel {
+        ActivePanel::QueryEditor => "Query",
+        ActivePanel::TableEditor => "Table Data",
+        ActivePanel::TableStructure => "Structure",
+        ActivePanel::ImportWizard => "Import",
+        ActivePanel::RedisBrowser => "Redis",
+    }
+}
+
+fn task_summary(tasks: &[TaskState]) -> String {
+    if let Some(task) = tasks
+        .iter()
+        .find(|task| matches!(task.status, TaskStatus::Queued | TaskStatus::Running))
+    {
+        return format!("{}: {}", task_status_label(task.status), task.label);
+    }
+
+    let failed = tasks
+        .iter()
+        .filter(|task| matches!(task.status, TaskStatus::Failed))
+        .count();
+    if failed > 0 {
+        return format!("Tasks: {} failed", failed);
+    }
+
+    format!("Tasks: {}", tasks.len())
+}

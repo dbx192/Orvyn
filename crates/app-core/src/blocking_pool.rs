@@ -19,9 +19,8 @@ impl BlockingPool {
         let (runtime_handle, owned_runtime) = match Handle::try_current() {
             Ok(handle) => (handle, None),
             Err(_) => {
-                let runtime = Arc::new(
-                    Runtime::new().expect("failed to create runtime for blocking pool"),
-                );
+                let runtime =
+                    Arc::new(Runtime::new().expect("failed to create runtime for blocking pool"));
                 (runtime.handle().clone(), Some(runtime))
             }
         };
@@ -131,19 +130,21 @@ mod tests {
         let pool_for_second = pool.clone();
 
         let handle1 = tokio::spawn(async move {
-            pool_for_first.spawn(|| {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                Ok(1)
-            })
-            .await
+            pool_for_first
+                .spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    Ok(1)
+                })
+                .await
         });
 
         let handle2 = tokio::spawn(async move {
-            pool_for_second.spawn(|| {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                Ok(2)
-            })
-            .await
+            pool_for_second
+                .spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    Ok(2)
+                })
+                .await
         });
 
         let (r1, r2) = tokio::join!(handle1, handle2);

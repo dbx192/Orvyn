@@ -885,6 +885,8 @@ impl QueryEditor {
         let request = QueryExecutionRequest {
             tab_id,
             connection_id: tab.connection_id,
+            database: tab.database.clone(),
+            schema: tab.schema.clone(),
             sql: tab.sql.clone(),
             mode,
             cursor_offset: tab.cursor_offset,
@@ -924,6 +926,8 @@ impl QueryEditor {
         let request = QueryExecutionRequest {
             tab_id,
             connection_id: tab.connection_id,
+            database: tab.database.clone(),
+            schema: tab.schema.clone(),
             sql,
             mode: QueryExecutionMode::CurrentStatement,
             cursor_offset: 0,

@@ -152,6 +152,12 @@ pub enum ObjectTreeAction {
         schema: Option<String>,
         table: String,
     },
+    DropTable {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    },
     ExportDatabase {
         connection_id: ConnectionId,
         mode: DatabaseExportMode,
@@ -737,6 +743,19 @@ impl ObjectTree {
                     ui.close_menu();
                 }
                 ui.separator();
+                if ui.button("Drop Table...").clicked() {
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, table| ObjectTreeAction::DropTable {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            table,
+                        },
+                        actions,
+                    );
+                    ui.close_menu();
+                }
             }
             MetadataNodeKind::View => {
                 if ui.button("Open View Data").clicked() {

@@ -351,11 +351,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = dir.join(format!(
-            "test_import_{}-{}.csv",
-            std::process::id(),
-            nanos
-        ));
+        let path = dir.join(format!("test_import_{}-{}.csv", std::process::id(), nanos));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path

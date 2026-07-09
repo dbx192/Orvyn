@@ -1,11 +1,11 @@
 use super::{
     export_sql::{
-        build_create_index_sql, database_export_mode_label, export_database_sql,
-        qualified_table_label,
+        build_create_index_sql, database_export_mode_label, dialect_for_kind, export_database_sql,
+        qualified_table_label, qualified_table_sql,
     },
     payloads::{
-        DatabaseExportPayload, IndexCreatePayload, PendingTask, TableDataPayload,
-        TableExportPayload, TableExportRequest, TableStructurePayload,
+        DatabaseExportPayload, DropTablePayload, DropTableRequest, IndexCreatePayload, PendingTask,
+        TableDataPayload, TableExportPayload, TableExportRequest, TableStructurePayload,
     },
     ActivePanel, DesktopApp,
 };
@@ -204,6 +204,52 @@ impl DesktopApp {
                 self.pending_index_create = Some(cell);
             }
         }
+
+        let table_drop_cell = self.pending_table_drop.take();
+        if let Some(cell) = table_drop_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            let table_name = qualified_table_label(
+                                payload
+                                    .schema
+                                    .as_deref()
+                                    .filter(|value| !value.is_empty())
+                                    .or_else(|| {
+                                        payload
+                                            .database
+                                            .as_deref()
+                                            .filter(|value| !value.is_empty())
+                                    }),
+                                &payload.table,
+                            );
+                            if self
+                                .table_editor
+                                .as_ref()
+                                .is_some_and(|editor| editor.table_name() == table_name)
+                            {
+                                self.table_editor = None;
+                                self.table_structure = None;
+                                self.active_panel = ActivePanel::QueryEditor;
+                            }
+                            self.object_tree.reload_root();
+                            self.state
+                                .set_status(format!("Dropped table: {table_name}"));
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Drop table failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_table_drop = Some(cell);
+            }
+        }
     }
 
     /// Spawn an async task to load table data (columns + paginated SELECT).
@@ -259,6 +305,8 @@ impl DesktopApp {
             let request = QueryExecutionRequest {
                 tab_id: QueryId::new(),
                 connection_id,
+                database: db.clone(),
+                schema: sch.clone(),
                 sql,
                 mode: QueryExecutionMode::All,
                 cursor_offset: 0,
@@ -424,6 +472,8 @@ impl DesktopApp {
                     QueryExecutionRequest {
                         tab_id: QueryId::new(),
                         connection_id: request.connection_id,
+                        database: request.database.clone(),
+                        schema: request.schema.clone(),
                         sql,
                         mode: QueryExecutionMode::All,
                         cursor_offset: 0,
@@ -520,6 +570,8 @@ impl DesktopApp {
                         QueryExecutionRequest {
                             tab_id: QueryId::new(),
                             connection_id: request.connection_id,
+                            database: request.database.clone(),
+                            schema: request.schema.clone(),
                             sql,
                             mode: QueryExecutionMode::All,
                             cursor_offset: 0,
@@ -542,5 +594,55 @@ impl DesktopApp {
         });
 
         self.state.set_status("Creating index...");
+    }
+
+    pub(super) fn spawn_table_drop(&mut self, request: DropTableRequest) {
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: PendingTask<DropTablePayload> = Arc::new(Mutex::new(None));
+        self.pending_table_drop = Some(cell.clone());
+
+        runtime.spawn(async move {
+            let result = async {
+                let profile = connection_manager
+                    .get_profile(request.connection_id)
+                    .await?
+                    .ok_or_else(|| AppError::validation("connection profile not found"))?;
+                let dialect = dialect_for_kind(profile.kind);
+                let table_sql = qualified_table_sql(
+                    dialect.as_ref(),
+                    profile.kind,
+                    request.database.as_deref(),
+                    request.schema.as_deref(),
+                    &request.table,
+                )?;
+                query_service
+                    .execute(
+                        QueryExecutionRequest {
+                            tab_id: QueryId::new(),
+                            connection_id: request.connection_id,
+                            database: request.database.clone(),
+                            schema: request.schema.clone(),
+                            sql: format!("DROP TABLE {table_sql}"),
+                            mode: QueryExecutionMode::All,
+                            cursor_offset: 0,
+                            selection: None,
+                            timeout_ms: 60_000,
+                        },
+                        None,
+                    )
+                    .await?;
+                Ok(DropTablePayload {
+                    database: request.database,
+                    schema: request.schema,
+                    table: request.table,
+                })
+            }
+            .await;
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status("Dropping table...");
     }
 }

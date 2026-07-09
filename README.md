@@ -134,7 +134,9 @@ RUST_DB_CLIENT_MASTER_KEY=change-this-master-key
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
+D:\ProjectsRust
 cargo build -p desktop --release --target x86_64-pc-windows-msvc
+D:\ProjectsRust\target\x86_64-pc-windows-msvc\release\desktop.exe
 ```
 
 生成产物：

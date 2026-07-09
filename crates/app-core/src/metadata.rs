@@ -437,20 +437,38 @@ impl MetadataService {
         let mut nodes = Vec::new();
         if schemas.is_empty() {
             append_schema_objects(reader, profile, password, path, None, false, &mut nodes).await?;
+        } else if matches!(profile.kind, DataSourceKind::PostgreSql)
+            && schemas.iter().any(|schema| schema.name == "public")
+        {
+            append_schema_objects(
+                reader,
+                profile,
+                password,
+                path,
+                Some("public"),
+                false,
+                &mut nodes,
+            )
+            .await?;
+            let remaining_schemas = schemas
+                .into_iter()
+                .filter(|schema| schema.name != "public")
+                .collect::<Vec<_>>();
+            nodes.extend(schema_nodes(profile.id, path, remaining_schemas));
+        } else if schemas.len() == 1 {
+            let schema = &schemas[0];
+            append_schema_objects(
+                reader,
+                profile,
+                password,
+                path,
+                Some(schema.name.as_str()),
+                false,
+                &mut nodes,
+            )
+            .await?;
         } else {
-            let show_schema_prefix = schemas.len() > 1;
-            for schema in schemas {
-                append_schema_objects(
-                    reader,
-                    profile,
-                    password,
-                    path,
-                    Some(schema.name.as_str()),
-                    show_schema_prefix,
-                    &mut nodes,
-                )
-                .await?;
-            }
+            nodes.extend(schema_nodes(profile.id, path, schemas));
         }
 
         nodes.sort_by(|left, right| {
@@ -559,6 +577,25 @@ fn database_nodes(connection_id: ConnectionId, objects: Vec<DatabaseObject>) -> 
                 .child(MetadataNodeKind::Database)
                 .with_database(object.name.clone());
             MetadataNode::new(path, object.name, MetadataNodeKind::Database)
+        })
+        .collect()
+}
+
+fn schema_nodes(
+    connection_id: ConnectionId,
+    parent: &MetadataPath,
+    objects: Vec<DatabaseObject>,
+) -> Vec<MetadataNode> {
+    objects
+        .into_iter()
+        .map(|object| {
+            MetadataNode::new(
+                inherit_parent(connection_id, parent)
+                    .child(MetadataNodeKind::Schema)
+                    .with_schema(object.name.clone()),
+                object.name,
+                MetadataNodeKind::Schema,
+            )
         })
         .collect()
 }

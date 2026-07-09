@@ -260,10 +260,17 @@ impl QueryService {
         runtime_password: Option<&str>,
     ) -> Result<QueryExecutionReport> {
         let statements = statements_for_request(&request)?;
-        let (profile, password) = self
+        let (mut profile, password) = self
             .connections
             .profile_with_password(request.connection_id, runtime_password)
             .await?;
+        if let Some(database) = request
+            .database
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            profile.database = Some(database.to_string());
+        }
         let executor = self.executor(profile.kind)?;
         let execution_id = QueryId::new();
         let started_at = Instant::now();
@@ -344,6 +351,8 @@ impl QueryService {
         let request = QueryExecutionRequest {
             tab_id: tab.id,
             connection_id: tab.connection_id,
+            database: None,
+            schema: None,
             sql: tab.sql,
             mode,
             cursor_offset: tab.cursor_offset,
@@ -628,6 +637,8 @@ mod tests {
         let request = QueryExecutionRequest {
             tab_id: QueryId::new(),
             connection_id,
+            database: None,
+            schema: None,
             sql: "select 1;\nselect 2;".to_string(),
             mode: QueryExecutionMode::CurrentStatement,
             cursor_offset: 12,
@@ -644,6 +655,8 @@ mod tests {
         let request = QueryExecutionRequest {
             tab_id: QueryId::new(),
             connection_id,
+            database: None,
+            schema: None,
             sql: "select 1;\nselect 2;".to_string(),
             mode: QueryExecutionMode::Selection,
             cursor_offset: 0,

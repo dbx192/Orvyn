@@ -119,11 +119,15 @@ fn export_delimited_to_file(result: &QueryResult, delimiter: u8, path: &Path) ->
 fn export_json_to_file(result: &QueryResult, path: &Path) -> Result<()> {
     let file = File::create(path).map_err(db_common::AppError::from)?;
     let mut writer = BufWriter::new(file);
-    writer.write_all(b"[\n").map_err(db_common::AppError::from)?;
+    writer
+        .write_all(b"[\n")
+        .map_err(db_common::AppError::from)?;
 
     for (row_index, row) in result.rows.iter().enumerate() {
         if row_index > 0 {
-            writer.write_all(b",\n").map_err(db_common::AppError::from)?;
+            writer
+                .write_all(b",\n")
+                .map_err(db_common::AppError::from)?;
         }
 
         let mut object = serde_json::Map::new();
@@ -136,7 +140,9 @@ fn export_json_to_file(result: &QueryResult, path: &Path) -> Result<()> {
             .map_err(db_common::AppError::from)?;
     }
 
-    writer.write_all(b"\n]").map_err(db_common::AppError::from)?;
+    writer
+        .write_all(b"\n]")
+        .map_err(db_common::AppError::from)?;
     writer.flush().map_err(db_common::AppError::from)?;
     Ok(())
 }
