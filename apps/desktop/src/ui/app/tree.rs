@@ -29,8 +29,7 @@ impl DesktopApp {
                 if !self.last_tree_status.is_empty() {
                     ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                         let status = compact_status_text(&self.last_tree_status, 72);
-                        ui.label(RichText::new(status).small().color(Color32::GRAY))
-                            .on_hover_text(&self.last_tree_status);
+                        ui.label(RichText::new(status).small().color(Color32::GRAY));
                     });
                 }
             });

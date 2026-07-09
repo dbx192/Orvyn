@@ -36,8 +36,13 @@ impl DesktopApp {
             if self.import_wizard.is_some() {
                 self.workspace_tab(ui, ActivePanel::ImportWizard, "Import");
             }
-            if self.redis_browser.is_some() {
-                self.workspace_tab(ui, ActivePanel::RedisBrowser, "Redis");
+            if matches!(self.active_panel, ActivePanel::RedisBrowser) {
+                let label = self
+                    .redis_browser
+                    .as_ref()
+                    .map(|browser| browser.tab_title())
+                    .unwrap_or_else(|| "Key Browser".to_string());
+                self.workspace_tab(ui, ActivePanel::RedisBrowser, &label);
             }
         });
     }

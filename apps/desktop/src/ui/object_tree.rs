@@ -303,7 +303,6 @@ impl ObjectTree {
             let _ = response.changed();
             if ui
                 .add_sized([clear_width - 2.0, 22.0], Button::new("x"))
-                .on_hover_text("Clear search")
                 .clicked()
             {
                 self.search_query.clear();
@@ -1654,7 +1653,7 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
         }
     }
 
-    response.on_hover_text(tree_row_hover(&spec))
+    response
 }
 
 fn tree_message_row(ui: &mut Ui, depth: usize, text: &str, error: bool) {
@@ -1704,20 +1703,6 @@ fn tree_indent(depth: usize) -> f32 {
     (depth as f32 * TREE_INDENT).min(TREE_MAX_INDENT)
 }
 
-fn tree_row_hover(spec: &TreeRowSpec<'_>) -> String {
-    let mut lines = vec![
-        format!("{}: {}", node_kind_name(spec.kind), spec.label),
-        "Double-click to open or expand".to_string(),
-    ];
-    if let Some(detail) = spec.detail {
-        lines.push(format!("Detail: {detail}"));
-    }
-    if let Some((_, status)) = spec.connection_status {
-        lines.push(format!("Status: {status}"));
-    }
-    lines.join("\n")
-}
-
 fn node_kind_badge(kind: MetadataNodeKind, detail: Option<&str>) -> (&'static str, Color32) {
     if kind == MetadataNodeKind::Connection {
         let detail = detail.unwrap_or_default().to_ascii_lowercase();
@@ -1763,33 +1748,6 @@ fn node_kind_badge(kind: MetadataNodeKind, detail: Option<&str>) -> (&'static st
         MetadataNodeKind::RedisKeysFolder | MetadataNodeKind::RedisKey => {
             ("K", Color32::from_rgb(190, 66, 62))
         }
-    }
-}
-
-fn node_kind_name(kind: MetadataNodeKind) -> &'static str {
-    match kind {
-        MetadataNodeKind::Connection => "Connection",
-        MetadataNodeKind::Database => "Database",
-        MetadataNodeKind::Schema => "Schema",
-        MetadataNodeKind::TablesFolder => "Tables",
-        MetadataNodeKind::ViewsFolder => "Views",
-        MetadataNodeKind::FunctionsFolder => "Functions",
-        MetadataNodeKind::QueriesFolder => "Queries",
-        MetadataNodeKind::ColumnsFolder => "Columns",
-        MetadataNodeKind::IndexesFolder => "Indexes",
-        MetadataNodeKind::ForeignKeysFolder => "Foreign keys",
-        MetadataNodeKind::TriggersFolder => "Triggers",
-        MetadataNodeKind::Table => "Table",
-        MetadataNodeKind::View => "View",
-        MetadataNodeKind::Column => "Column",
-        MetadataNodeKind::Index => "Index",
-        MetadataNodeKind::ForeignKey => "Foreign key",
-        MetadataNodeKind::Trigger => "Trigger",
-        MetadataNodeKind::Function => "Function",
-        MetadataNodeKind::Query => "Query",
-        MetadataNodeKind::RedisDatabase => "Redis database",
-        MetadataNodeKind::RedisKeysFolder => "Redis keys",
-        MetadataNodeKind::RedisKey => "Redis key",
     }
 }
 

@@ -26,14 +26,19 @@ use db_common::{
     RedisDatabase, RedisKeyInfo, RedisValue,
 };
 use eframe::egui::{
-    Align, Align2, Button, Color32, ComboBox, Context, Grid, Layout, RichText, ScrollArea,
-    SelectableLabel, Spinner, TextEdit, Ui, Window,
+    vec2, Align, Align2, Button, Color32, ComboBox, Context, Frame, Grid, Layout, Margin, Rect,
+    RichText, Rounding, ScrollArea, Sense, Spinner, Stroke, TextEdit, Ui, Vec2, Window,
 };
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::{
+    collections::BTreeMap,
+    sync::mpsc::{self, Receiver, Sender},
+};
 
 const SCAN_PAGE_SIZE: u32 = 100;
 const PREVIEW_MAX_BYTES: usize = 1024;
 const LARGE_VALUE_THRESHOLD: usize = 64 * 1024;
+const REDIS_KEY_SIDEBAR_WIDTH: f32 = 330.0;
+const REDIS_VALUE_ROW_LIMIT: usize = 250;
 
 /// Events emitted by the Redis browser.
 #[derive(Debug, Clone)]
@@ -91,6 +96,7 @@ pub struct RedisBrowserUi {
     selected_key_type: Option<String>,
     value_display: ValueDisplay,
     confirm_load_full: Option<(String, usize)>,
+    value_filter: String,
 
     // Delete confirmation
     confirm_delete: Option<String>,
@@ -251,6 +257,7 @@ enum BrowserCommand {
 }
 
 enum BrowserResponse {
+    ConnectionLoaded(ConnectionProfile),
     DatabasesLoaded(Result<Vec<RedisDatabase>, AppError>),
     KeysScanned {
         cursor: u64,
@@ -308,6 +315,97 @@ enum BrowserResponse {
     Status(String),
 }
 
+#[derive(Clone, Copy)]
+struct RedisBrowserStyle {
+    canvas: Color32,
+    panel_fill: Color32,
+    sidebar_fill: Color32,
+    toolbar_fill: Color32,
+    header_fill: Color32,
+    border: Color32,
+    row_alt: Color32,
+    row_hover: Color32,
+    selected_fill: Color32,
+    selected_text: Color32,
+    accent: Color32,
+    accent_soft: Color32,
+    danger: Color32,
+    text: Color32,
+    muted: Color32,
+}
+
+impl RedisBrowserStyle {
+    fn from_ui(ui: &Ui) -> Self {
+        if ui.visuals().dark_mode {
+            Self {
+                canvas: Color32::from_rgb(18, 20, 24),
+                panel_fill: Color32::from_rgb(26, 29, 34),
+                sidebar_fill: Color32::from_rgb(22, 25, 30),
+                toolbar_fill: Color32::from_rgb(31, 35, 41),
+                header_fill: Color32::from_rgb(35, 39, 46),
+                border: Color32::from_rgb(54, 60, 69),
+                row_alt: Color32::from_rgb(29, 32, 38),
+                row_hover: Color32::from_rgb(43, 48, 56),
+                selected_fill: Color32::from_rgb(82, 47, 48),
+                selected_text: Color32::from_rgb(245, 247, 250),
+                accent: Color32::from_rgb(79, 145, 255),
+                accent_soft: Color32::from_rgb(35, 54, 83),
+                danger: Color32::from_rgb(224, 86, 75),
+                text: Color32::from_rgb(226, 230, 235),
+                muted: Color32::from_rgb(147, 154, 164),
+            }
+        } else {
+            Self {
+                canvas: Color32::from_rgb(246, 247, 249),
+                panel_fill: Color32::from_rgb(255, 255, 255),
+                sidebar_fill: Color32::from_rgb(250, 251, 253),
+                toolbar_fill: Color32::from_rgb(248, 249, 252),
+                header_fill: Color32::from_rgb(246, 247, 250),
+                border: Color32::from_rgb(218, 223, 230),
+                row_alt: Color32::from_rgb(249, 250, 252),
+                row_hover: Color32::from_rgb(239, 243, 249),
+                selected_fill: Color32::from_rgb(247, 226, 226),
+                selected_text: Color32::from_rgb(32, 36, 42),
+                accent: Color32::from_rgb(47, 112, 214),
+                accent_soft: Color32::from_rgb(226, 238, 255),
+                danger: Color32::from_rgb(202, 66, 57),
+                text: Color32::from_rgb(32, 36, 42),
+                muted: Color32::from_rgb(107, 116, 128),
+            }
+        }
+    }
+
+    fn panel_frame(self) -> Frame {
+        Frame::none()
+            .fill(self.panel_fill)
+            .stroke(Stroke::new(1.0, self.border))
+            .rounding(Rounding::same(3.0))
+            .inner_margin(Margin::same(0.0))
+    }
+
+    fn inset_frame(self) -> Frame {
+        Frame::none()
+            .fill(self.panel_fill)
+            .stroke(Stroke::new(1.0, self.border))
+            .rounding(Rounding::same(3.0))
+            .inner_margin(Margin::symmetric(10.0, 8.0))
+    }
+
+    fn toolbar_frame(self) -> Frame {
+        Frame::none()
+            .fill(self.toolbar_fill)
+            .stroke(Stroke::new(1.0, self.border))
+            .inner_margin(Margin::symmetric(10.0, 6.0))
+    }
+
+    fn sidebar_frame(self) -> Frame {
+        Frame::none()
+            .fill(self.sidebar_fill)
+            .stroke(Stroke::new(1.0, self.border))
+            .inner_margin(Margin::same(8.0))
+    }
+}
+
 impl RedisBrowserUi {
     pub fn new(
         connection_id: ConnectionId,
@@ -340,6 +438,7 @@ impl RedisBrowserUi {
             selected_key_type: None,
             value_display: ValueDisplay::NotLoaded,
             confirm_load_full: None,
+            value_filter: String::new(),
             confirm_delete: None,
             editing_ttl: None,
             ttl_edit_value: String::new(),
@@ -384,6 +483,13 @@ impl RedisBrowserUi {
         self.connection_id
     }
 
+    pub fn tab_title(&self) -> String {
+        self.profile
+            .as_ref()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "Key Browser".to_string())
+    }
+
     fn load_connection_profile(&mut self) {
         let connection_id = self.connection_id;
         let manager = self.connection_manager.clone();
@@ -395,8 +501,9 @@ impl RedisBrowserUi {
         self.runtime.spawn(async move {
             match manager.get_profile(connection_id).await {
                 Ok(Some(profile)) if profile.kind == DataSourceKind::Redis => {
+                    let _ = tx.send(BrowserResponse::ConnectionLoaded(profile.clone()));
                     let _ = tx.send(BrowserResponse::Status(format!(
-                        "Redis connection: {}",
+                        "Connection opened: {}",
                         profile.name
                     )));
                     let result = metadata_service
@@ -428,33 +535,22 @@ impl RedisBrowserUi {
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) -> Option<RedisBrowserEvent> {
         self.drain_responses();
 
-        ui.horizontal(|ui| {
-            ui.label("DB:");
-            self.database_selector(ui);
-            if ui
-                .add_enabled(!self.is_loading, Button::new("Refresh"))
-                .clicked()
-            {
-                self.refresh();
-            }
-            if ui.button("+ New Key").clicked() {
-                self.new_key_dialog = true;
-            }
-        });
+        let style = RedisBrowserStyle::from_ui(ui);
+        Frame::none()
+            .fill(style.canvas)
+            .inner_margin(Margin::same(0.0))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 5.0);
+                self.connection_header(ui, style);
+                self.redis_nav_tabs(ui, style);
 
-        ui.separator();
+                match self.active_tab {
+                    RedisBrowserTab::Browser => self.browser_content(ui, style),
+                    RedisBrowserTab::Cli => self.cli_content(ui, style),
+                }
 
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.active_tab, RedisBrowserTab::Browser, "Keys");
-            ui.selectable_value(&mut self.active_tab, RedisBrowserTab::Cli, "CLI");
-        });
-
-        ui.separator();
-
-        match self.active_tab {
-            RedisBrowserTab::Browser => self.browser_content(ui),
-            RedisBrowserTab::Cli => self.cli_content(ui),
-        }
+                self.status_strip(ui, style);
+            });
 
         // Delete confirmation dialog
         self.delete_confirmation_window(ctx);
@@ -477,86 +573,226 @@ impl RedisBrowserUi {
         // Confirm delete zset member
         self.confirm_delete_zset_member_window(ctx);
 
-        // Error display
-        if let Some(error) = &self.error {
-            ui.add_space(8.0);
-            ui.colored_label(Color32::RED, error);
-        }
-
-        if !self.status.is_empty() && self.error.is_none() {
-            ui.add_space(8.0);
-            ui.label(&self.status);
-        }
-
         None
     }
 
-    fn browser_content(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Pattern:");
-            let response = ui.add(
-                TextEdit::singleline(&mut self.search_pattern)
-                    .hint_text("* or user:*")
-                    .desired_width(200.0),
-            );
-            if response.lost_focus() && self.search_pattern != self.pattern {
-                self.apply_pattern();
-            }
-            if ui.button("Apply").clicked() {
-                self.apply_pattern();
-            }
-        });
+    fn connection_header(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
+        style.toolbar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(self.tab_title())
+                        .strong()
+                        .color(style.text)
+                        .size(15.0),
+                );
+                if let Some(endpoint) = self.connection_endpoint() {
+                    ui.label(RichText::new(endpoint).small().color(style.muted));
+                }
+                if self.is_loading {
+                    ui.add(Spinner::new());
+                }
 
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                self.key_list_panel(ui);
-            });
-
-            ui.separator();
-
-            ui.vertical(|ui| {
-                self.key_detail_panel(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add_enabled(!self.is_loading, Button::new("+ Key"))
+                        .clicked()
+                    {
+                        self.new_key_dialog = true;
+                    }
+                    if ui
+                        .add_enabled(!self.is_loading, Button::new("Refresh"))
+                        .clicked()
+                    {
+                        self.refresh();
+                    }
+                    ui.label(
+                        RichText::new(format!("db{}", self.selected_database))
+                            .small()
+                            .color(style.muted),
+                    );
+                });
             });
         });
     }
 
-    fn cli_content(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Redis CLI").strong());
-        ui.add_space(8.0);
-        ui.add(
-            TextEdit::multiline(&mut self.cli_command)
-                .desired_width(f32::INFINITY)
-                .desired_rows(4)
-                .hint_text("SET mykey hello\nLRANGE mylist 0 9"),
-        );
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!self.cli_running, Button::new("Execute"))
-                .clicked()
-            {
-                self.execute_cli_command();
-            }
-            if self.cli_running {
-                ui.add(Spinner::new());
-                ui.label("Running...");
-            }
+    fn redis_nav_tabs(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
+        style.toolbar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.active_tab, RedisBrowserTab::Browser, "Key Detail");
+                ui.selectable_value(&mut self.active_tab, RedisBrowserTab::Cli, "CLI");
+            });
         });
-        ui.add_space(8.0);
-        ScrollArea::vertical()
-            .id_source("redis_cli_result")
-            .max_height(320.0)
-            .show(ui, |ui| {
-                if let Some(result) = &self.cli_result {
-                    ui.label(RichText::new(result).monospace().color(Color32::LIGHT_GRAY));
-                } else {
-                    ui.label(
-                        RichText::new("No command executed")
-                            .italics()
-                            .color(Color32::GRAY),
-                    );
+    }
+
+    fn browser_content(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
+        let height = ui.available_height().max(360.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(REDIS_KEY_SIDEBAR_WIDTH, height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    self.key_list_panel(ui, style);
+                },
+            );
+
+            let detail_width = ui.available_width().max(360.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(detail_width, height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    self.key_detail_panel(ui, style);
+                },
+            );
+        });
+    }
+
+    fn cli_content(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
+        style.inset_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("CLI").strong().color(style.text));
+                if self.cli_running {
+                    ui.add(Spinner::new());
+                    ui.label(RichText::new("Running...").color(style.muted));
                 }
+            });
+            ui.add_space(6.0);
+            ui.add(
+                TextEdit::multiline(&mut self.cli_command)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(5)
+                    .hint_text("SET mykey hello\nLRANGE mylist 0 9"),
+            );
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!self.cli_running, Button::new("Execute"))
+                    .clicked()
+                {
+                    self.execute_cli_command();
+                }
+                if ui.button("Clear").clicked() {
+                    self.cli_result = None;
+                    self.cli_command.clear();
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+        style.panel_frame().show(ui, |ui| {
+            Frame::none()
+                .fill(style.header_fill)
+                .inner_margin(Margin::symmetric(10.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Result").strong().color(style.text));
+                });
+            ScrollArea::vertical()
+                .id_source("redis_cli_result")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        if let Some(result) = &self.cli_result {
+                            ui.label(RichText::new(result).monospace().color(style.text));
+                        } else {
+                            ui.label(
+                                RichText::new("No command executed")
+                                    .italics()
+                                    .color(style.muted),
+                            );
+                        }
+                    });
+                });
+        });
+    }
+
+    fn status_strip(&self, ui: &mut Ui, style: RedisBrowserStyle) {
+        style.toolbar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(error) = &self.error {
+                    ui.label(RichText::new(error).color(style.danger));
+                } else if !self.status.is_empty() {
+                    ui.label(RichText::new(&self.status).small().color(style.muted));
+                } else {
+                    ui.label(RichText::new("Ready").small().color(style.muted));
+                }
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new("None").small().color(style.muted));
+                    ui.separator();
+                    ui.label(RichText::new("Raw").small().color(style.muted));
+                });
+            });
+        });
+    }
+
+    fn connection_endpoint(&self) -> Option<String> {
+        let profile = self.profile.as_ref()?;
+        let host = profile.host.as_deref()?;
+        let port = profile.port.unwrap_or(6379);
+        Some(format!("{host}:{port}"))
+    }
+
+    fn key_groups(&self) -> Vec<(String, Vec<(String, Option<i64>, Option<u64>)>)> {
+        let mut groups: BTreeMap<String, Vec<(String, Option<i64>, Option<u64>)>> = BTreeMap::new();
+        for entry in &self.keys {
+            groups
+                .entry(entry.info.type_name.clone())
+                .or_default()
+                .push((entry.info.name.clone(), entry.info.ttl_seconds, entry.size));
+        }
+
+        let mut groups = groups.into_iter().collect::<Vec<_>>();
+        for (_, rows) in &mut groups {
+            rows.sort_by(|left, right| left.0.cmp(&right.0));
+        }
+        groups.sort_by(|left, right| {
+            redis_type_rank(&left.0)
+                .cmp(&redis_type_rank(&right.0))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        groups
+    }
+
+    fn render_key_group_header(
+        &self,
+        ui: &mut Ui,
+        style: RedisBrowserStyle,
+        type_name: &str,
+        count: usize,
+    ) {
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
+        let painter = ui.painter();
+        painter.text(
+            rect.left_center() + vec2(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            "▾",
+            eframe::egui::FontId::proportional(12.0),
+            style.muted,
+        );
+        let label = format!("{} ({count})", redis_type_group_label(type_name));
+        painter.text(
+            rect.left_center() + vec2(28.0, 0.0),
+            Align2::LEFT_CENTER,
+            label,
+            eframe::egui::FontId::proportional(12.5),
+            style.text,
+        );
+    }
+
+    fn type_badge(&self, ui: &mut Ui, style: RedisBrowserStyle, type_name: &str) {
+        Frame::none()
+            .fill(key_type_badge_fill(type_name, style))
+            .rounding(Rounding::same(3.0))
+            .inner_margin(Margin::symmetric(8.0, 3.0))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(redis_type_badge_label(type_name))
+                        .monospace()
+                        .strong()
+                        .color(Color32::WHITE),
+                );
             });
     }
 
@@ -591,96 +827,165 @@ impl RedisBrowserUi {
             });
     }
 
-    fn key_list_panel(&mut self, ui: &mut Ui) {
-        ui.set_min_width(350.0);
-
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Keys").strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(format!("{} keys", self.keys.len()));
-            });
-        });
-
-        ScrollArea::vertical()
-            .id_source("key_list_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if self.keys.is_empty() && !self.is_loading {
+    fn key_list_panel(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
+        style.sidebar_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                self.database_selector(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
-                        RichText::new("No keys found")
-                            .color(Color32::GRAY)
-                            .italics(),
+                        RichText::new(format!("{} keys", self.keys.len()))
+                            .small()
+                            .color(style.muted),
                     );
-                    return;
-                }
+                });
+            });
 
-                let key_rows = self
-                    .keys
-                    .iter()
-                    .map(|entry| {
-                        (
-                            entry.info.name.clone(),
-                            entry.info.type_name.clone(),
-                            entry.info.ttl_seconds,
-                            entry.size,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                for (name, type_name, ttl_seconds, size) in key_rows {
-                    self.render_key_row(ui, &name, &type_name, ttl_seconds, size);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    TextEdit::singleline(&mut self.search_pattern)
+                        .hint_text("Filter key pattern")
+                        .desired_width((ui.available_width() - 62.0).max(120.0)),
+                );
+                if response.lost_focus() && self.search_pattern != self.pattern {
+                    self.apply_pattern();
                 }
-
-                if self.is_loading {
-                    ui.horizontal(|ui| {
-                        ui.add(Spinner::new());
-                        ui.label("Loading...");
-                    });
-                } else if self.has_more {
-                    if ui.button("Load More...").clicked() {
-                        self.load_more_keys();
-                    }
+                if ui.add_sized([56.0, 24.0], Button::new("Match")).clicked() {
+                    self.apply_pattern();
                 }
             });
+
+            ui.add_space(6.0);
+            Frame::none()
+                .fill(style.panel_fill)
+                .stroke(Stroke::new(1.0, style.border))
+                .inner_margin(Margin::same(4.0))
+                .show(ui, |ui| {
+                    ScrollArea::vertical()
+                        .id_source("key_list_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if self.keys.is_empty() && !self.is_loading {
+                                ui.add_space(16.0);
+                                ui.centered_and_justified(|ui| {
+                                    ui.label(
+                                        RichText::new("No keys found").color(style.muted).italics(),
+                                    );
+                                });
+                                return;
+                            }
+
+                            let groups = self.key_groups();
+                            for (type_name, rows) in groups {
+                                self.render_key_group_header(ui, style, &type_name, rows.len());
+                                for (name, ttl_seconds, size) in rows {
+                                    self.render_key_row(
+                                        ui,
+                                        style,
+                                        &name,
+                                        &type_name,
+                                        ttl_seconds,
+                                        size,
+                                    );
+                                }
+                            }
+
+                            ui.add_space(6.0);
+                            if self.is_loading {
+                                ui.horizontal(|ui| {
+                                    ui.add(Spinner::new());
+                                    ui.label(RichText::new("Loading...").color(style.muted));
+                                });
+                            } else if self.has_more {
+                                if ui.button("Load More").clicked() {
+                                    self.load_more_keys();
+                                }
+                            }
+                        });
+                });
+        });
     }
 
     fn render_key_row(
         &mut self,
         ui: &mut Ui,
+        style: RedisBrowserStyle,
         key_name: &str,
         key_type: &str,
         ttl_seconds: Option<i64>,
         size: Option<u64>,
     ) {
         let is_selected = self.selected_key.as_ref().map(|value| value.as_str()) == Some(key_name);
+        let row_height = 28.0;
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height), Sense::click());
+        let painter = ui.painter();
+        let fill = if is_selected {
+            style.selected_fill
+        } else if response.hovered() {
+            style.row_hover
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            painter.rect_filled(rect.shrink2(vec2(1.0, 1.0)), Rounding::same(3.0), fill);
+        }
 
-        ui.horizontal(|ui| {
-            let resp = ui.add(SelectableLabel::new(is_selected, key_name));
+        let badge_rect =
+            Rect::from_min_size(rect.left_top() + vec2(10.0, 5.0), Vec2::new(18.0, 18.0));
+        painter.rect_filled(
+            badge_rect,
+            Rounding::same(3.0),
+            key_type_badge_fill(key_type, style),
+        );
+        painter.text(
+            badge_rect.center(),
+            Align2::CENTER_CENTER,
+            key_type_short_label(key_type),
+            eframe::egui::FontId::monospace(10.0),
+            Color32::WHITE,
+        );
 
-            if resp.clicked() {
-                self.select_key(key_name.to_string());
-            }
+        let label_color = if is_selected {
+            style.selected_text
+        } else {
+            style.text
+        };
+        let leaf = key_leaf_label(key_name);
+        let prefix = key_parent_label(key_name);
+        painter.text(
+            rect.left_top() + vec2(34.0, 8.0),
+            Align2::LEFT_TOP,
+            &leaf,
+            eframe::egui::FontId::proportional(12.5),
+            label_color,
+        );
+        if let Some(prefix) = prefix {
+            painter.text(
+                rect.left_top() + vec2(34.0 + leaf.len() as f32 * 7.0 + 6.0, 8.0),
+                Align2::LEFT_TOP,
+                &prefix,
+                eframe::egui::FontId::proportional(11.0),
+                style.muted,
+            );
+        }
+        let meta = key_row_meta(key_type, ttl_seconds, size);
+        if !meta.is_empty() && rect.width() > 220.0 {
+            painter.text(
+                rect.right_top() + vec2(-8.0, 8.0),
+                Align2::RIGHT_TOP,
+                meta,
+                eframe::egui::FontId::proportional(10.5),
+                style.muted,
+            );
+        }
 
-            resp.context_menu(|ui| {
-                self.key_context_menu(ui, key_name);
-            });
-        });
+        if response.clicked() {
+            self.select_key(key_name.to_string());
+        }
 
-        // Show key metadata in smaller text
-        ui.indent("key_meta", |ui| {
-            ui.horizontal(|ui| {
-                let type_color = key_type_color(key_type);
-                ui.label(RichText::new(key_type).color(type_color).small());
-
-                if let Some(ttl) = ttl_seconds {
-                    let ttl_text = format_ttl(ttl);
-                    ui.label(RichText::new(ttl_text).color(Color32::GRAY).small());
-                }
-
-                if let Some(size) = size {
-                    let size_text = format_key_size(key_type, size);
-                    ui.label(RichText::new(size_text).color(Color32::GRAY).small());
-                }
-            });
+        response.context_menu(|ui| {
+            self.key_context_menu(ui, key_name);
         });
     }
 
@@ -701,111 +1006,138 @@ impl RedisBrowserUi {
         }
     }
 
-    fn key_detail_panel(&mut self, ui: &mut Ui) {
-        ui.set_min_width(400.0);
+    fn key_detail_panel(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
+        style.panel_frame().show(ui, |ui| {
+            let Some(key_name) = self.selected_key.clone() else {
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        RichText::new("Select a key to view details")
+                            .color(style.muted)
+                            .italics(),
+                    );
+                });
+                return;
+            };
 
-        let Some(key_name) = self.selected_key.clone() else {
-            ui.label(
-                RichText::new("Select a key to view details")
-                    .color(Color32::GRAY)
-                    .italics(),
-            );
-            return;
-        };
+            let entry = self
+                .keys
+                .iter()
+                .find(|entry| entry.info.name == key_name)
+                .cloned();
+            let key_type = entry
+                .as_ref()
+                .map(|entry| entry.info.type_name.clone())
+                .or_else(|| self.selected_key_type.clone())
+                .unwrap_or_else(|| "key".to_string());
 
-        let entry = self.keys.iter().find(|e| &e.info.name == &key_name);
-
-        // Key header
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&key_name).strong());
-            if let Some(e) = entry {
-                let type_color = key_type_color(&e.info.type_name);
-                ui.label(RichText::new(format!("({})", e.info.type_name)).color(type_color));
+            self.key_detail_header(ui, style, &key_name, &key_type);
+            if let Some(entry) = entry.as_ref() {
+                self.metadata_grid(ui, entry, style);
             }
-        });
 
-        // Metadata section
-        if let Some(e) = entry {
-            ui.separator();
-            self.metadata_grid(ui, e);
-        }
+            Frame::none()
+                .fill(style.panel_fill)
+                .inner_margin(Margin::symmetric(8.0, 8.0))
+                .show(ui, |ui| {
+                    self.render_value(ui, &key_name, style);
+                });
 
-        // Value section
-        ui.separator();
-        ui.label(RichText::new("Value").strong());
-        self.render_value(ui, &key_name);
-
-        // Actions
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("Delete Key").clicked() {
-                self.confirm_delete = Some(key_name.clone());
-            }
-            if ui.button("Refresh").clicked() {
-                self.refresh_key(key_name.clone());
-            }
-            if ui.button("Edit String").clicked() {
-                self.string_editing = true;
-                if let ValueDisplay::Loaded(RedisValue::String(bytes)) = &self.value_display {
-                    self.string_edit_value = String::from_utf8_lossy(bytes).to_string();
-                }
-            }
-        });
-
-        // Editing panel for string
-        if self.string_editing {
-            ui.separator();
-            ui.label(RichText::new("Edit String Value").strong());
-            ui.add(
-                TextEdit::multiline(&mut self.string_edit_value)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(4),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    self.set_string_value();
-                }
-                if ui.button("Cancel").clicked() {
-                    self.string_editing = false;
-                    self.string_edit_value.clear();
-                }
-            });
-        }
-    }
-
-    fn metadata_grid(&self, ui: &mut Ui, entry: &KeyEntry) {
-        Grid::new("key_metadata_grid")
-            .num_columns(2)
-            .spacing([12.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("Type:");
-                ui.label(&entry.info.type_name);
-
-                ui.label("TTL:");
-                if let Some(ttl) = entry.info.ttl_seconds {
-                    if let Some((editing_key, _)) = &self.editing_ttl {
-                        if editing_key == &entry.info.name {
-                            // Already editing this key's TTL
-                        } else {
-                            ui.label(format_ttl(ttl));
+            if self.string_editing {
+                ui.add_space(6.0);
+                style.inset_frame().show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Edit String Value")
+                            .strong()
+                            .color(style.text),
+                    );
+                    ui.add(
+                        TextEdit::multiline(&mut self.string_edit_value)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(5),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            self.set_string_value();
                         }
-                    } else {
-                        ui.label(format_ttl(ttl));
-                    }
-                } else {
-                    ui.label("no expiry");
-                }
+                        if ui.button("Cancel").clicked() {
+                            self.string_editing = false;
+                            self.string_edit_value.clear();
+                        }
+                    });
+                });
+            }
+        });
+    }
 
-                ui.label("Size:");
-                if let Some(size) = entry.size {
-                    ui.label(format_key_size(&entry.info.type_name, size));
-                } else {
-                    ui.label("(calculating...)");
-                }
+    fn key_detail_header(
+        &mut self,
+        ui: &mut Ui,
+        style: RedisBrowserStyle,
+        key_name: &str,
+        key_type: &str,
+    ) {
+        Frame::none()
+            .fill(style.header_fill)
+            .stroke(Stroke::new(1.0, style.border))
+            .inner_margin(Margin::symmetric(10.0, 7.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    self.type_badge(ui, style, key_type);
+                    ui.label(
+                        RichText::new(key_name)
+                            .monospace()
+                            .strong()
+                            .color(style.text),
+                    );
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Del").clicked() {
+                            self.confirm_delete = Some(key_name.to_string());
+                        }
+                        if ui.button("Edit").clicked() && key_type == "string" {
+                            self.string_editing = true;
+                            if let ValueDisplay::Loaded(RedisValue::String(bytes)) =
+                                &self.value_display
+                            {
+                                self.string_edit_value = String::from_utf8_lossy(bytes).to_string();
+                            }
+                        }
+                        if ui.button("Copy").clicked() {
+                            ui.output_mut(|output| output.copied_text = key_name.to_string());
+                            self.status = format!("Copied: {}", key_name);
+                        }
+                        if ui.button("Reload").clicked() {
+                            self.refresh_key(key_name.to_string());
+                        }
+                    });
+                });
             });
     }
 
-    fn render_value(&mut self, ui: &mut Ui, key_name: &str) {
+    fn metadata_grid(&self, ui: &mut Ui, entry: &KeyEntry, style: RedisBrowserStyle) {
+        Frame::none()
+            .fill(style.toolbar_fill)
+            .stroke(Stroke::new(1.0, style.border))
+            .inner_margin(Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    metadata_chip(ui, style, "Type", &entry.info.type_name);
+                    let ttl = entry
+                        .info
+                        .ttl_seconds
+                        .map(format_ttl)
+                        .unwrap_or_else(|| "no expiry".to_string());
+                    metadata_chip(ui, style, "TTL", &ttl);
+                    let size = entry
+                        .size
+                        .map(|size| format_key_size(&entry.info.type_name, size))
+                        .unwrap_or_else(|| "calculating".to_string());
+                    metadata_chip(ui, style, "Size", &size);
+                });
+            });
+    }
+
+    fn render_value(&mut self, ui: &mut Ui, key_name: &str, style: RedisBrowserStyle) {
         let value_display = self.value_display.clone();
         match value_display {
             ValueDisplay::NotLoaded => {
@@ -816,13 +1148,14 @@ impl RedisBrowserUi {
             ValueDisplay::Loading => {
                 ui.horizontal(|ui| {
                     ui.add(Spinner::new());
-                    ui.label("Loading value...");
+                    ui.label(RichText::new("Loading value...").color(style.muted));
                 });
             }
             ValueDisplay::TooLarge {
                 preview,
                 total_size,
             } => {
+                self.value_filter_bar(ui, style, 1, "preview");
                 ScrollArea::vertical()
                     .id_source("value_preview_scroll")
                     .max_height(200.0)
@@ -849,292 +1182,500 @@ impl RedisBrowserUi {
                 });
             }
             ValueDisplay::Loaded(value) => {
-                self.render_full_value(ui, &value);
+                self.render_full_value(ui, &value, style);
             }
         }
     }
 
-    fn render_full_value(&mut self, ui: &mut Ui, value: &RedisValue) {
+    fn render_full_value(&mut self, ui: &mut Ui, value: &RedisValue, style: RedisBrowserStyle) {
         match value {
             RedisValue::String(bytes) => {
-                self.render_string_value(ui, bytes);
+                self.render_string_value(ui, style, bytes);
             }
             RedisValue::Hash(fields) => {
-                self.render_hash_value(ui, fields);
+                self.render_hash_value(ui, style, fields);
             }
             RedisValue::List(items) => {
-                self.render_list_value(ui, items);
+                self.render_list_value(ui, style, items);
             }
             RedisValue::Set(items) => {
-                self.render_set_value(ui, items);
+                self.render_set_value(ui, style, items);
             }
             RedisValue::SortedSet(members) => {
-                self.render_zset_value(ui, members);
+                self.render_zset_value(ui, style, members);
             }
             RedisValue::Stream(_) => {
-                ui.label("(stream type not fully supported)");
+                ui.label(RichText::new("(stream type not fully supported)").color(style.muted));
             }
             RedisValue::None => {
-                ui.label("(key does not exist)");
+                ui.label(RichText::new("(key does not exist)").color(style.muted));
             }
         }
     }
 
-    fn render_string_value(&self, ui: &mut Ui, bytes: &[u8]) {
+    fn render_string_value(&mut self, ui: &mut Ui, style: RedisBrowserStyle, bytes: &[u8]) {
         let text_preview = String::from_utf8_lossy(bytes);
 
-        ScrollArea::vertical()
-            .id_source("string_value_scroll")
-            .max_height(300.0)
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(text_preview)
-                        .family(eframe::egui::FontFamily::Monospace)
-                        .size(12.0),
-                );
-            });
+        self.value_filter_bar(ui, style, bytes.len(), "bytes");
+        style.inset_frame().show(ui, |ui| {
+            ScrollArea::vertical()
+                .id_source("string_value_scroll")
+                .auto_shrink([false, false])
+                .max_height(420.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(text_preview)
+                            .family(eframe::egui::FontFamily::Monospace)
+                            .size(12.0)
+                            .color(style.text),
+                    );
+                });
+        });
     }
 
-    fn render_hash_value(&mut self, ui: &mut Ui, fields: &[(String, CellValue)]) {
+    fn render_hash_value(
+        &mut self,
+        ui: &mut Ui,
+        style: RedisBrowserStyle,
+        fields: &[(String, CellValue)],
+    ) {
         let total_size = fields.len();
+        self.value_filter_bar(ui, style, total_size, "fields");
 
-        // Add new field section
-        ui.horizontal(|ui| {
-            ui.label("Add field:");
-            ui.add(
-                TextEdit::singleline(&mut self.hash_new_field)
-                    .desired_width(120.0)
-                    .hint_text("field"),
-            );
-            ui.add(
-                TextEdit::singleline(&mut self.hash_new_value)
-                    .desired_width(120.0)
-                    .hint_text("value"),
-            );
-            if ui.button("HSET").clicked() {
-                self.set_hash_field();
+        Frame::none()
+            .fill(style.toolbar_fill)
+            .stroke(Stroke::new(1.0, style.border))
+            .inner_margin(Margin::symmetric(8.0, 5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Insert Row").strong().color(style.text));
+                    ui.add(
+                        TextEdit::singleline(&mut self.hash_new_field)
+                            .desired_width(150.0)
+                            .hint_text("field"),
+                    );
+                    ui.add(
+                        TextEdit::singleline(&mut self.hash_new_value)
+                            .desired_width(220.0)
+                            .hint_text("value"),
+                    );
+                    if ui.button("HSET").clicked() {
+                        self.set_hash_field();
+                    }
+                });
+            });
+
+        ui.add_space(6.0);
+        let rows = self.filtered_hash_rows(fields);
+        Self::table_frame(ui, style, |ui| {
+            Grid::new("rdm_hash_value_grid")
+                .num_columns(4)
+                .spacing([18.0, 8.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    table_header(ui, style, "#");
+                    table_header(ui, style, "Field");
+                    table_header(ui, style, "Value");
+                    table_header(ui, style, "Actions");
+                    ui.end_row();
+
+                    for (row_index, field, value_text) in rows.iter().take(REDIS_VALUE_ROW_LIMIT) {
+                        ui.label(RichText::new((row_index + 1).to_string()).color(style.muted));
+                        ui.label(RichText::new(field).monospace().color(style.text));
+                        ui.label(RichText::new(value_text).monospace().color(style.text));
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Copy").clicked() {
+                                ui.output_mut(|output| output.copied_text = value_text.clone());
+                            }
+                            if ui.small_button("Edit").clicked() {
+                                self.hash_edit_field = Some((field.clone(), value_text.clone()));
+                            }
+                            if ui.small_button("Del").clicked() {
+                                self.confirm_delete_hash_field = Some(field.clone());
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+
+            if rows.len() > REDIS_VALUE_ROW_LIMIT {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!(
+                        "... and {} more fields",
+                        rows.len() - REDIS_VALUE_ROW_LIMIT
+                    ))
+                    .color(style.muted),
+                );
             }
         });
 
-        ui.separator();
-
-        Grid::new("hash_value_grid")
-            .num_columns(3)
-            .spacing([8.0, 4.0])
-            .striped(true)
-            .show(ui, |ui| {
-                for (i, (field, value)) in fields.iter().enumerate() {
-                    if i >= 50 {
-                        ui.label(format!("... and {} more fields", total_size - 50));
-                        break;
-                    }
-                    ui.label(
-                        RichText::new(field)
-                            .family(eframe::egui::FontFamily::Monospace)
-                            .small(),
-                    );
-                    let value_text = cell_value_to_string(value);
-                    ui.label(
-                        RichText::new(&value_text)
-                            .family(eframe::egui::FontFamily::Monospace)
-                            .small(),
-                    );
-                    // Edit/Delete buttons
-                    if ui.small_button("✎").clicked() {
-                        self.hash_edit_field = Some((field.clone(), value_text.clone()));
-                    }
-                    if ui.small_button("🗑").clicked() {
-                        self.confirm_delete_hash_field = Some(field.clone());
-                    }
-                }
-            });
-
-        // Inline hash field editing
         let editing = self.hash_edit_field.clone();
-        if let Some((field, val)) = &editing {
-            ui.separator();
-            ui.label(format!("Editing field: {}", field));
-            let edit_value = val.clone();
-            let mut edit_val = edit_value;
-            ui.add(TextEdit::singleline(&mut edit_val).desired_width(300.0));
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    self.update_hash_field_with_value(field.clone(), edit_val);
+        if let Some((field, current)) = editing {
+            ui.add_space(6.0);
+            let mut edit_val = current;
+            style.inset_frame().show(ui, |ui| {
+                ui.label(
+                    RichText::new(format!("Editing field: {}", field))
+                        .strong()
+                        .color(style.text),
+                );
+                let response = ui.add(
+                    TextEdit::singleline(&mut edit_val)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("value"),
+                );
+                if response.changed() {
+                    self.hash_edit_field = Some((field.clone(), edit_val.clone()));
                 }
-                if ui.button("Cancel").clicked() {
-                    self.hash_edit_field = None;
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.update_hash_field_with_value(field.clone(), edit_val.clone());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.hash_edit_field = None;
+                    }
+                });
             });
         }
     }
 
-    fn render_list_value(&mut self, ui: &mut Ui, items: &[CellValue]) {
-        let total = items.len();
+    fn render_list_value(&mut self, ui: &mut Ui, style: RedisBrowserStyle, items: &[CellValue]) {
+        self.value_filter_bar(ui, style, items.len(), "items");
 
-        // Push section
-        ui.horizontal(|ui| {
-            ComboBox::from_id_source("push_dir")
-                .selected_text(if self.list_push_direction == "left" {
-                    "LPUSH"
-                } else {
-                    "RPUSH"
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.list_push_direction, "left".to_string(), "LPUSH");
-                    ui.selectable_value(
-                        &mut self.list_push_direction,
-                        "right".to_string(),
-                        "RPUSH",
+        Frame::none()
+            .fill(style.toolbar_fill)
+            .stroke(Stroke::new(1.0, style.border))
+            .inner_margin(Margin::symmetric(8.0, 5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ComboBox::from_id_source("push_dir")
+                        .selected_text(if self.list_push_direction == "left" {
+                            "LPUSH"
+                        } else {
+                            "RPUSH"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.list_push_direction,
+                                "left".to_string(),
+                                "LPUSH",
+                            );
+                            ui.selectable_value(
+                                &mut self.list_push_direction,
+                                "right".to_string(),
+                                "RPUSH",
+                            );
+                        });
+                    ui.add(
+                        TextEdit::singleline(&mut self.list_push_value)
+                            .desired_width(240.0)
+                            .hint_text("value"),
                     );
-                });
-            ui.add(TextEdit::singleline(&mut self.list_push_value).desired_width(150.0));
-            if ui.button("Push").clicked() {
-                if self.list_push_direction == "left" {
-                    self.lpush_value();
-                } else {
-                    self.rpush_value();
-                }
-            }
-        });
-
-        // Pop section
-        ui.horizontal(|ui| {
-            ComboBox::from_id_source("pop_dir")
-                .selected_text(if self.list_pop_direction == "left" {
-                    "LPOP"
-                } else {
-                    "RPOP"
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.list_pop_direction, "left".to_string(), "LPOP");
-                    ui.selectable_value(&mut self.list_pop_direction, "right".to_string(), "RPOP");
-                });
-            if ui.button("Pop").clicked() {
-                if self.list_pop_direction == "left" {
-                    self.lpop_value();
-                } else {
-                    self.rpop_value();
-                }
-            }
-        });
-
-        ui.separator();
-
-        // List items
-        ScrollArea::vertical()
-            .id_source("list_items_scroll")
-            .max_height(300.0)
-            .show(ui, |ui| {
-                for (i, item) in items.iter().enumerate() {
-                    if i >= 50 {
-                        ui.label(format!("... and {} more items", total - 50));
-                        break;
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label(format!("[{}]", i));
-                        ui.label(cell_value_to_string(item));
-                        if ui.small_button("🗑").clicked() {
-                            self.confirm_delete_list_index = Some(i);
+                    if ui.button("Push").clicked() {
+                        if self.list_push_direction == "left" {
+                            self.lpush_value();
+                        } else {
+                            self.rpush_value();
                         }
-                    });
-                }
+                    }
+
+                    ui.separator();
+                    ComboBox::from_id_source("pop_dir")
+                        .selected_text(if self.list_pop_direction == "left" {
+                            "LPOP"
+                        } else {
+                            "RPOP"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.list_pop_direction,
+                                "left".to_string(),
+                                "LPOP",
+                            );
+                            ui.selectable_value(
+                                &mut self.list_pop_direction,
+                                "right".to_string(),
+                                "RPOP",
+                            );
+                        });
+                    if ui.button("Pop").clicked() {
+                        if self.list_pop_direction == "left" {
+                            self.lpop_value();
+                        } else {
+                            self.rpop_value();
+                        }
+                    }
+                });
             });
+
+        ui.add_space(6.0);
+        let rows = self.filtered_cell_rows(items);
+        Self::table_frame(ui, style, |ui| {
+            Grid::new("rdm_list_value_grid")
+                .num_columns(3)
+                .spacing([18.0, 8.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    table_header(ui, style, "#");
+                    table_header(ui, style, "Value");
+                    table_header(ui, style, "Actions");
+                    ui.end_row();
+
+                    for (index, value_text) in rows.iter().take(REDIS_VALUE_ROW_LIMIT) {
+                        ui.label(RichText::new(index.to_string()).color(style.muted));
+                        ui.label(RichText::new(value_text).monospace().color(style.text));
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Copy").clicked() {
+                                ui.output_mut(|output| output.copied_text = value_text.clone());
+                            }
+                            if ui.small_button("Del").clicked() {
+                                self.confirm_delete_list_index = Some(*index);
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
     }
 
-    fn render_set_value(&mut self, ui: &mut Ui, items: &[CellValue]) {
-        let total = items.len();
+    fn render_set_value(&mut self, ui: &mut Ui, style: RedisBrowserStyle, items: &[CellValue]) {
+        self.value_filter_bar(ui, style, items.len(), "members");
 
-        // Add member section
-        ui.horizontal(|ui| {
-            ui.label("SADD:");
-            ui.add(TextEdit::singleline(&mut self.set_new_member).desired_width(200.0));
-            if ui.button("Add").clicked() {
-                self.sadd_member();
-            }
-        });
-
-        ui.separator();
-
-        ScrollArea::vertical()
-            .id_source("set_members_scroll")
-            .max_height(300.0)
+        Frame::none()
+            .fill(style.toolbar_fill)
+            .stroke(Stroke::new(1.0, style.border))
+            .inner_margin(Margin::symmetric(8.0, 5.0))
             .show(ui, |ui| {
-                for (i, item) in items.iter().enumerate() {
-                    if i >= 50 {
-                        ui.label(format!("... and {} more members", total - 50));
-                        break;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("SADD").strong().color(style.text));
+                    ui.add(
+                        TextEdit::singleline(&mut self.set_new_member)
+                            .desired_width(260.0)
+                            .hint_text("member"),
+                    );
+                    if ui.button("Add").clicked() {
+                        self.sadd_member();
                     }
-                    ui.horizontal(|ui| {
-                        ui.label(format!("  {}", cell_value_to_string(item)));
-                        if ui.small_button("🗑").clicked() {
-                            self.confirm_delete_set_member = Some(cell_value_to_string(item));
-                        }
-                    });
-                }
+                });
             });
+
+        ui.add_space(6.0);
+        let rows = self.filtered_cell_rows(items);
+        Self::table_frame(ui, style, |ui| {
+            Grid::new("rdm_set_value_grid")
+                .num_columns(3)
+                .spacing([18.0, 8.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    table_header(ui, style, "#");
+                    table_header(ui, style, "Member");
+                    table_header(ui, style, "Actions");
+                    ui.end_row();
+
+                    for (index, value_text) in rows.iter().take(REDIS_VALUE_ROW_LIMIT) {
+                        ui.label(RichText::new((index + 1).to_string()).color(style.muted));
+                        ui.label(RichText::new(value_text).monospace().color(style.text));
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Copy").clicked() {
+                                ui.output_mut(|output| output.copied_text = value_text.clone());
+                            }
+                            if ui.small_button("Del").clicked() {
+                                self.confirm_delete_set_member = Some(value_text.clone());
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
     }
 
-    fn render_zset_value(&mut self, ui: &mut Ui, members: &[(CellValue, f64)]) {
-        let total = members.len();
+    fn render_zset_value(
+        &mut self,
+        ui: &mut Ui,
+        style: RedisBrowserStyle,
+        members: &[(CellValue, f64)],
+    ) {
+        self.value_filter_bar(ui, style, members.len(), "members");
 
-        // Add member section
-        ui.horizontal(|ui| {
-            ui.label("ZADD:");
-            ui.add(
-                TextEdit::singleline(&mut self.zset_new_member)
-                    .desired_width(120.0)
-                    .hint_text("member"),
-            );
-            ui.add(
-                TextEdit::singleline(&mut self.zset_new_score)
-                    .desired_width(80.0)
-                    .hint_text("score"),
-            );
-            if ui.button("Add").clicked() {
-                self.zadd_member();
-            }
-        });
-
-        ui.separator();
-
-        Grid::new("zset_value_grid")
-            .num_columns(3)
-            .spacing([8.0, 4.0])
-            .striped(true)
+        Frame::none()
+            .fill(style.toolbar_fill)
+            .stroke(Stroke::new(1.0, style.border))
+            .inner_margin(Margin::symmetric(8.0, 5.0))
             .show(ui, |ui| {
-                for (i, (member, score)) in members.iter().enumerate() {
-                    if i >= 50 {
-                        ui.label(format!("... and {} more members", total - 50));
-                        break;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("ZADD").strong().color(style.text));
+                    ui.add(
+                        TextEdit::singleline(&mut self.zset_new_member)
+                            .desired_width(180.0)
+                            .hint_text("member"),
+                    );
+                    ui.add(
+                        TextEdit::singleline(&mut self.zset_new_score)
+                            .desired_width(90.0)
+                            .hint_text("score"),
+                    );
+                    if ui.button("Add").clicked() {
+                        self.zadd_member();
                     }
-                    ui.label(format!("score: {:.1}", score));
-                    ui.label(cell_value_to_string(member));
-                    if ui.small_button("✎").clicked() {
-                        self.zset_edit_score =
-                            Some((cell_value_to_string(&member), score.to_string()));
-                    }
-                    if ui.small_button("🗑").clicked() {
-                        self.confirm_delete_zset_member = Some(cell_value_to_string(&member));
-                    }
-                }
+                });
             });
 
-        // ZSet score editing
+        ui.add_space(6.0);
+        let rows = self.filtered_zset_rows(members);
+        Self::table_frame(ui, style, |ui| {
+            Grid::new("rdm_zset_value_grid")
+                .num_columns(4)
+                .spacing([18.0, 8.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    table_header(ui, style, "#");
+                    table_header(ui, style, "Member");
+                    table_header(ui, style, "Score");
+                    table_header(ui, style, "Actions");
+                    ui.end_row();
+
+                    for (index, member, score) in rows.iter().take(REDIS_VALUE_ROW_LIMIT) {
+                        ui.label(RichText::new((index + 1).to_string()).color(style.muted));
+                        ui.label(RichText::new(member).monospace().color(style.text));
+                        ui.label(RichText::new(score.to_string()).color(style.text));
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Copy").clicked() {
+                                ui.output_mut(|output| output.copied_text = member.clone());
+                            }
+                            if ui.small_button("Edit").clicked() {
+                                self.zset_edit_score = Some((member.clone(), score.to_string()));
+                            }
+                            if ui.small_button("Del").clicked() {
+                                self.confirm_delete_zset_member = Some(member.clone());
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
+
         let zset_edit = self.zset_edit_score.clone();
-        if let Some((member, mut score_str)) = zset_edit {
-            ui.separator();
-            ui.label(format!("Editing score for: {}", member));
-            ui.horizontal(|ui| {
-                ui.add(TextEdit::singleline(&mut score_str).desired_width(100.0));
-                if ui.button("Update Score").clicked() {
+        if let Some((member, current_score)) = zset_edit {
+            ui.add_space(6.0);
+            let mut score_str = current_score;
+            style.inset_frame().show(ui, |ui| {
+                ui.label(
+                    RichText::new(format!("Editing score for: {}", member))
+                        .strong()
+                        .color(style.text),
+                );
+                let response = ui.add(TextEdit::singleline(&mut score_str).desired_width(140.0));
+                if response.changed() {
                     self.zset_edit_score = Some((member.clone(), score_str.clone()));
-                    self.update_zset_score(member.clone());
                 }
-                if ui.button("Cancel").clicked() {
-                    self.zset_edit_score = None;
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Update Score").clicked() {
+                        self.zset_edit_score = Some((member.clone(), score_str.clone()));
+                        self.update_zset_score(member.clone());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.zset_edit_score = None;
+                    }
+                });
             });
         }
+    }
+
+    fn value_filter_bar(
+        &mut self,
+        ui: &mut Ui,
+        style: RedisBrowserStyle,
+        total: usize,
+        noun: &str,
+    ) {
+        Frame::none()
+            .fill(style.toolbar_fill)
+            .stroke(Stroke::new(1.0, style.border))
+            .inner_margin(Margin::symmetric(8.0, 5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        TextEdit::singleline(&mut self.value_filter)
+                            .desired_width(220.0)
+                            .hint_text("Filter value"),
+                    );
+                    ui.label(RichText::new("Full match").small().color(style.muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{total} {noun}"))
+                                .small()
+                                .color(style.muted),
+                        );
+                    });
+                });
+            });
+        ui.add_space(6.0);
+    }
+
+    fn table_frame(ui: &mut Ui, style: RedisBrowserStyle, add_contents: impl FnOnce(&mut Ui)) {
+        style.panel_frame().show(ui, |ui| {
+            ScrollArea::vertical()
+                .id_source("redis_value_table_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    add_contents(ui);
+                });
+        });
+    }
+
+    fn filtered_hash_rows(&self, fields: &[(String, CellValue)]) -> Vec<(usize, String, String)> {
+        let filter = self.value_filter.trim().to_lowercase();
+        fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (field, value))| {
+                let value_text = cell_value_to_string(value);
+                if filter.is_empty()
+                    || field.to_lowercase().contains(&filter)
+                    || value_text.to_lowercase().contains(&filter)
+                {
+                    Some((index, field.clone(), value_text))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn filtered_cell_rows(&self, items: &[CellValue]) -> Vec<(usize, String)> {
+        let filter = self.value_filter.trim().to_lowercase();
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let value_text = cell_value_to_string(value);
+                if filter.is_empty() || value_text.to_lowercase().contains(&filter) {
+                    Some((index, value_text))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn filtered_zset_rows(&self, members: &[(CellValue, f64)]) -> Vec<(usize, String, f64)> {
+        let filter = self.value_filter.trim().to_lowercase();
+        members
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (member, score))| {
+                let member_text = cell_value_to_string(member);
+                if filter.is_empty()
+                    || member_text.to_lowercase().contains(&filter)
+                    || score.to_string().contains(&filter)
+                {
+                    Some((index, member_text, *score))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn delete_confirmation_window(&mut self, ctx: &Context) {
@@ -1208,6 +1749,9 @@ impl RedisBrowserUi {
     fn drain_responses(&mut self) {
         while let Ok(response) = self.response_rx.try_recv() {
             match response {
+                BrowserResponse::ConnectionLoaded(profile) => {
+                    self.profile = Some(profile);
+                }
                 BrowserResponse::DatabasesLoaded(result) => {
                     self.is_loading = false;
                     match result {
@@ -1379,6 +1923,10 @@ impl RedisBrowserUi {
     fn select_key(&mut self, key_name: String) {
         self.selected_key = Some(key_name.clone());
         self.value_display = ValueDisplay::NotLoaded;
+        self.value_filter.clear();
+        self.string_editing = false;
+        self.hash_edit_field = None;
+        self.zset_edit_score = None;
 
         // Load key metadata (size) if not already loaded
         if let Some(entry) = self.keys.iter_mut().find(|k| k.info.name == key_name) {
@@ -1430,6 +1978,7 @@ impl RedisBrowserUi {
         self.has_more = false;
         self.selected_key = None;
         self.value_display = ValueDisplay::NotLoaded;
+        self.value_filter.clear();
         self.scan_keys();
     }
 
@@ -1440,6 +1989,7 @@ impl RedisBrowserUi {
         self.has_more = false;
         self.selected_key = None;
         self.value_display = ValueDisplay::NotLoaded;
+        self.value_filter.clear();
         self.scan_keys();
     }
 
@@ -2376,12 +2926,124 @@ impl RedisBrowserUi {
         self.has_more = false;
         self.selected_key = None;
         self.value_display = ValueDisplay::NotLoaded;
+        self.value_filter.clear();
         self.error = None;
         self.scan_keys();
     }
 }
 
 // Helper functions
+
+fn metadata_chip(ui: &mut Ui, style: RedisBrowserStyle, label: &str, value: &str) {
+    Frame::none()
+        .fill(style.panel_fill)
+        .stroke(Stroke::new(1.0, style.border))
+        .rounding(Rounding::same(3.0))
+        .inner_margin(Margin::symmetric(8.0, 3.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).small().color(style.muted));
+                ui.label(RichText::new(value).small().strong().color(style.text));
+            });
+        });
+}
+
+fn table_header(ui: &mut Ui, style: RedisBrowserStyle, label: &str) {
+    ui.label(RichText::new(label).strong().color(style.muted));
+}
+
+fn key_type_badge_fill(type_name: &str, style: RedisBrowserStyle) -> Color32 {
+    match type_name {
+        "string" => Color32::from_rgb(61, 145, 94),
+        "hash" => style.accent,
+        "list" => Color32::from_rgb(101, 118, 203),
+        "set" => Color32::from_rgb(203, 128, 61),
+        "zset" => Color32::from_rgb(169, 91, 183),
+        "stream" => Color32::from_rgb(77, 151, 160),
+        _ => Color32::from_rgb(118, 128, 142),
+    }
+}
+
+fn key_type_short_label(type_name: &str) -> &'static str {
+    match type_name {
+        "hash" => "H",
+        "list" => "L",
+        "set" => "S",
+        "zset" => "Z",
+        "stream" => "R",
+        "string" => "T",
+        _ => "K",
+    }
+}
+
+fn redis_type_badge_label(type_name: &str) -> &'static str {
+    match type_name {
+        "hash" => "HASH",
+        "list" => "LIST",
+        "set" => "SET",
+        "zset" => "ZSET",
+        "stream" => "STREAM",
+        "string" => "STRING",
+        _ => "KEY",
+    }
+}
+
+fn redis_type_group_label(type_name: &str) -> &'static str {
+    match type_name {
+        "hash" => "hash",
+        "list" => "list",
+        "set" => "set",
+        "zset" => "zset",
+        "stream" => "stream",
+        "string" => "string",
+        _ => "key",
+    }
+}
+
+fn redis_type_rank(type_name: &str) -> u8 {
+    match type_name {
+        "hash" => 0,
+        "string" => 1,
+        "list" => 2,
+        "set" => 3,
+        "zset" => 4,
+        "stream" => 5,
+        _ => 9,
+    }
+}
+
+fn key_leaf_label(key_name: &str) -> String {
+    key_name
+        .rsplit(|ch| matches!(ch, ':' | '/' | '.'))
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(key_name)
+        .to_string()
+}
+
+fn key_parent_label(key_name: &str) -> Option<String> {
+    let leaf = key_leaf_label(key_name);
+    let prefix_len = key_name.len().saturating_sub(leaf.len());
+    if prefix_len == 0 {
+        None
+    } else {
+        Some(format!(
+            "({})",
+            key_name[..prefix_len].trim_end_matches(|ch| matches!(ch, ':' | '/' | '.'))
+        ))
+    }
+}
+
+fn key_row_meta(key_type: &str, ttl_seconds: Option<i64>, size: Option<u64>) -> String {
+    let mut parts = Vec::new();
+    if let Some(ttl) = ttl_seconds {
+        parts.push(format_ttl(ttl));
+    }
+    if let Some(size) = size {
+        parts.push(format_key_size(key_type, size));
+    }
+    parts.join("  ")
+}
 
 fn key_type_color(type_name: &str) -> Color32 {
     match type_name {
