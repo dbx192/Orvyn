@@ -126,7 +126,15 @@ impl SessionManager {
         session.mark_reconnecting();
         self.update_session(session.clone()).await;
 
-        let delay = (session.reconnect_delay * session.reconnect_attempts as u32)
+        // Exponential backoff: base * 2^(attempts-1), capped at MAX_RECONNECT_DELAY.
+        // This grows faster than the previous linear scheme, so transient outages
+        // are retried quickly while sustained outages don't hammer the server.
+        let exponent = session.reconnect_attempts.saturating_sub(1);
+        let multiplier = 1u32.checked_shl(exponent).unwrap_or(u32::MAX);
+        let delay = session
+            .reconnect_delay
+            .checked_mul(multiplier)
+            .unwrap_or(MAX_RECONNECT_DELAY)
             .min(MAX_RECONNECT_DELAY);
         debug!(connection_id = %id, delay_ms = %delay.as_millis(), "waiting before reconnect");
         tokio::time::sleep(delay).await;

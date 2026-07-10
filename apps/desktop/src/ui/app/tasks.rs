@@ -4,14 +4,15 @@ use super::{
         qualified_table_label, qualified_table_sql,
     },
     payloads::{
-        DatabaseExportPayload, DropTablePayload, DropTableRequest, IndexCreatePayload, PendingTask,
-        TableDataPayload, TableExportPayload, TableExportRequest, TableStructurePayload,
+        AlterTablePayload, DatabaseExportPayload, DropTablePayload, DropTableRequest,
+        IndexCreatePayload, PendingTask, TableDataPayload, TableExportPayload, TableExportRequest,
+        TableStructurePayload,
     },
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
     table_editor::TableEditor,
-    table_structure::{CreateIndexRequest, TableStructureView},
+    table_structure::{build_alter_table_sql, AlterTableRequest, CreateIndexRequest, TableStructureView},
 };
 use db_common::{
     dialect::{BacktickDialect, DoubleQuoteDialect},
@@ -41,6 +42,7 @@ impl DesktopApp {
                             self.object_tree.mark_connected(conn_id);
                             self.table_structure = Some(TableStructureView::from_columns(
                                 conn_id,
+                                payload.kind,
                                 payload.database.clone(),
                                 payload.schema.clone(),
                                 payload.table.clone(),
@@ -87,6 +89,7 @@ impl DesktopApp {
                             self.object_tree.mark_connected(payload.connection_id);
                             let view = TableStructureView::new(
                                 payload.connection_id,
+                                payload.kind,
                                 payload.database,
                                 payload.schema,
                                 payload.table,
@@ -250,6 +253,36 @@ impl DesktopApp {
                 self.pending_table_drop = Some(cell);
             }
         }
+
+        let alter_cell = self.pending_alter_table.take();
+        if let Some(cell) = alter_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            self.state
+                                .set_status(format!("Structure updated: {}", payload.label));
+                            self.spawn_structure_load(
+                                payload.connection_id,
+                                payload.database,
+                                payload.schema,
+                                payload.table,
+                            );
+                            self.active_panel = ActivePanel::TableStructure;
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Alter table failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_alter_table = Some(cell);
+            }
+        }
     }
 
     /// Spawn an async task to load table data (columns + paginated SELECT).
@@ -273,14 +306,17 @@ impl DesktopApp {
         let tbl = table.clone();
 
         runtime.spawn(async move {
-            let dialect: Box<dyn Dialect> =
-                match connection_manager.get_profile(connection_id).await {
-                    Ok(Some(profile)) => match profile.kind {
-                        DataSourceKind::MySql => Box::new(BacktickDialect),
-                        _ => Box::new(DoubleQuoteDialect),
-                    },
-                    _ => Box::new(DoubleQuoteDialect),
-                };
+            let kind = connection_manager
+                .get_profile(connection_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|profile| profile.kind)
+                .unwrap_or(DataSourceKind::PostgreSql);
+            let dialect: Box<dyn Dialect> = match kind {
+                DataSourceKind::MySql => Box::new(BacktickDialect),
+                _ => Box::new(DoubleQuoteDialect),
+            };
 
             let qualified = match &sch {
                 Some(s) if !s.is_empty() => {
@@ -337,6 +373,7 @@ impl DesktopApp {
                         });
                     Ok(TableDataPayload {
                         connection_id,
+                        kind,
                         database: db,
                         schema: sch,
                         table: tbl,
@@ -362,6 +399,7 @@ impl DesktopApp {
         table: String,
     ) {
         let metadata_service = self.metadata_service.clone();
+        let connection_manager = self.connection_manager.clone();
         let runtime = self.runtime.clone();
 
         let cell: PendingTask<TableStructurePayload> = Arc::new(Mutex::new(None));
@@ -374,6 +412,14 @@ impl DesktopApp {
         runtime.spawn(async move {
             let db_ref = db.as_deref();
             let sch_ref = sch.as_deref();
+
+            let kind = connection_manager
+                .get_profile(connection_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|profile| profile.kind)
+                .unwrap_or(DataSourceKind::PostgreSql);
 
             let (
                 columns_result,
@@ -408,6 +454,7 @@ impl DesktopApp {
                     Ok(create_sql),
                 ) => Ok(TableStructurePayload {
                     connection_id,
+                    kind,
                     database: db,
                     schema: sch,
                     table: tbl,
@@ -656,5 +703,76 @@ impl DesktopApp {
         });
 
         self.state.set_status("Dropping table...");
+    }
+
+    /// Spawn an async task to execute an ALTER TABLE request.
+    pub(super) fn spawn_alter_table(&mut self, request: AlterTableRequest) {
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: PendingTask<AlterTablePayload> = Arc::new(Mutex::new(None));
+        self.pending_alter_table = Some(cell.clone());
+
+        let connection_id = request.connection_id();
+        let database = request.database().map(|s| s.to_string());
+        let schema = request.schema().map(|s| s.to_string());
+        let table = request.table().to_string();
+        let label = match &request {
+            AlterTableRequest::AddColumn { column_name, .. } => {
+                format!("add column {column_name} on {table}")
+            }
+            AlterTableRequest::DropColumn { column_name, .. } => {
+                format!("drop column {column_name} on {table}")
+            }
+            AlterTableRequest::ModifyColumn { column_name, .. } => {
+                format!("modify column {column_name} on {table}")
+            }
+            AlterTableRequest::DropIndex { index_name, .. } => {
+                format!("drop index {index_name} on {table}")
+            }
+            AlterTableRequest::AddForeignKey { constraint_name, .. } => {
+                format!("add foreign key {constraint_name} on {table}")
+            }
+        };
+
+        runtime.spawn(async move {
+            let result = async {
+                let profile = connection_manager
+                    .get_profile(connection_id)
+                    .await?
+                    .ok_or_else(|| AppError::validation("connection profile not found"))?;
+                let sql = build_alter_table_sql(&request, profile.kind)?;
+                query_service
+                    .execute(
+                        QueryExecutionRequest {
+                            tab_id: QueryId::new(),
+                            connection_id,
+                            database: database.clone(),
+                            schema: schema.clone(),
+                            sql,
+                            mode: QueryExecutionMode::All,
+                            cursor_offset: 0,
+                            selection: None,
+                            timeout_ms: 60_000,
+                            result_limit: None,
+                            result_offset: 0,
+                            result_total_rows: None,
+                        },
+                        None,
+                    )
+                    .await?;
+                Ok(AlterTablePayload {
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                    label,
+                })
+            }
+            .await;
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status("Altering table...");
     }
 }

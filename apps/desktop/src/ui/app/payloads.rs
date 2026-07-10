@@ -14,6 +14,7 @@ pub(super) type PendingTask<T> = Arc<Mutex<Option<Result<T, AppError>>>>;
 /// Payload produced by the table-data async loader.
 pub(super) struct TableDataPayload {
     pub(super) connection_id: ConnectionId,
+    pub(super) kind: DataSourceKind,
     pub(super) database: Option<String>,
     pub(super) schema: Option<String>,
     pub(super) table: String,
@@ -25,6 +26,7 @@ pub(super) struct TableDataPayload {
 /// Payload produced by the table-structure async loader.
 pub(super) struct TableStructurePayload {
     pub(super) connection_id: ConnectionId,
+    pub(super) kind: DataSourceKind,
     pub(super) database: Option<String>,
     pub(super) schema: Option<String>,
     pub(super) table: String,
@@ -83,4 +85,13 @@ pub(super) struct DropTablePayload {
     pub(super) database: Option<String>,
     pub(super) schema: Option<String>,
     pub(super) table: String,
+}
+
+/// Payload produced by the alter-table async executor.
+pub(super) struct AlterTablePayload {
+    pub(super) connection_id: ConnectionId,
+    pub(super) database: Option<String>,
+    pub(super) schema: Option<String>,
+    pub(super) table: String,
+    pub(super) label: String,
 }

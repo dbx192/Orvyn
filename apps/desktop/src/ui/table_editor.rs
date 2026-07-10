@@ -2463,7 +2463,10 @@ fn estimate_column_widths(columns: &[TableColumn], result: &QueryResult) -> Vec<
                 .max(estimate_text_width(database_type))
                 .max(MIN_COLUMN_WIDTH);
 
-            for row in result.rows.iter().take(200) {
+            // Stride-sample rows so large result sets don't scan every row.
+            const SAMPLE_LIMIT: usize = 40;
+            let stride = (result.rows.len() / SAMPLE_LIMIT).max(1);
+            for row in result.rows.iter().step_by(stride).take(SAMPLE_LIMIT) {
                 if let Some(value) = row.values.get(column_index) {
                     estimated = estimated.max(estimate_text_width(&display_cell_value(value)));
                 }

@@ -1186,6 +1186,96 @@ impl QueryEditor {
         self.execute_active(QueryExecutionMode::All);
     }
 
+    /// Apply a deferred SQL highlight if its debounce window has elapsed.
+    fn refresh_deferred_highlight(&mut self, tab_id: QueryId) {
+        let due = self
+            .tabs
+            .get(&tab_id)
+            .and_then(|tab| tab.highlight_due_at)
+            .is_some_and(|deadline| Instant::now() >= deadline);
+        if !due {
+            return;
+        }
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.highlight_due_at = None;
+            tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+        }
+    }
+
+    fn begin_transaction(&mut self) {
+        let Some(tab_id) = self.active_tab else { return };
+        let Some(tab) = self.tabs.get(&tab_id) else { return };
+        if tab.transaction_active || tab.transaction_busy {
+            return;
+        }
+        let connection_id = tab.connection_id;
+        let database = tab.database.clone();
+        let schema = tab.schema.clone();
+        let service = self.query_service.clone();
+        let tx = self.tx.clone();
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.transaction_busy = true;
+            tab.transaction_error = None;
+        }
+        self.runtime.spawn(async move {
+            let result = service
+                .begin_transaction(tab_id, connection_id, database, schema, None)
+                .await;
+            let _ = tx.send(QueryEditorEvent::TransactionCompleted(
+                tab_id,
+                TransactionAction::Begin,
+                result,
+            ));
+        });
+        self.status = "Starting transaction...".to_string();
+    }
+
+    fn commit_transaction(&mut self) {
+        let Some(tab_id) = self.active_tab else { return };
+        let Some(tab) = self.tabs.get(&tab_id) else { return };
+        if !tab.transaction_active || tab.transaction_busy {
+            return;
+        }
+        let service = self.query_service.clone();
+        let tx = self.tx.clone();
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.transaction_busy = true;
+            tab.transaction_error = None;
+        }
+        self.runtime.spawn(async move {
+            let result = service.commit_transaction(tab_id).await;
+            let _ = tx.send(QueryEditorEvent::TransactionCompleted(
+                tab_id,
+                TransactionAction::Commit,
+                result,
+            ));
+        });
+        self.status = "Committing transaction...".to_string();
+    }
+
+    fn rollback_transaction(&mut self) {
+        let Some(tab_id) = self.active_tab else { return };
+        let Some(tab) = self.tabs.get(&tab_id) else { return };
+        if !tab.transaction_active || tab.transaction_busy {
+            return;
+        }
+        let service = self.query_service.clone();
+        let tx = self.tx.clone();
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.transaction_busy = true;
+            tab.transaction_error = None;
+        }
+        self.runtime.spawn(async move {
+            let result = service.rollback_transaction(tab_id).await;
+            let _ = tx.send(QueryEditorEvent::TransactionCompleted(
+                tab_id,
+                TransactionAction::Rollback,
+                result,
+            ));
+        });
+        self.status = "Rolling back transaction...".to_string();
+    }
+
     fn set_active_connection(&mut self, connection_id: ConnectionId) {
         let Some(tab_id) = self.active_tab else {
             return;
@@ -2098,4 +2188,261 @@ fn upsert_favorite(favorites: &mut Vec<FavoriteQuery>, favorite: FavoriteQuery) 
         favorites.push(favorite);
         favorites.sort_by_key(|favorite| std::cmp::Reverse(favorite.updated_at));
     }
+}
+
+/// Convert a character index (used by egui's `ccursor`) into a byte offset
+/// (used by our SQL helpers). Safe against non-ASCII text.
+fn char_index_to_byte_offset(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(byte_offset, _)| byte_offset)
+        .unwrap_or_else(|| text.len())
+}
+
+/// Normalise an identifier for comparison so that case differences between
+/// the user's SQL and the metadata catalog don't prevent matching. Lowercases
+/// the string and strips surrounding quotes/backticks.
+fn normalize_identifier(value: &str) -> String {
+    let trimmed = value.trim();
+    let unquoted = trimmed
+        .trim_start_matches(['"', '`', '['])
+        .trim_end_matches(['"', '`', ']']);
+    unquoted.to_ascii_lowercase()
+}
+
+/// Schedule a debounced SQL highlight pass. Large SQL documents are expensive
+/// to re-tokenise, so we coalesce rapid edits and skip highlighting entirely
+/// past the large-SQL threshold until the editor settles.
+fn schedule_sql_highlight(tab: &mut QueryEditorTab) {
+    if tab.sql.len() > LARGE_SQL_HIGHLIGHT_THRESHOLD {
+        tab.highlighted_sql.clear();
+        tab.highlight_due_at = None;
+        return;
+    }
+    tab.highlight_due_at = Some(Instant::now() + SQL_HIGHLIGHT_DEBOUNCE);
+}
+
+/// A short list of SQL keywords offered when no table/column context is
+/// available. Kept lowercase to match the user's typing style.
+const SQL_KEYWORD_SUGGESTIONS: &[&str] = &[
+    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+    "CREATE", "TABLE", "ALTER", "DROP", "INDEX", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
+    "ON", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION", "AS", "AND", "OR",
+    "NOT", "NULL", "IS", "IN", "BETWEEN", "LIKE", "DISTINCT", "CASE", "WHEN", "THEN", "ELSE",
+    "END", "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "PRIMARY", "KEY", "FOREIGN",
+    "REFERENCES", "DEFAULT", "CASCADE", "EXISTS", "EXPLAIN", "ANALYZE", "WITH", "RETURNING",
+    "TRUNCATE", "GRANT", "REVOKE", "VIEW", "SCHEMA", "DATABASE", "IF", "EXISTS",
+];
+
+/// Determine what the user is currently typing and refresh the completion list.
+///
+/// The heuristic walks backwards from the cursor and collects the partial
+/// identifier being typed. If the partial identifier follows a dot we try to
+/// resolve it as a column of that table; otherwise we offer tables and
+/// keywords. Column lookups trigger lazy metadata loads via
+/// `missing_completion_columns`.
+fn update_completion_for_tab(tab: &mut QueryEditorTab) {
+    if tab.sql.is_empty() {
+        tab.completion = CompletionState::default();
+        return;
+    }
+
+    let cursor = tab.cursor_offset.min(tab.sql.len());
+    let before = &tab.sql[..cursor];
+    let word_start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| is_completion_char(*ch))
+        .last()
+        .map(|(idx, _)| idx)
+        .unwrap_or(cursor);
+
+    let prefix = &before[word_start..];
+    if prefix.is_empty() {
+        tab.completion.visible = false;
+        return;
+    }
+
+    // If we are right after a dot, offer columns of the preceding identifier.
+    let dot_context = before[..word_start].ends_with('.').then(|| {
+        // Walk back to the identifier before the dot.
+        let before_dot = &before[..word_start - 1];
+        let id_start = before_dot
+            .char_indices()
+            .rev()
+            .take_while(|(_, ch)| is_completion_char(*ch))
+            .last()
+            .map(|(idx, _)| idx)
+            .unwrap_or(before_dot.len());
+        before_dot[id_start..].to_string()
+    });
+
+    let mut items = Vec::new();
+    let replacement = TextRange::new(word_start, cursor);
+
+    if let Some(table_token) = dot_context {
+        let key = normalize_identifier(&table_token);
+        if let Some(columns) = tab.columns_by_table.get(&key) {
+            for column in columns {
+                if matches_prefix(&column.name, prefix) {
+                    items.push(CompletionItem {
+                        label: column.name.clone(),
+                        insert_text: column.name.clone(),
+                        kind: CompletionKind::Column,
+                        detail: column.database_type.clone(),
+                    });
+                }
+            }
+        }
+    } else {
+        for table in &tab.available_tables {
+            if matches_prefix(table, prefix) {
+                items.push(CompletionItem {
+                    label: table.clone(),
+                    insert_text: table.clone(),
+                    kind: CompletionKind::Table,
+                    detail: String::new(),
+                });
+            }
+        }
+        for keyword in SQL_KEYWORD_SUGGESTIONS {
+            if matches_prefix(keyword, prefix) {
+                items.push(CompletionItem {
+                    label: keyword.to_string(),
+                    insert_text: keyword.to_string(),
+                    kind: CompletionKind::Keyword,
+                    detail: String::new(),
+                });
+            }
+        }
+    }
+
+    if items.is_empty() {
+        tab.completion.visible = false;
+        return;
+    }
+
+    items.truncate(MAX_COMPLETION_ITEMS);
+
+    // Keep the current selection if still valid, otherwise reset.
+    if tab.completion.selected >= items.len() {
+        tab.completion.selected = 0;
+    }
+    tab.completion.items = items;
+    tab.completion.replacement = Some(replacement);
+    tab.completion.visible = true;
+    tab.completion.waiting_for_metadata = false;
+}
+
+/// Return tables referenced by the current completion that have no loaded
+/// columns yet. The caller spawns metadata loads for each.
+fn missing_completion_columns(tab: &QueryEditorTab) -> Vec<String> {
+    if !tab.completion.visible {
+        return Vec::new();
+    }
+    // If the user just typed a table name with a trailing dot, try to load its
+    // columns so the next keystroke offers column completions.
+    let cursor = tab.cursor_offset.min(tab.sql.len());
+    let before = &tab.sql[..cursor];
+    let word_start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| is_completion_char(*ch))
+        .last()
+        .map(|(idx, _)| idx)
+        .unwrap_or(cursor);
+    let prefix = &before[word_start..];
+
+    let mut needed = Vec::new();
+    if prefix.is_empty() {
+        return needed;
+    }
+
+    // Detect "table." pattern and queue a column load.
+    let before_word = &before[..word_start];
+    if let Some(stripped) = before_word.strip_suffix('.') {
+        let id_end = stripped.len();
+        let id_start = stripped
+            .char_indices()
+            .rev()
+            .take_while(|(_, ch)| is_completion_char(*ch))
+            .last()
+            .map(|(idx, _)| idx)
+            .unwrap_or(id_end);
+        let table_token = &stripped[id_start..];
+        if !table_token.is_empty() {
+            let key = normalize_identifier(table_token);
+            if !tab.columns_by_table.contains_key(&key)
+                && !tab.pending_column_loads.contains(&key)
+                && tab
+                    .available_tables
+                    .iter()
+                    .any(|name| normalize_identifier(name) == key)
+            {
+                needed.push(table_token.to_string());
+            }
+        }
+    }
+
+    needed
+}
+
+fn is_completion_char(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_alphanumeric()
+}
+
+fn matches_prefix(candidate: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    candidate
+        .to_ascii_lowercase()
+        .starts_with(&prefix.to_ascii_lowercase())
+}
+
+/// Render the completion popup and return the SQL with the selected item
+/// inserted if the user accepted a suggestion.
+fn completion_panel(ui: &Ui, tab: &mut QueryEditorTab) -> Option<String> {
+    if !tab.completion.visible || tab.completion.items.is_empty() {
+        return None;
+    }
+
+    let input = ui.input(|input| {
+        (
+            input.key_pressed(Key::ArrowDown),
+            input.key_pressed(Key::ArrowUp),
+            input.key_pressed(Key::Enter),
+            input.key_pressed(Key::Tab),
+            input.key_pressed(Key::Escape),
+        )
+    });
+    let (down, up, enter, tab_key, escape) = input;
+
+    if escape {
+        tab.completion.visible = false;
+        return None;
+    }
+
+    let count = tab.completion.items.len();
+    if down {
+        tab.completion.selected = (tab.completion.selected + 1) % count;
+    }
+    if up {
+        tab.completion.selected = (tab.completion.selected + count - 1) % count;
+    }
+
+    let accept = enter || tab_key;
+    if !accept {
+        return None;
+    }
+
+    let replacement = tab.completion.replacement?;
+    let selected = tab.completion.selected.min(tab.completion.items.len() - 1);
+    let item = tab.completion.items.get(selected)?.clone();
+    let mut sql = tab.sql.clone();
+    let start = replacement.start.min(sql.len());
+    let end = replacement.end.min(sql.len());
+    sql.replace_range(start..end, &item.insert_text);
+    tab.completion.visible = false;
+    Some(sql)
 }
