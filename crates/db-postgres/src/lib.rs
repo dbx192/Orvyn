@@ -1,6 +1,7 @@
 //! PostgreSQL adapter crate.
 
 use async_trait::async_trait;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
@@ -8,9 +9,12 @@ use db_common::{
     RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey,
     TableIndex, TableTrigger,
 };
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, error::Error, fmt::Write, sync::Arc, time::Instant};
 use tokio::sync::{Mutex, Semaphore};
-use tokio_postgres::{types::Type, Client, Config, NoTls, Row as PgRow};
+use tokio_postgres::{
+    types::{FromSql, Type},
+    Client, Config, NoTls, Row as PgRow,
+};
 
 pub const ADAPTER_NAME: &str = "postgresql";
 
@@ -939,6 +943,44 @@ fn postgres_rows_to_query_result(statement: &str, rows: Vec<PgRow>) -> QueryResu
 }
 
 fn postgres_cell_value(row: &PgRow, index: usize) -> CellValue {
+    let value_type = row.columns().get(index).map(|column| column.type_());
+
+    match value_type {
+        Some(&Type::DATE) => {
+            if let Ok(value) = row.try_get::<_, Option<NaiveDate>>(index) {
+                return value.map(CellValue::Date).unwrap_or(CellValue::Null);
+            }
+        }
+        Some(&Type::TIME) => {
+            if let Ok(value) = row.try_get::<_, Option<NaiveTime>>(index) {
+                return value.map(CellValue::Time).unwrap_or(CellValue::Null);
+            }
+        }
+        Some(&Type::TIMESTAMP) => {
+            if let Ok(value) = row.try_get::<_, Option<NaiveDateTime>>(index) {
+                return value.map(CellValue::DateTime).unwrap_or(CellValue::Null);
+            }
+        }
+        Some(&Type::TIMESTAMPTZ) => {
+            if let Ok(value) = row.try_get::<_, Option<DateTime<Utc>>>(index) {
+                return value.map(CellValue::Timestamp).unwrap_or(CellValue::Null);
+            }
+        }
+        Some(&Type::NUMERIC) => {
+            if let Ok(value) = row.try_get::<_, Option<PgNumericString>>(index) {
+                return value
+                    .map(|value| CellValue::Decimal(value.0))
+                    .unwrap_or(CellValue::Null);
+            }
+        }
+        Some(&Type::JSON) | Some(&Type::JSONB) => {
+            if let Ok(value) = row.try_get::<_, Option<serde_json::Value>>(index) {
+                return value.map(CellValue::Json).unwrap_or(CellValue::Null);
+            }
+        }
+        _ => {}
+    }
+
     if let Ok(value) = row.try_get::<_, Option<String>>(index) {
         return value.map(CellValue::Text).unwrap_or(CellValue::Null);
     }
@@ -952,6 +994,11 @@ fn postgres_cell_value(row: &PgRow, index: usize) -> CellValue {
     }
     if let Ok(value) = row.try_get::<_, Option<f64>>(index) {
         return value.map(CellValue::Float).unwrap_or(CellValue::Null);
+    }
+    if let Ok(value) = row.try_get::<_, Option<f32>>(index) {
+        return value
+            .map(|value| CellValue::Float(f64::from(value)))
+            .unwrap_or(CellValue::Null);
     }
     if let Ok(value) = row.try_get::<_, Option<bool>>(index) {
         return value.map(CellValue::Bool).unwrap_or(CellValue::Null);
@@ -975,5 +1022,164 @@ fn postgres_logical_type(value_type: &Type) -> LogicalType {
         Type::JSON | Type::JSONB => LogicalType::Json,
         Type::BYTEA => LogicalType::Bytes,
         _ => LogicalType::Text,
+    }
+}
+
+#[derive(Debug)]
+struct PgNumericString(String);
+
+impl<'a> FromSql<'a> for PgNumericString {
+    fn from_sql(
+        _ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn Error + Sync + Send>> {
+        decode_postgres_numeric(raw).map(Self)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::NUMERIC
+    }
+}
+
+fn decode_postgres_numeric(
+    raw: &[u8],
+) -> std::result::Result<String, Box<dyn Error + Sync + Send>> {
+    let mut offset = 0;
+    let ndigits = read_pg_u16(raw, &mut offset)? as usize;
+    let weight = read_pg_i16(raw, &mut offset)?;
+    let sign = read_pg_u16(raw, &mut offset)?;
+    let dscale = read_pg_u16(raw, &mut offset)? as usize;
+
+    let mut digits = Vec::with_capacity(ndigits);
+    for _ in 0..ndigits {
+        let digit = read_pg_u16(raw, &mut offset)?;
+        if digit >= 10_000 {
+            return Err(pg_numeric_error("invalid numeric digit"));
+        }
+        digits.push(digit);
+    }
+
+    match sign {
+        0xC000 => return Ok("NaN".to_string()),
+        0xD000 => return Ok("Infinity".to_string()),
+        0xF000 => return Ok("-Infinity".to_string()),
+        0x0000 | 0x4000 => {}
+        _ => return Err(pg_numeric_error("invalid numeric sign")),
+    }
+
+    let is_negative = sign == 0x4000 && digits.iter().any(|digit| *digit != 0);
+    let integer_group_count = (i32::from(weight) + 1).max(0) as usize;
+    let mut integer = String::new();
+    if integer_group_count == 0 {
+        integer.push('0');
+    } else {
+        for group_index in 0..integer_group_count {
+            let digit = digits.get(group_index).copied().unwrap_or(0);
+            if group_index == 0 {
+                let _ = write!(&mut integer, "{digit}");
+            } else {
+                let _ = write!(&mut integer, "{digit:04}");
+            }
+        }
+        let trimmed = integer.trim_start_matches('0');
+        if trimmed.is_empty() {
+            integer = "0".to_string();
+        } else if trimmed.len() != integer.len() {
+            integer = trimmed.to_string();
+        }
+    }
+
+    let mut fraction = String::new();
+    if dscale > 0 {
+        if weight < 0 {
+            for _ in 0..((-i32::from(weight) - 1) as usize) {
+                fraction.push_str("0000");
+            }
+        }
+
+        let fraction_start = if weight >= 0 {
+            (weight as usize) + 1
+        } else {
+            0
+        };
+        for digit in digits.iter().skip(fraction_start) {
+            let _ = write!(&mut fraction, "{digit:04}");
+        }
+        if fraction.len() < dscale {
+            fraction.push_str(&"0".repeat(dscale - fraction.len()));
+        }
+        fraction.truncate(dscale);
+    }
+
+    let mut value = String::new();
+    if is_negative {
+        value.push('-');
+    }
+    value.push_str(&integer);
+    if dscale > 0 {
+        value.push('.');
+        value.push_str(&fraction);
+    }
+    Ok(value)
+}
+
+fn read_pg_u16(
+    raw: &[u8],
+    offset: &mut usize,
+) -> std::result::Result<u16, Box<dyn Error + Sync + Send>> {
+    if raw.len().saturating_sub(*offset) < 2 {
+        return Err(pg_numeric_error("truncated numeric value"));
+    }
+    let value = u16::from_be_bytes([raw[*offset], raw[*offset + 1]]);
+    *offset += 2;
+    Ok(value)
+}
+
+fn read_pg_i16(
+    raw: &[u8],
+    offset: &mut usize,
+) -> std::result::Result<i16, Box<dyn Error + Sync + Send>> {
+    read_pg_u16(raw, offset).map(|value| value as i16)
+}
+
+fn pg_numeric_error(message: &str) -> Box<dyn Error + Sync + Send> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_positive_postgres_numeric() {
+        let raw = postgres_numeric_raw(0, 0x0000, 2, &[123, 4500]);
+        assert_eq!(decode_postgres_numeric(&raw).unwrap(), "123.45");
+    }
+
+    #[test]
+    fn decodes_small_fraction_postgres_numeric() {
+        let raw = postgres_numeric_raw(-1, 0x0000, 4, &[1]);
+        assert_eq!(decode_postgres_numeric(&raw).unwrap(), "0.0001");
+    }
+
+    #[test]
+    fn decodes_negative_postgres_numeric() {
+        let raw = postgres_numeric_raw(1, 0x4000, 2, &[1, 0, 2500]);
+        assert_eq!(decode_postgres_numeric(&raw).unwrap(), "-10000.25");
+    }
+
+    fn postgres_numeric_raw(weight: i16, sign: u16, dscale: u16, digits: &[u16]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&(digits.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&weight.to_be_bytes());
+        raw.extend_from_slice(&sign.to_be_bytes());
+        raw.extend_from_slice(&dscale.to_be_bytes());
+        for digit in digits {
+            raw.extend_from_slice(&digit.to_be_bytes());
+        }
+        raw
     }
 }

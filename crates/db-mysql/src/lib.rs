@@ -10,6 +10,10 @@ use db_common::{
 };
 use sqlx::{
     mysql::{MySqlPoolOptions, MySqlRow},
+    types::{
+        chrono::{NaiveDate, NaiveDateTime, NaiveTime},
+        Decimal,
+    },
     Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
@@ -651,17 +655,50 @@ fn mysql_rows_to_query_result(statement: &str, rows: Vec<sqlx::mysql::MySqlRow>)
 }
 
 fn mysql_cell_value(row: &sqlx::mysql::MySqlRow, index: usize) -> CellValue {
+    let type_name = row
+        .columns()
+        .get(index)
+        .map(|column| column.type_info().name().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if type_name.contains("datetime") || type_name.contains("timestamp") {
+        if let Ok(value) = row.try_get::<Option<NaiveDateTime>, _>(index) {
+            return value.map(CellValue::DateTime).unwrap_or(CellValue::Null);
+        }
+    }
+    if type_name == "date" {
+        if let Ok(value) = row.try_get::<Option<NaiveDate>, _>(index) {
+            return value.map(CellValue::Date).unwrap_or(CellValue::Null);
+        }
+    }
+    if type_name == "time" {
+        if let Ok(value) = row.try_get::<Option<NaiveTime>, _>(index) {
+            return value.map(CellValue::Time).unwrap_or(CellValue::Null);
+        }
+    }
+    if type_name.contains("decimal") || type_name.contains("numeric") {
+        if let Ok(value) = row.try_get::<Option<Decimal>, _>(index) {
+            return value
+                .map(|value| CellValue::Decimal(value.to_string()))
+                .unwrap_or(CellValue::Null);
+        }
+    }
     if let Ok(value) = row.try_get::<Option<String>, _>(index) {
         return value.map(CellValue::Text).unwrap_or(CellValue::Null);
-    }
-    if let Ok(value) = row.try_get::<Option<i64>, _>(index) {
-        return value.map(CellValue::Int).unwrap_or(CellValue::Null);
     }
     if let Ok(value) = row.try_get::<Option<u64>, _>(index) {
         return value.map(CellValue::UInt).unwrap_or(CellValue::Null);
     }
+    if let Ok(value) = row.try_get::<Option<i64>, _>(index) {
+        return value.map(CellValue::Int).unwrap_or(CellValue::Null);
+    }
     if let Ok(value) = row.try_get::<Option<f64>, _>(index) {
         return value.map(CellValue::Float).unwrap_or(CellValue::Null);
+    }
+    if let Ok(value) = row.try_get::<Option<f32>, _>(index) {
+        return value
+            .map(|value| CellValue::Float(f64::from(value)))
+            .unwrap_or(CellValue::Null);
     }
     if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {
         return value.map(CellValue::Bytes).unwrap_or(CellValue::Null);
@@ -671,17 +708,37 @@ fn mysql_cell_value(row: &sqlx::mysql::MySqlRow, index: usize) -> CellValue {
 }
 
 fn mysql_logical_type(type_name: &str) -> LogicalType {
-    match type_name.to_ascii_lowercase().as_str() {
-        "bool" | "boolean" | "tinyint(1)" => LogicalType::Bool,
-        "tinyint" | "smallint" | "int" | "integer" | "mediumint" | "bigint" => LogicalType::Int,
-        "float" | "double" | "real" => LogicalType::Float,
-        "decimal" | "numeric" => LogicalType::Decimal,
-        "date" => LogicalType::Date,
-        "time" => LogicalType::Time,
-        "datetime" | "timestamp" => LogicalType::DateTime,
-        "json" => LogicalType::Json,
-        "blob" | "binary" | "varbinary" => LogicalType::Bytes,
-        _ => LogicalType::Text,
+    let type_name = type_name.to_ascii_lowercase();
+    if type_name == "bool" || type_name == "boolean" || type_name == "tinyint(1)" {
+        LogicalType::Bool
+    } else if type_name.contains("unsigned")
+        && (type_name.contains("int") || type_name.contains("bit"))
+    {
+        LogicalType::UInt
+    } else if type_name.contains("int") || type_name == "bit" {
+        LogicalType::Int
+    } else if type_name.contains("float")
+        || type_name.contains("double")
+        || type_name.contains("real")
+    {
+        LogicalType::Float
+    } else if type_name.contains("decimal") || type_name.contains("numeric") {
+        LogicalType::Decimal
+    } else if type_name == "date" {
+        LogicalType::Date
+    } else if type_name == "time" {
+        LogicalType::Time
+    } else if type_name.contains("datetime") || type_name.contains("timestamp") {
+        LogicalType::DateTime
+    } else if type_name == "json" {
+        LogicalType::Json
+    } else if type_name.contains("blob")
+        || type_name.contains("binary")
+        || type_name.contains("varbinary")
+    {
+        LogicalType::Bytes
+    } else {
+        LogicalType::Text
     }
 }
 

@@ -139,17 +139,15 @@ pub fn copy_cell_value(value: &CellValue) -> String {
 }
 
 pub fn compare_cell_values(left: &CellValue, right: &CellValue) -> Ordering {
+    if let Some(ordering) = compare_numeric_cells(left, right) {
+        return ordering;
+    }
+
     match (left, right) {
         (CellValue::Null, CellValue::Null) => Ordering::Equal,
         (CellValue::Null, _) => Ordering::Less,
         (_, CellValue::Null) => Ordering::Greater,
         (CellValue::Bool(left), CellValue::Bool(right)) => left.cmp(right),
-        (CellValue::Int(left), CellValue::Int(right)) => left.cmp(right),
-        (CellValue::UInt(left), CellValue::UInt(right)) => left.cmp(right),
-        (CellValue::Float(left), CellValue::Float(right)) => {
-            left.partial_cmp(right).unwrap_or(Ordering::Equal)
-        }
-        (CellValue::Decimal(left), CellValue::Decimal(right)) => left.cmp(right),
         (CellValue::Text(left), CellValue::Text(right)) => left.cmp(right),
         (CellValue::Bytes(left), CellValue::Bytes(right)) => left.len().cmp(&right.len()),
         (CellValue::Date(left), CellValue::Date(right)) => left.cmp(right),
@@ -159,6 +157,115 @@ pub fn compare_cell_values(left: &CellValue, right: &CellValue) -> Ordering {
         (CellValue::Json(left), CellValue::Json(right)) => left.to_string().cmp(&right.to_string()),
         _ => copy_cell_value(left).cmp(&copy_cell_value(right)),
     }
+}
+
+fn compare_numeric_cells(left: &CellValue, right: &CellValue) -> Option<Ordering> {
+    match (decimal_sort_text(left), decimal_sort_text(right)) {
+        (Some(left), Some(right)) => return compare_decimal_text(&left, &right),
+        _ => {}
+    }
+
+    let left = numeric_f64(left)?;
+    let right = numeric_f64(right)?;
+    left.partial_cmp(&right)
+}
+
+fn decimal_sort_text(value: &CellValue) -> Option<String> {
+    match value {
+        CellValue::Int(value) => Some(value.to_string()),
+        CellValue::UInt(value) => Some(value.to_string()),
+        CellValue::Decimal(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn numeric_f64(value: &CellValue) -> Option<f64> {
+    match value {
+        CellValue::Int(value) => Some(*value as f64),
+        CellValue::UInt(value) => Some(*value as f64),
+        CellValue::Float(value) if value.is_finite() => Some(*value),
+        CellValue::Decimal(value) => value.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn compare_decimal_text(left: &str, right: &str) -> Option<Ordering> {
+    let left = parse_decimal_parts(left)?;
+    let right = parse_decimal_parts(right)?;
+
+    match (left.negative, right.negative) {
+        (true, false) => return Some(Ordering::Less),
+        (false, true) => return Some(Ordering::Greater),
+        _ => {}
+    }
+
+    let mut ordering = left.integer.len().cmp(&right.integer.len());
+    if ordering == Ordering::Equal {
+        ordering = left.integer.cmp(&right.integer);
+    }
+    if ordering == Ordering::Equal {
+        let max_fraction_len = left.fraction.len().max(right.fraction.len());
+        for index in 0..max_fraction_len {
+            let left_digit = left.fraction.as_bytes().get(index).copied().unwrap_or(b'0');
+            let right_digit = right
+                .fraction
+                .as_bytes()
+                .get(index)
+                .copied()
+                .unwrap_or(b'0');
+            ordering = left_digit.cmp(&right_digit);
+            if ordering != Ordering::Equal {
+                break;
+            }
+        }
+    }
+
+    if left.negative {
+        Some(ordering.reverse())
+    } else {
+        Some(ordering)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DecimalParts {
+    negative: bool,
+    integer: String,
+    fraction: String,
+}
+
+fn parse_decimal_parts(value: &str) -> Option<DecimalParts> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let (negative, value) = match value.as_bytes()[0] {
+        b'-' => (true, &value[1..]),
+        b'+' => (false, &value[1..]),
+        _ => (false, value),
+    };
+
+    let (integer, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if integer.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !integer.chars().all(|ch| ch.is_ascii_digit())
+        || !fraction.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let integer = integer.trim_start_matches('0');
+    let fraction = fraction.trim_end_matches('0');
+    let integer = if integer.is_empty() { "0" } else { integer };
+    let is_zero = integer == "0" && fraction.is_empty();
+
+    Some(DecimalParts {
+        negative: negative && !is_zero,
+        integer: integer.to_string(),
+        fraction: fraction.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -206,5 +313,38 @@ mod tests {
             NaiveTime::from_hms_opt(3, 4, 5).unwrap(),
         )));
         assert_eq!(text, "<datetime 2024-01-02 03:04:05>");
+    }
+
+    #[test]
+    fn decimal_sort_is_numeric() {
+        assert_eq!(
+            compare_cell_values(
+                &CellValue::Decimal("10.25".to_string()),
+                &CellValue::Decimal("2.5".to_string())
+            ),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_cell_values(
+                &CellValue::Decimal("-1.25".to_string()),
+                &CellValue::Decimal("+0.5".to_string())
+            ),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn integer_and_decimal_sort_together() {
+        assert_eq!(
+            compare_cell_values(&CellValue::Int(2), &CellValue::Decimal("10".to_string())),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_cell_values(
+                &CellValue::UInt(20),
+                &CellValue::Decimal("+3.5".to_string())
+            ),
+            Ordering::Greater
+        );
     }
 }

@@ -9,5 +9,6 @@ version.workspace = true
 async-trait.workspace = true
 db-common.workspace = true
 sqlx.workspace = true
+sqlx-mysql.workspace = true
 tokio.workspace = true
 urlencoding.workspace = true

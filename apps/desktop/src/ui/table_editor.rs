@@ -2,7 +2,7 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
 
-use crate::ui::format::{cell_rich_text, copy_cell_value, display_cell_value};
+use crate::ui::format::{cell_rich_text, compare_cell_values, copy_cell_value, display_cell_value};
 use crate::ui::grid::{
     estimate_text_width, grid_stroke, label_cell, paint_cell_frame, paint_cell_outline,
     resizable_header_cell, row_fill, text_edit_cell, GridCellResponse, TABLE_HEADER_HEIGHT,
@@ -1896,16 +1896,14 @@ impl TableEditor {
             .rows
             .get(left)
             .and_then(|row| row.values.get(sort.column))
-            .map(copy_cell_value)
-            .unwrap_or_default();
+            .unwrap_or(&CellValue::Null);
         let right_value = self
             .result
             .rows
             .get(right)
             .and_then(|row| row.values.get(sort.column))
-            .map(copy_cell_value)
-            .unwrap_or_default();
-        let ordering = left_value.cmp(&right_value);
+            .unwrap_or(&CellValue::Null);
+        let ordering = compare_cell_values(left_value, right_value);
 
         match sort.direction {
             SortDirection::Asc => ordering,
@@ -2154,7 +2152,7 @@ impl TimePickerState {
 }
 
 fn sql_literal(value: &str) -> String {
-    if value == "NULL" {
+    if value.trim().eq_ignore_ascii_case("NULL") {
         "NULL".to_string()
     } else {
         format!("'{}'", value.replace('\'', "''"))
