@@ -4,7 +4,7 @@ use db_common::{
     looks_like_unqualified_mutation, split_statements, statement_at_offset, AppError, ConnectionId,
     ConnectionProfile, DataSourceKind, DatabaseObject, ErrorKind, FavoriteQuery,
     QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
-    SqlHighlightToken, SqlTokenKind, TextRange,
+    SqlHighlightToken, SqlTokenKind, TextRange, DEFAULT_QUERY_RESULT_LIMIT,
 };
 use eframe::egui::{
     text::LayoutJob, Align, Button, Color32, ComboBox, FontId, Frame, Layout, Margin, RichText,
@@ -896,6 +896,7 @@ impl QueryEditor {
             } else {
                 30_000
             },
+            result_limit: Some(DEFAULT_QUERY_RESULT_LIMIT),
         };
 
         self.status = match mode {
@@ -933,6 +934,7 @@ impl QueryEditor {
             cursor_offset: 0,
             selection: None,
             timeout_ms: 60_000,
+            result_limit: None,
         };
         self.status = format!("{label} running...");
         self.runtime.spawn(async move {

@@ -708,6 +708,7 @@ impl ImportWizard {
                                     cursor_offset: 0,
                                     selection: None,
                                     timeout_ms: 60000,
+                                    result_limit: None,
                                 },
                                 None,
                             )

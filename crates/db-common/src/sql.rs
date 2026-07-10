@@ -225,6 +225,29 @@ pub fn is_result_set_statement(sql: &str) -> bool {
     )
 }
 
+pub fn limit_result_preview_statement(sql: &str, limit: u32) -> Option<String> {
+    if limit == 0 {
+        return None;
+    }
+
+    let statement = trim_sql(sql);
+    if !is_limitable_result_query(statement) {
+        return None;
+    }
+
+    let words = top_level_sql_words(statement);
+    if words.iter().any(|word| {
+        matches!(
+            word.value.as_str(),
+            "LIMIT" | "OFFSET" | "FETCH" | "FOR" | "INTO"
+        )
+    }) {
+        return None;
+    }
+
+    Some(format!("{statement}\nLIMIT {limit}"))
+}
+
 pub fn statement_summary(sql: &str, max_chars: usize) -> String {
     let normalized = trim_sql(sql)
         .split_whitespace()
@@ -531,6 +554,76 @@ fn next_non_whitespace(sql: &str, offset: usize) -> Option<char> {
     sql.get(offset..)?.chars().find(|ch| !ch.is_whitespace())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqlWord {
+    value: String,
+}
+
+fn is_limitable_result_query(sql: &str) -> bool {
+    let words = top_level_sql_words(sql);
+    let Some(first) = words.first() else {
+        return false;
+    };
+
+    if first.value == "SELECT" || first.value == "VALUES" {
+        return true;
+    }
+
+    first.value == "WITH"
+        && words
+            .iter()
+            .skip(1)
+            .any(|word| word.value == "SELECT" || word.value == "VALUES")
+}
+
+fn top_level_sql_words(sql: &str) -> Vec<SqlWord> {
+    let mut words = Vec::new();
+    let mut chars = sql.char_indices().peekable();
+    let mut depth = 0usize;
+
+    while let Some((index, ch)) = chars.next() {
+        let next = chars.peek().map(|(_, ch)| *ch);
+
+        match (ch, next) {
+            ('-', Some('-')) => {
+                chars.next();
+                consume_until_line_end(sql, &mut chars);
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                consume_block_comment(sql, &mut chars);
+            }
+            ('\'', _) | ('"', _) | ('`', _) => {
+                consume_quoted(sql, &mut chars, ch);
+            }
+            ('[', _) => {
+                consume_bracket_identifier(sql, &mut chars);
+            }
+            ('$', _) if dollar_quote_delimiter(sql, index).is_some() => {
+                let Some(delimiter) = dollar_quote_delimiter(sql, index) else {
+                    continue;
+                };
+                consume_dollar_quoted_range(sql, &mut chars, &delimiter);
+            }
+            ('(', _) => {
+                depth = depth.saturating_add(1);
+            }
+            (')', _) => {
+                depth = depth.saturating_sub(1);
+            }
+            (ch, _) if depth == 0 && is_identifier_start(ch) => {
+                let end = consume_identifier(sql, &mut chars);
+                words.push(SqlWord {
+                    value: sql[index..end].to_ascii_uppercase(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    words
+}
+
 fn is_identifier_start(ch: char) -> bool {
     ch == '_' || ch.is_alphabetic()
 }
@@ -635,6 +728,65 @@ mod tests {
         assert_eq!(
             statement_summary(" select  *  from users ; ", 30),
             "select * from users"
+        );
+    }
+
+    #[test]
+    fn adds_preview_limit_to_unlimited_select() {
+        assert_eq!(
+            limit_result_preview_statement("SELECT * FROM books;", 500).as_deref(),
+            Some("SELECT * FROM books\nLIMIT 500")
+        );
+    }
+
+    #[test]
+    fn adds_preview_limit_after_trailing_line_comment() {
+        assert_eq!(
+            limit_result_preview_statement("SELECT * FROM books -- sample", 500).as_deref(),
+            Some("SELECT * FROM books -- sample\nLIMIT 500")
+        );
+    }
+
+    #[test]
+    fn adds_preview_limit_to_cte_select() {
+        assert_eq!(
+            limit_result_preview_statement(
+                "WITH recent AS (SELECT * FROM books LIMIT 10) SELECT * FROM recent",
+                500
+            )
+            .as_deref(),
+            Some("WITH recent AS (SELECT * FROM books LIMIT 10) SELECT * FROM recent\nLIMIT 500")
+        );
+    }
+
+    #[test]
+    fn skips_preview_limit_for_explicit_top_level_limits() {
+        assert_eq!(
+            limit_result_preview_statement("SELECT * FROM books LIMIT 25", 500),
+            None
+        );
+        assert_eq!(
+            limit_result_preview_statement("SELECT * FROM books OFFSET 25", 500),
+            None
+        );
+        assert_eq!(
+            limit_result_preview_statement("SELECT * FROM books FETCH FIRST 25 ROWS ONLY", 500),
+            None
+        );
+    }
+
+    #[test]
+    fn skips_preview_limit_for_non_select_cte_and_locking_select() {
+        assert_eq!(
+            limit_result_preview_statement(
+                "WITH stale AS (SELECT id FROM books) DELETE FROM books WHERE id IN (SELECT id FROM stale)",
+                500
+            ),
+            None
+        );
+        assert_eq!(
+            limit_result_preview_statement("SELECT * FROM books FOR UPDATE", 500),
+            None
         );
     }
 

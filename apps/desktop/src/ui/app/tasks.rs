@@ -312,6 +312,7 @@ impl DesktopApp {
                 cursor_offset: 0,
                 selection: None,
                 timeout_ms: 30000,
+                result_limit: None,
             };
             let query_future = query_service.execute(request, None);
 
@@ -479,6 +480,7 @@ impl DesktopApp {
                         cursor_offset: 0,
                         selection: None,
                         timeout_ms: 60_000,
+                        result_limit: None,
                     },
                     None,
                 )
@@ -577,6 +579,7 @@ impl DesktopApp {
                             cursor_offset: 0,
                             selection: None,
                             timeout_ms: 60_000,
+                            result_limit: None,
                         },
                         None,
                     )
@@ -629,6 +632,7 @@ impl DesktopApp {
                             cursor_offset: 0,
                             selection: None,
                             timeout_ms: 60_000,
+                            result_limit: None,
                         },
                         None,
                     )

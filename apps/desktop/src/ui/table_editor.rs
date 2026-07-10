@@ -1036,6 +1036,7 @@ impl TableEditor {
                         cursor_offset: 0,
                         selection: None,
                         timeout_ms: 30000,
+                        result_limit: None,
                     },
                     None,
                 )
@@ -1153,6 +1154,7 @@ impl TableEditor {
                     cursor_offset: 0,
                     selection: None,
                     timeout_ms: 30_000,
+                    result_limit: None,
                 },
                 None,
             );

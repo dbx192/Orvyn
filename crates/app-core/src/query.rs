@@ -7,11 +7,11 @@ use crate::connection::ConnectionManager;
 use crate::storage::{FavoriteQueryStore, QueryHistoryStore};
 use crate::task::TaskManager;
 use db_common::{
-    highlight_sql, split_statements, statement_at_offset, statement_summary, unsupported_kind,
-    AppError, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind,
-    FavoriteQuery, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
-    QueryHistoryEntry, QueryId, QueryTab, RelationalQueryExecutor, Result, SqlHighlightToken,
-    TextRange,
+    highlight_sql, limit_result_preview_statement, split_statements, statement_at_offset,
+    statement_summary, unsupported_kind, AppError, ConnectionId, ConnectionPoolConfig,
+    ConnectionPoolStats, DataSourceKind, ErrorKind, FavoriteQuery, PageSize, QueryExecutionMode,
+    QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId, QueryResult, QueryTab,
+    RelationalQueryExecutor, Result, SqlHighlightToken, TextRange,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -260,6 +260,8 @@ impl QueryService {
         runtime_password: Option<&str>,
     ) -> Result<QueryExecutionReport> {
         let statements = statements_for_request(&request)?;
+        let (execution_statements, limited_statements) =
+            statements_for_execution(&statements, request.result_limit)?;
         let (mut profile, password) = self
             .connections
             .profile_with_password(request.connection_id, runtime_password)
@@ -275,7 +277,7 @@ impl QueryService {
         let execution_id = QueryId::new();
         let started_at = Instant::now();
         let request_for_task = request.clone();
-        let statements_for_task = statements.clone();
+        let statements_for_task = execution_statements.clone();
         let pool_config = self.pool_config;
         let password_for_task = password;
 
@@ -311,12 +313,13 @@ impl QueryService {
 
         let elapsed_ms = started_at.elapsed().as_millis();
         match result {
-            Ok(Ok(results)) => {
+            Ok(Ok(mut results)) => {
                 self.state.lock().await.running.remove(&request.tab_id);
+                add_result_limit_notices(&mut results, &limited_statements);
                 let report = QueryExecutionReport::new(
                     execution_id,
                     &request,
-                    statements,
+                    execution_statements,
                     results,
                     elapsed_ms,
                 );
@@ -326,7 +329,7 @@ impl QueryService {
             }
             Ok(Err(error)) | Err(error) => {
                 self.state.lock().await.running.remove(&request.tab_id);
-                self.record_failed_history(&request, &statements, elapsed_ms, &error)
+                self.record_failed_history(&request, &execution_statements, elapsed_ms, &error)
                     .await;
                 Err(error)
             }
@@ -358,6 +361,7 @@ impl QueryService {
             cursor_offset: tab.cursor_offset,
             selection: tab.selection,
             timeout_ms,
+            result_limit: None,
         };
         self.execute(request, runtime_password).await
     }
@@ -619,6 +623,40 @@ fn statements_for_request(request: &QueryExecutionRequest) -> Result<Vec<String>
     Ok(statements)
 }
 
+fn statements_for_execution(
+    statements: &[String],
+    result_limit: Option<u32>,
+) -> Result<(Vec<String>, Vec<Option<u32>>)> {
+    let Some(limit) = result_limit else {
+        return Ok((statements.to_vec(), vec![None; statements.len()]));
+    };
+    let limit = PageSize::new(limit)?.get();
+    let mut execution_statements = Vec::with_capacity(statements.len());
+    let mut limited_statements = Vec::with_capacity(statements.len());
+
+    for statement in statements {
+        if let Some(limited_statement) = limit_result_preview_statement(statement, limit) {
+            execution_statements.push(limited_statement);
+            limited_statements.push(Some(limit));
+        } else {
+            execution_statements.push(statement.clone());
+            limited_statements.push(None);
+        }
+    }
+
+    Ok((execution_statements, limited_statements))
+}
+
+fn add_result_limit_notices(results: &mut [QueryResult], limited_statements: &[Option<u32>]) {
+    for (result, limit) in results.iter_mut().zip(limited_statements) {
+        if let Some(limit) = limit {
+            result.notices.push(format!(
+                "Result preview limited to first {limit} rows. Add an explicit LIMIT to control the row count."
+            ));
+        }
+    }
+}
+
 fn push_history(history: &mut VecDeque<QueryHistoryEntry>, entry: QueryHistoryEntry) {
     history.push_front(entry);
     while history.len() > DEFAULT_HISTORY_LIMIT {
@@ -644,6 +682,7 @@ mod tests {
             cursor_offset: 12,
             selection: None,
             timeout_ms: 1000,
+            result_limit: None,
         };
 
         assert_eq!(statements_for_request(&request).unwrap(), vec!["select 2"]);
@@ -662,8 +701,31 @@ mod tests {
             cursor_offset: 0,
             selection: Some(TextRange::new(10, 18)),
             timeout_ms: 1000,
+            result_limit: None,
         };
 
         assert_eq!(statements_for_request(&request).unwrap(), vec!["select 2"]);
+    }
+
+    #[test]
+    fn applies_preview_limit_to_unlimited_selects() {
+        let statements = vec!["select * from books".to_string()];
+
+        let (execution_statements, limited_statements) =
+            statements_for_execution(&statements, Some(500)).unwrap();
+
+        assert_eq!(execution_statements, vec!["select * from books\nLIMIT 500"]);
+        assert_eq!(limited_statements, vec![Some(500)]);
+    }
+
+    #[test]
+    fn does_not_apply_preview_limit_when_sql_has_explicit_limit() {
+        let statements = vec!["select * from books limit 25".to_string()];
+
+        let (execution_statements, limited_statements) =
+            statements_for_execution(&statements, Some(500)).unwrap();
+
+        assert_eq!(execution_statements, statements);
+        assert_eq!(limited_statements, vec![None]);
     }
 }

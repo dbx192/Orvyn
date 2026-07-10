@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub const DEFAULT_QUERY_TIMEOUT_MS: u64 = 30_000;
+pub const DEFAULT_QUERY_RESULT_LIMIT: u32 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextRange {
@@ -92,6 +93,8 @@ pub struct QueryExecutionRequest {
     pub cursor_offset: usize,
     pub selection: Option<TextRange>,
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub result_limit: Option<u32>,
 }
 
 impl QueryExecutionRequest {
@@ -106,6 +109,7 @@ impl QueryExecutionRequest {
             cursor_offset: 0,
             selection: None,
             timeout_ms: DEFAULT_QUERY_TIMEOUT_MS,
+            result_limit: None,
         }
     }
 
