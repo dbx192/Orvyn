@@ -4,14 +4,12 @@ Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQL
 
 当前仓库已经具备可构建、可测试的 workspace，以及可运行的桌面端主流程：
 
-- 开发计划：`dev.md`
-- 编码规范：`rule.md`
+- 项目文档：`PROJECT.md`（包含开发计划、编码规范、架构设计、里程碑）
 - Rust workspace
 - egui/eframe 桌面入口和 UI 模块：`apps/desktop`
 - 通用模型和全局工具：`crates/db-common`
 - 应用服务层：`crates/app-core`
 - 五类数据库适配 crate；
-- 
 - 安全存储与导入导出 crate
 
 ## 第一阶段能力
@@ -20,7 +18,7 @@ Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQL
 
 - 连接配置 CRUD 服务：`app_core::connection::ConnectionManager`
 - 连接配置文件持久化：`app_core::storage::FileConnectionProfileStore`
-- 本地加密凭据存储：`secure_store::EncryptedFileStore`
+- 本地加密凭据存储：`secure_store::EncryptedFileStore`（使用 ChaCha20-Poly1305 加密）
 - 五类数据源连接测试适配器：
   - `db_mysql::MySqlConnectionTester`
   - `db_postgres::PostgresConnectionTester`
@@ -29,8 +27,6 @@ Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQL
   - `db_redis::RedisConnectionTester`
 - 密码保存策略：`PasswordUpdate::Keep`、`Clear`、`Replace`
 - 默认不保存密码，只有 `ConnectionSecurity.save_password = true` 时才写入安全存储。
-
-桌面入口使用 egui/eframe，启动后会初始化连接管理、对象树、查询、Redis 管理、导入导出等服务。
 
 ## 第二阶段能力
 
@@ -43,8 +39,12 @@ Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQL
   - schema
   - 表
   - 视图
-  - 字段
-  - 索引
+  - 字段（支持列类型、是否可空、默认值、主键、注释）
+  - 索引（支持唯一、主键标识）
+  - 外键（支持 ON UPDATE/ON DELETE）
+  - 触发器
+  - 函数（支持返回类型、语言、类型）
+  - 获取 CREATE TABLE SQL
 - Redis 元数据读取：
   - DB 编号列表
   - DB key 数量
@@ -63,6 +63,12 @@ Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQL
 
 - 查询执行服务：`app_core::query::QueryService`
 - MySQL、PostgreSQL、SQLite、DuckDB 查询执行适配器
+- 查询执行模式：全部执行、当前语句、选区执行
+- 查询取消：支持通过 `AbortHandle` 取消正在运行的查询
+- 查询历史：`QueryHistoryStore`，默认保留 500 条记录
+- 收藏查询：`FavoriteQueryStore`，支持 CRUD 操作
+- 连接池管理：`ConnectionPoolConfig`、`ConnectionPoolStats`
+- 分页查询：支持 LIMIT/OFFSET 分页和总行数统计
 - egui 结果集表格：
   - 分页和虚拟滚动
   - 列宽调整
@@ -102,6 +108,45 @@ Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQL
 
 - 表数据加载当前默认走 `SELECT * ... LIMIT 500`。
 - 更完整的事务控制、批量编辑保护和增量刷新仍可继续增强。
+
+## Redis 管理能力
+
+已实现 Redis 数据管理服务：
+
+- Redis 服务：`app_core::redis_service::RedisService`
+- 连接缓存：复用 `MultiplexedConnection` 减少连接开销
+- 支持的数据类型操作：
+  - String：get、set、TTL 更新
+  - Hash：hset、hdel
+  - List：lpush、rpush、lpop、rpop、lset、lrange
+  - Set：sadd、srem
+  - Sorted Set：zadd、zrem、zrange
+- 通用命令执行：`execute_command` 支持任意 Redis 命令
+- key 操作：删除、创建、获取信息、获取大小
+
+## 任务管理
+
+已实现异步任务管理：
+
+- 任务管理器：`app_core::task::TaskManager`
+- 任务类型：`TaskKind::Query`、`MetadataLoad`、`Import`、`Export`
+- 任务状态：Pending、Running、Completed、Failed、Cancelled、TimedOut
+- 任务控制：
+  - `spawn`：启动异步任务
+  - `spawn_blocking`：启动阻塞任务
+  - `spawn_blocking_with_timeout`：带超时的阻塞任务
+  - `cancel`：取消正在运行的任务
+- 任务查询：按连接 ID 过滤、活动任务计数、清理已完成任务
+
+## 导入导出
+
+已实现查询结果导出：
+
+- 导出格式：CSV、JSON、Excel 兼容（Tab 分隔）
+- 导出方式：
+  - `export_query_result`：导出到字符串
+  - `export_query_result_to_file`：导出到文件
+- CSV 导入：`import_csv::parse_csv_preview`、`auto_map_fields`、`validate_types`、`generate_insert_batches`
 
 可选环境变量：
 
@@ -170,13 +215,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```text
 apps/desktop           桌面应用入口
-crates/app-core        应用服务层
+crates/app-core        应用服务层（连接、会话、元数据、查询、Redis、任务）
 crates/db-common       通用模型、错误、trait、工具方法
 crates/db-mysql        MySQL 适配器
 crates/db-postgres     PostgreSQL 适配器
 crates/db-sqlite       SQLite 适配器
 crates/db-duckdb       DuckDB 适配器
 crates/db-redis        Redis 适配器
-crates/secure-store    凭据安全存储
-crates/import-export   导入导出
+crates/secure-store    凭据安全存储（ChaCha20-Poly1305 加密）
+crates/import-export   导入导出（CSV/JSON）
 ```

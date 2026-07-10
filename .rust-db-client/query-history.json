@@ -1,6 +1,28 @@
 {
   "entries": [
     {
+      "id": "fe67a91f-490d-4ba6-b8e5-f2f05644f497",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `askme`.`acms_tags` LIMIT 500",
+      "summary": "SELECT * FROM `askme`.`acms_tags` LIMIT 500",
+      "executed_at": "2026-07-10T09:09:49.493681700Z",
+      "elapsed_ms": 43,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "d00d5302-7447-491a-98a1-c7133642bafb",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `askme`.`acms_user_histories` LIMIT 500",
+      "summary": "SELECT * FROM `askme`.`acms_user_histories` LIMIT 500",
+      "executed_at": "2026-07-10T09:09:29.249152800Z",
+      "elapsed_ms": 65,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
       "id": "b5031281-e028-4672-946e-bb15721b062f",
       "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
       "sql": "SELECT * FROM `askme`.`acms_comments` LIMIT 500",
@@ -1074,28 +1096,6 @@
       "summary": "SELECT * FROM `askme`.`books` LIMIT 500",
       "executed_at": "2026-07-08T10:29:19.792697300Z",
       "elapsed_ms": 152,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "319db327-d4e4-463a-87b4-6b96a4e2fa47",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `askme`.`articles` LIMIT 500",
-      "summary": "SELECT * FROM `askme`.`articles` LIMIT 500",
-      "executed_at": "2026-07-08T10:28:29.838659600Z",
-      "elapsed_ms": 67,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "47decac3-5333-4e42-a3ea-b0e2a5cc0c8f",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `askme`.`api_tokens` LIMIT 500",
-      "summary": "SELECT * FROM `askme`.`api_tokens` LIMIT 500",
-      "executed_at": "2026-07-08T10:28:27.879426500Z",
-      "elapsed_ms": 266,
       "affected_rows": 0,
       "success": true,
       "error_message": null
