@@ -709,6 +709,8 @@ impl ImportWizard {
                                     selection: None,
                                     timeout_ms: 60000,
                                     result_limit: None,
+                                    result_offset: 0,
+                                    result_total_rows: None,
                                 },
                                 None,
                             )

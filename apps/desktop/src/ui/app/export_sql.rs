@@ -110,6 +110,8 @@ pub(super) async fn export_database_sql(
                         selection: None,
                         timeout_ms: 300_000,
                         result_limit: None,
+                        result_offset: 0,
+                        result_total_rows: None,
                     },
                     None,
                 )

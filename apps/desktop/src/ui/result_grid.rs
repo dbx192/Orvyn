@@ -8,7 +8,10 @@ use crate::ui::grid::{
     estimate_text_width, grid_stroke, label_cell, paint_cell_outline, resizable_header_cell,
     row_fill, TABLE_HEADER_HEIGHT, TABLE_ROW_HEIGHT,
 };
-use db_common::{CellValue, QueryResult};
+use db_common::{
+    CellValue, QueryResult, QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
+    QUERY_RESULT_METADATA_TOTAL_ROWS,
+};
 use eframe::egui::{
     pos2, vec2, Align, Button, Color32, DragValue, Frame, Layout, Margin, Rect, RichText,
     ScrollArea, Sense, Stroke, Ui,
@@ -21,6 +24,12 @@ const DEFAULT_PAGE_SIZE: usize = 500;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 320.0;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultSetGridAction {
+    Message(String),
+    PageRequested { offset: u64, page_size: u32 },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -40,6 +49,13 @@ struct SelectedCell {
     column: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemotePage {
+    limit: usize,
+    offset: u64,
+    total_rows: u64,
+}
+
 pub struct ResultSetGrid {
     result: QueryResult,
     column_widths: Vec<f32>,
@@ -53,11 +69,12 @@ pub struct ResultSetGrid {
 
 impl ResultSetGrid {
     pub fn new(result: QueryResult) -> Self {
+        let page_size = page_size_from_result(&result);
         Self {
             column_widths: estimate_column_widths(&result),
             result,
             page: 0,
-            page_size: DEFAULT_PAGE_SIZE,
+            page_size,
             selected: None,
             sort: None,
             runtime: None,
@@ -72,9 +89,9 @@ impl ResultSetGrid {
 
     pub fn set_result(&mut self, result: QueryResult) {
         self.column_widths = estimate_column_widths(&result);
+        self.page_size = page_size_from_result(&result);
         self.result = result;
         self.page = 0;
-        self.page_size = DEFAULT_PAGE_SIZE;
         self.selected = None;
         self.sort = None;
         self.scroll_x = 0.0;
@@ -84,9 +101,9 @@ impl ResultSetGrid {
         &self.result
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
-        let mut message = None;
-        self.toolbar(ui, &mut message);
+    pub fn ui(&mut self, ui: &mut Ui) -> Option<ResultSetGridAction> {
+        let mut action = None;
+        self.toolbar(ui, &mut action);
 
         if self.result.columns.is_empty() {
             ui.vertical_centered(|ui| {
@@ -103,7 +120,7 @@ impl ResultSetGrid {
                     );
                 }
             });
-            return message;
+            return action;
         }
 
         let page_rows = self.page_rows();
@@ -135,12 +152,23 @@ impl ResultSetGrid {
                 self.scroll_x = output.state.offset.x;
             });
 
-        message
+        action
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+    fn toolbar(&mut self, ui: &mut Ui, action: &mut Option<ResultSetGridAction>) {
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!("{} rows", self.result.rows.len())).strong());
+            if let Some(remote_page) = self.remote_page() {
+                ui.label(
+                    RichText::new(format!(
+                        "{} of {} rows",
+                        self.result.rows.len(),
+                        remote_page.total_rows
+                    ))
+                    .strong(),
+                );
+            } else {
+                ui.label(RichText::new(format!("{} rows", self.result.rows.len())).strong());
+            }
             ui.label(
                 RichText::new(format!("{} columns", self.result.columns.len()))
                     .small()
@@ -155,25 +183,11 @@ impl ResultSetGrid {
             }
 
             ui.separator();
-            if ui.add_enabled(self.page > 0, Button::new("<")).clicked() {
-                self.page -= 1;
-                self.selected = None;
-            }
-            ui.label(format!("{} / {}", self.page + 1, self.total_pages().max(1)));
-            if ui
-                .add_enabled(self.page + 1 < self.total_pages(), Button::new(">"))
-                .clicked()
-            {
-                self.page += 1;
-                self.selected = None;
-            }
-            let page_end = self.page_end();
-            let range_text = if page_end == 0 {
-                "0-0".to_string()
+            if let Some(remote_page) = self.remote_page() {
+                self.remote_pager(ui, remote_page, action);
             } else {
-                format!("{}-{page_end}", self.page_start() + 1)
-            };
-            ui.label(RichText::new(range_text).small().color(Color32::GRAY));
+                self.local_pager(ui);
+            }
 
             ui.separator();
             let old_page_size = self.page_size;
@@ -184,8 +198,15 @@ impl ResultSetGrid {
             );
             if self.page_size != old_page_size {
                 self.page_size = self.page_size.clamp(25, 1000);
-                self.page = self.page.min(self.total_pages().saturating_sub(1));
                 self.selected = None;
+                if self.remote_page().is_some() {
+                    *action = Some(ResultSetGridAction::PageRequested {
+                        offset: 0,
+                        page_size: self.page_size as u32,
+                    });
+                } else {
+                    self.page = self.page.min(self.total_pages().saturating_sub(1));
+                }
             }
 
             ui.separator();
@@ -194,14 +215,14 @@ impl ResultSetGrid {
                 if ui.add_enabled(has_selection, Button::new("Cell")).clicked() {
                     if let Some(text) = self.copy_cell_text() {
                         copy_to_clipboard(ui, text);
-                        *message = Some("Cell copied".to_string());
+                        *action = Some(ResultSetGridAction::Message("Cell copied".to_string()));
                     }
                     ui.close_menu();
                 }
                 if ui.add_enabled(has_selection, Button::new("Row")).clicked() {
                     if let Some(text) = self.copy_row_text(false) {
                         copy_to_clipboard(ui, text);
-                        *message = Some("Row copied".to_string());
+                        *action = Some(ResultSetGridAction::Message("Row copied".to_string()));
                     }
                     ui.close_menu();
                 }
@@ -211,39 +232,45 @@ impl ResultSetGrid {
                 {
                     if let Some(text) = self.copy_row_text(true) {
                         copy_to_clipboard(ui, text);
-                        *message = Some("Row copied with header".to_string());
+                        *action = Some(ResultSetGridAction::Message(
+                            "Row copied with header".to_string(),
+                        ));
                     }
                     ui.close_menu();
                 }
                 ui.separator();
                 if ui.button("Page with Header").clicked() {
                     copy_to_clipboard(ui, self.copy_rows_text(self.page_rows(), true));
-                    *message = Some("Current page copied with header".to_string());
+                    *action = Some(ResultSetGridAction::Message(
+                        "Current page copied with header".to_string(),
+                    ));
                     ui.close_menu();
                 }
                 if ui.button("All with Header").clicked() {
                     copy_to_clipboard(ui, self.copy_rows_text(self.sorted_rows(), true));
-                    *message = Some("All rows copied with header".to_string());
+                    *action = Some(ResultSetGridAction::Message(
+                        "All rows copied with header".to_string(),
+                    ));
                     ui.close_menu();
                 }
             });
 
             ui.menu_button("Export", |ui| {
                 if ui.button("Copy CSV").clicked() {
-                    self.copy_export(ui, ExportFormat::Csv, message);
+                    self.copy_export(ui, ExportFormat::Csv, action);
                     ui.close_menu();
                 }
                 if ui.button("Copy JSON").clicked() {
-                    self.copy_export(ui, ExportFormat::Json, message);
+                    self.copy_export(ui, ExportFormat::Json, action);
                     ui.close_menu();
                 }
                 ui.separator();
                 if ui.button("Save CSV").clicked() {
-                    self.save_export(ExportFormat::Csv, message);
+                    self.save_export(ExportFormat::Csv, action);
                     ui.close_menu();
                 }
                 if ui.button("Save JSON").clicked() {
-                    self.save_export(ExportFormat::Json, message);
+                    self.save_export(ExportFormat::Json, action);
                     ui.close_menu();
                 }
             });
@@ -358,6 +385,67 @@ impl ResultSetGrid {
         self.column_widths.iter().sum()
     }
 
+    fn local_pager(&mut self, ui: &mut Ui) {
+        if ui.add_enabled(self.page > 0, Button::new("<")).clicked() {
+            self.page -= 1;
+            self.selected = None;
+        }
+        ui.label(format!("{} / {}", self.page + 1, self.total_pages().max(1)));
+        if ui
+            .add_enabled(self.page + 1 < self.total_pages(), Button::new(">"))
+            .clicked()
+        {
+            self.page += 1;
+            self.selected = None;
+        }
+        let page_end = self.page_end();
+        let range_text = if page_end == 0 {
+            "0-0".to_string()
+        } else {
+            format!("{}-{page_end}", self.page_start() + 1)
+        };
+        ui.label(RichText::new(range_text).small().color(Color32::GRAY));
+    }
+
+    fn remote_pager(
+        &mut self,
+        ui: &mut Ui,
+        remote_page: RemotePage,
+        action: &mut Option<ResultSetGridAction>,
+    ) {
+        let page_size = remote_page.limit.max(1) as u64;
+        let current_page = (remote_page.offset / page_size) + 1;
+        let total_pages = remote_page.total_rows.div_ceil(page_size).max(1);
+        if ui
+            .add_enabled(remote_page.offset > 0, Button::new("<"))
+            .clicked()
+        {
+            *action = Some(ResultSetGridAction::PageRequested {
+                offset: remote_page.offset.saturating_sub(page_size),
+                page_size: remote_page.limit as u32,
+            });
+        }
+        ui.label(format!("{current_page} / {total_pages}"));
+        let loaded_rows = self.result.rows.len() as u64;
+        let has_next = remote_page.offset + loaded_rows < remote_page.total_rows;
+        if ui.add_enabled(has_next, Button::new(">")).clicked() {
+            *action = Some(ResultSetGridAction::PageRequested {
+                offset: remote_page.offset + page_size,
+                page_size: remote_page.limit as u32,
+            });
+        }
+        let range_text = if loaded_rows == 0 {
+            "0-0".to_string()
+        } else {
+            format!(
+                "{}-{}",
+                remote_page.offset + 1,
+                remote_page.offset + loaded_rows
+            )
+        };
+        ui.label(RichText::new(range_text).small().color(Color32::GRAY));
+    }
+
     fn row(&mut self, ui: &mut Ui, row_index: usize, visible_row_index: usize) {
         ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
         ui.horizontal(|ui| {
@@ -409,6 +497,10 @@ impl ResultSetGrid {
     }
 
     fn page_rows(&self) -> Vec<usize> {
+        if self.remote_page().is_some() {
+            return self.sorted_rows();
+        }
+
         let start = self.page_start();
         self.sorted_rows()
             .into_iter()
@@ -544,25 +636,60 @@ impl ResultSetGrid {
         )
     }
 
-    fn copy_export(&self, ui: &mut Ui, format: ExportFormat, message: &mut Option<String>) {
+    fn remote_page(&self) -> Option<RemotePage> {
+        let limit = self
+            .result
+            .metadata
+            .get(QUERY_RESULT_METADATA_PAGE_LIMIT)?
+            .parse::<usize>()
+            .ok()?;
+        let offset = self
+            .result
+            .metadata
+            .get(QUERY_RESULT_METADATA_PAGE_OFFSET)?
+            .parse::<u64>()
+            .ok()?;
+        let total_rows = self
+            .result
+            .metadata
+            .get(QUERY_RESULT_METADATA_TOTAL_ROWS)?
+            .parse::<u64>()
+            .ok()?;
+
+        Some(RemotePage {
+            limit,
+            offset,
+            total_rows,
+        })
+    }
+
+    fn copy_export(
+        &self,
+        ui: &mut Ui,
+        format: ExportFormat,
+        action: &mut Option<ResultSetGridAction>,
+    ) {
         match export_query_result(&self.result, format) {
             Ok(text) => {
                 copy_to_clipboard(ui, text);
-                *message = Some(match format {
+                *action = Some(ResultSetGridAction::Message(match format {
                     ExportFormat::Csv => "CSV export copied to clipboard".to_string(),
                     ExportFormat::Json => "JSON export copied to clipboard".to_string(),
                     ExportFormat::ExcelCompatible => {
                         "Excel-compatible export copied to clipboard".to_string()
                     }
-                });
+                }));
             }
             Err(error) => {
-                *message = Some(format!("Export failed: {}", error.message));
+                *action = Some(ResultSetGridAction::Message(format!(
+                    "Export failed: {}",
+                    error.message
+                )));
             }
         }
     }
 
-    fn save_export(&self, format: ExportFormat, message: &mut Option<String>) {
+    fn save_export(&self, format: ExportFormat, action: &mut Option<ResultSetGridAction>) {
         let ext = match format {
             ExportFormat::Csv => "csv",
             ExportFormat::Json => "json",
@@ -611,19 +738,28 @@ impl ResultSetGrid {
                         }
                     }
                 });
-                *message = Some(format!(
+                *action = Some(ResultSetGridAction::Message(format!(
                     "{} export started: {}",
                     format_label,
                     path.display()
-                ));
+                )));
             }
         } else {
-            *message = Some(format!(
+            *action = Some(ResultSetGridAction::Message(format!(
                 "{} export unavailable (runtime missing)",
                 format_name
-            ));
+            )));
         }
     }
+}
+
+fn page_size_from_result(result: &QueryResult) -> usize {
+    result
+        .metadata
+        .get(QUERY_RESULT_METADATA_PAGE_LIMIT)
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(25, 1000))
+        .unwrap_or(DEFAULT_PAGE_SIZE)
 }
 
 fn estimate_column_widths(result: &QueryResult) -> Vec<f32> {

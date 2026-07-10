@@ -95,6 +95,10 @@ pub struct QueryExecutionRequest {
     pub timeout_ms: u64,
     #[serde(default)]
     pub result_limit: Option<u32>,
+    #[serde(default)]
+    pub result_offset: u64,
+    #[serde(default)]
+    pub result_total_rows: Option<u64>,
 }
 
 impl QueryExecutionRequest {
@@ -110,6 +114,8 @@ impl QueryExecutionRequest {
             selection: None,
             timeout_ms: DEFAULT_QUERY_TIMEOUT_MS,
             result_limit: None,
+            result_offset: 0,
+            result_total_rows: None,
         }
     }
 

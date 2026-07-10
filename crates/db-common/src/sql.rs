@@ -116,6 +116,7 @@ pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<String> {
     let mut double_quoted = false;
     let mut line_comment = false;
     let mut block_comment = false;
+    let mut previous_statement = None;
     let offset = byte_offset.min(sql.len());
 
     while let Some((index, ch)) = chars.next() {
@@ -195,8 +196,12 @@ pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<String> {
                 }
             }
             (';', _) => {
+                let statement = non_empty_statement(&current);
                 if current_start <= offset && offset <= index {
-                    return non_empty_statement(&current);
+                    return statement;
+                }
+                if statement.is_some() {
+                    previous_statement = statement;
                 }
                 current.clear();
                 current_start = index + ch.len_utf8();
@@ -206,7 +211,17 @@ pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<String> {
     }
 
     if current_start <= offset {
-        return non_empty_statement(&current);
+        if let Some(statement) = non_empty_statement(&current) {
+            return Some(statement);
+        }
+
+        if sql
+            .get(current_start..offset)
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return previous_statement;
+        }
     }
 
     None
@@ -246,6 +261,32 @@ pub fn limit_result_preview_statement(sql: &str, limit: u32) -> Option<String> {
     }
 
     Some(format!("{statement}\nLIMIT {limit}"))
+}
+
+pub fn page_result_statement(sql: &str, limit: u32, offset: u64) -> Option<String> {
+    if limit == 0 {
+        return None;
+    }
+
+    let statement = trim_sql(sql);
+    if !is_pageable_result_query(statement) {
+        return None;
+    }
+
+    Some(format!(
+        "SELECT * FROM ({statement}) AS __query_page LIMIT {limit} OFFSET {offset}"
+    ))
+}
+
+pub fn count_result_page_statement(sql: &str) -> Option<String> {
+    let statement = trim_sql(sql);
+    if !is_pageable_result_query(statement) {
+        return None;
+    }
+
+    Some(format!(
+        "SELECT COUNT(*) AS total_rows FROM ({statement}) AS __query_count"
+    ))
 }
 
 pub fn statement_summary(sql: &str, max_chars: usize) -> String {
@@ -576,6 +617,55 @@ fn is_limitable_result_query(sql: &str) -> bool {
             .any(|word| word.value == "SELECT" || word.value == "VALUES")
 }
 
+fn is_pageable_result_query(sql: &str) -> bool {
+    let words = top_level_sql_words(sql);
+    let Some(first) = words.first() else {
+        return false;
+    };
+
+    if words
+        .iter()
+        .any(|word| matches!(word.value.as_str(), "FOR" | "INTO"))
+    {
+        return false;
+    }
+
+    let is_select_query =
+        first.value == "SELECT" || (first.value == "WITH" && words.iter().any(|word| word.value == "SELECT"));
+
+    is_select_query && !is_single_row_result_query(&words)
+}
+
+fn is_single_row_result_query(words: &[SqlWord]) -> bool {
+    let Some(select_index) = words.iter().position(|word| word.value == "SELECT") else {
+        return false;
+    };
+
+    if words.iter().any(|word| {
+        matches!(
+            word.value.as_str(),
+            "GROUP" | "HAVING" | "UNION" | "INTERSECT" | "EXCEPT"
+        )
+    }) {
+        return false;
+    }
+
+    let from_index = words
+        .iter()
+        .enumerate()
+        .skip(select_index + 1)
+        .find_map(|(index, word)| (word.value == "FROM").then_some(index));
+
+    let projection = match from_index {
+        Some(from_index) => &words[select_index + 1..from_index],
+        None => return true,
+    };
+
+    projection.iter().any(|word| {
+        matches!(word.value.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
+    }) && !projection.iter().any(|word| word.value == "OVER")
+}
+
 fn top_level_sql_words(sql: &str) -> Vec<SqlWord> {
     let mut words = Vec::new();
     let mut chars = sql.char_indices().peekable();
@@ -791,6 +881,40 @@ mod tests {
     }
 
     #[test]
+    fn builds_page_and_count_wrappers_for_selects() {
+        assert_eq!(
+            page_result_statement("SELECT * FROM books;", 500, 1_000).as_deref(),
+            Some("SELECT * FROM (SELECT * FROM books) AS __query_page LIMIT 500 OFFSET 1000")
+        );
+        assert_eq!(
+            count_result_page_statement("SELECT * FROM books;").as_deref(),
+            Some("SELECT COUNT(*) AS total_rows FROM (SELECT * FROM books) AS __query_count")
+        );
+    }
+
+    #[test]
+    fn skips_page_wrappers_for_unsafe_select_forms() {
+        assert_eq!(
+            page_result_statement("SELECT * INTO new_books FROM books", 500, 0),
+            None
+        );
+        assert_eq!(
+            count_result_page_statement("SELECT * FROM books FOR UPDATE"),
+            None
+        );
+    }
+
+    #[test]
+    fn skips_page_wrappers_for_single_row_aggregate_queries() {
+        assert_eq!(page_result_statement("SELECT COUNT(*) FROM books", 500, 0), None);
+        assert_eq!(
+            count_result_page_statement("SELECT COUNT(*) FROM books"),
+            None
+        );
+        assert_eq!(page_result_statement("SELECT 1", 500, 0), None);
+    }
+
+    #[test]
     fn splits_statements_without_splitting_quoted_semicolons() {
         assert_eq!(
             split_statements("select ';'; select \"a;\"; -- ;\nselect 3")
@@ -814,6 +938,21 @@ mod tests {
         let sql = "select 1;\nselect 2;";
         assert_eq!(statement_at_offset(sql, 0).as_deref(), Some("select 1"));
         assert_eq!(statement_at_offset(sql, 12).as_deref(), Some("select 2"));
+    }
+
+    #[test]
+    fn finds_statement_at_offset_after_trailing_semicolon() {
+        let sql = "SELECT * FROM books;";
+        assert_eq!(
+            statement_at_offset(sql, sql.len()).as_deref(),
+            Some("SELECT * FROM books")
+        );
+
+        let sql = "SELECT * FROM books;\n\n";
+        assert_eq!(
+            statement_at_offset(sql, sql.len()).as_deref(),
+            Some("SELECT * FROM books")
+        );
     }
 
     #[test]

@@ -1,10 +1,11 @@
-use crate::ui::result_grid::ResultSetGrid;
+use crate::ui::result_grid::{ResultSetGrid, ResultSetGridAction};
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::{
     looks_like_unqualified_mutation, split_statements, statement_at_offset, AppError, ConnectionId,
     ConnectionProfile, DataSourceKind, DatabaseObject, ErrorKind, FavoriteQuery,
     QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
     SqlHighlightToken, SqlTokenKind, TextRange, DEFAULT_QUERY_RESULT_LIMIT,
+    QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use eframe::egui::{
     text::LayoutJob, Align, Button, Color32, ComboBox, FontId, Frame, Layout, Margin, RichText,
@@ -29,6 +30,7 @@ struct QueryResultView {
 
 enum QueryEditorEvent {
     ExecutionCompleted(QueryId, Result<QueryExecutionReport, AppError>),
+    ResultPageCompleted(QueryId, usize, Result<QueryExecutionReport, AppError>),
     StopCompleted(QueryId, Result<(), AppError>),
     ConnectionList(Vec<ConnectionProfile>),
     DatabaseList(QueryId, Vec<String>),
@@ -265,6 +267,32 @@ impl QueryEditor {
         }
     }
 
+    pub fn sync_active_context(
+        &mut self,
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+    ) {
+        if self.tabs.is_empty() {
+            self.new_query_with_connection(connection_id, database, schema);
+            return;
+        }
+
+        let Some(tab_id) = self.active_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return;
+        };
+
+        tab.connection_id = connection_id;
+        tab.database = database;
+        tab.schema = schema;
+        tab.available_databases.clear();
+        tab.available_schemas.clear();
+        self.refresh_metadata_for_tab(tab_id);
+    }
+
     pub fn open_saved_query(
         &mut self,
         connection_id: ConnectionId,
@@ -345,7 +373,15 @@ impl QueryEditor {
             ui.separator();
             self.connection_selector(ui);
             self.database_selector(ui);
-            self.schema_selector(ui);
+            if self
+                .active_tab
+                .and_then(|id| self.tabs.get(&id))
+                .and_then(|tab| connection_kind_for(&self.connections, tab.connection_id))
+                .map(supports_schema_selector)
+                .unwrap_or(false)
+            {
+                self.schema_selector(ui);
+            }
             ui.separator();
 
             let active_tab_id = self.active_tab;
@@ -694,6 +730,7 @@ impl QueryEditor {
 
     fn results_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
         let mut export_request = None;
+        let mut page_request = None;
         {
             let Some(tab) = self.tabs.get_mut(&tab_id) else {
                 return;
@@ -734,7 +771,8 @@ impl QueryEditor {
             });
             ui.separator();
 
-            let Some(result) = tab.results.get_mut(tab.selected_result) else {
+            let result_index = tab.selected_result;
+            let Some(result) = tab.results.get_mut(result_index) else {
                 return;
             };
 
@@ -774,9 +812,16 @@ impl QueryEditor {
             }
 
             match &mut result.grid {
-                Some(grid) => {
-                    let _ = grid.ui(ui);
-                }
+                Some(grid) => match grid.ui(ui) {
+                    Some(ResultSetGridAction::Message(message)) => {
+                        self.status = message;
+                    }
+                    Some(ResultSetGridAction::PageRequested { offset, page_size }) => {
+                        page_request =
+                            Some((result_index, result.statement.clone(), offset, page_size));
+                    }
+                    None => {}
+                },
                 None => {
                     ui.label("Statement executed without a tabular result.");
                 }
@@ -785,6 +830,9 @@ impl QueryEditor {
 
         if let Some((query_result, format)) = export_request {
             self.export_query_result(query_result, format);
+        }
+        if let Some((result_index, statement, offset, page_size)) = page_request {
+            self.execute_result_page(tab_id, result_index, statement, offset, page_size);
         }
     }
 
@@ -897,6 +945,8 @@ impl QueryEditor {
                 30_000
             },
             result_limit: Some(DEFAULT_QUERY_RESULT_LIMIT),
+            result_offset: 0,
+            result_total_rows: None,
         };
 
         self.status = match mode {
@@ -935,11 +985,65 @@ impl QueryEditor {
             selection: None,
             timeout_ms: 60_000,
             result_limit: None,
+            result_offset: 0,
+            result_total_rows: None,
         };
         self.status = format!("{label} running...");
         self.runtime.spawn(async move {
             let result = service.execute(request, None).await;
             let _ = tx.send(QueryEditorEvent::ExecutionCompleted(tab_id, result));
+        });
+    }
+
+    fn execute_result_page(
+        &mut self,
+        tab_id: QueryId,
+        result_index: usize,
+        sql: String,
+        offset: u64,
+        page_size: u32,
+    ) {
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return;
+        };
+
+        tab.execution_running = true;
+        tab.execution_cancelling = false;
+        tab.execution_error = None;
+
+        let tx = self.tx.clone();
+        let service = self.query_service.clone();
+        let request = QueryExecutionRequest {
+            tab_id,
+            connection_id: tab.connection_id,
+            database: tab.database.clone(),
+            schema: tab.schema.clone(),
+            sql,
+            mode: QueryExecutionMode::All,
+            cursor_offset: 0,
+            selection: None,
+            timeout_ms: 30_000,
+            result_limit: Some(page_size),
+            result_offset: offset,
+            result_total_rows: tab
+                .results
+                .get(result_index)
+                .and_then(|view| view.grid.as_ref())
+                .and_then(|grid| {
+                    grid.result()
+                        .metadata
+                        .get(QUERY_RESULT_METADATA_TOTAL_ROWS)
+                        .and_then(|value| value.parse::<u64>().ok())
+                }),
+        };
+        self.status = "Loading result page...".to_string();
+        self.runtime.spawn(async move {
+            let result = service.execute(request, None).await;
+            let _ = tx.send(QueryEditorEvent::ResultPageCompleted(
+                tab_id,
+                result_index,
+                result,
+            ));
         });
     }
 
@@ -1097,16 +1201,8 @@ impl QueryEditor {
                                     .results
                                     .iter()
                                     .enumerate()
-                                    .map(|(index, result)| QueryResultView {
-                                        statement: result.statement.clone(),
-                                        summary: result_tab_summary(index, result),
-                                        grid: (!result.columns.is_empty()).then(|| {
-                                            ResultSetGrid::new(result.clone())
-                                                .with_runtime(self.runtime.clone())
-                                        }),
-                                        affected_rows: result.affected_rows,
-                                        elapsed_ms: result.execution_time_ms,
-                                        notices: result.notices.clone(),
+                                    .map(|(index, result)| {
+                                        query_result_view(index, result, self.runtime.clone())
                                     })
                                     .collect::<Vec<_>>();
                                 tab.selected_result = 0;
@@ -1128,6 +1224,37 @@ impl QueryEditor {
                                     tab.execution_error = Some(error.message.clone());
                                     self.status = format!("Execution failed: {}", error.message);
                                 }
+                            }
+                        }
+                    }
+                    self.load_history();
+                }
+                QueryEditorEvent::ResultPageCompleted(tab_id, result_index, result) => {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.execution_running = false;
+                        tab.execution_cancelling = false;
+                        match result {
+                            Ok(report) => {
+                                if let Some(result) = report.results.first() {
+                                    if let Some(slot) = tab.results.get_mut(result_index) {
+                                        *slot = query_result_view(
+                                            result_index,
+                                            result,
+                                            self.runtime.clone(),
+                                        );
+                                        tab.selected_result = result_index;
+                                        tab.execution_report = Some(report.clone());
+                                        self.status = format!(
+                                            "Loaded result page in {} ms",
+                                            report.elapsed_ms
+                                        );
+                                    }
+                                } else {
+                                    self.status = "Result page returned no data".to_string();
+                                }
+                            }
+                            Err(error) => {
+                                self.status = format!("Page load failed: {}", error.message);
                             }
                         }
                     }
@@ -1567,6 +1694,10 @@ fn connection_kind_for(
         .map(|conn| conn.kind)
 }
 
+fn supports_schema_selector(kind: DataSourceKind) -> bool {
+    matches!(kind, DataSourceKind::PostgreSql | DataSourceKind::DuckDb)
+}
+
 fn selected_sql_for_mode(tab: &QueryEditorTab, mode: QueryExecutionMode) -> Option<String> {
     match mode {
         QueryExecutionMode::CurrentStatement => statement_at_offset(&tab.sql, tab.cursor_offset),
@@ -1580,10 +1711,40 @@ fn selected_sql_for_mode(tab: &QueryEditorTab, mode: QueryExecutionMode) -> Opti
     }
 }
 
+fn query_result_view(
+    index: usize,
+    result: &db_common::QueryResult,
+    runtime: Handle,
+) -> QueryResultView {
+    QueryResultView {
+        statement: result.statement.clone(),
+        summary: result_tab_summary(index, result),
+        grid: (!result.columns.is_empty())
+            .then(|| ResultSetGrid::new(result.clone()).with_runtime(runtime)),
+        affected_rows: result.affected_rows,
+        elapsed_ms: result.execution_time_ms,
+        notices: result.notices.clone(),
+    }
+}
+
 fn result_tab_summary(index: usize, result: &db_common::QueryResult) -> String {
     let statement = compact_statement_preview(&result.statement, 32);
     if !result.columns.is_empty() {
-        format!("{} {} ({} rows)", index + 1, statement, result.rows.len())
+        if let Some(total_rows) = result
+            .metadata
+            .get(QUERY_RESULT_METADATA_TOTAL_ROWS)
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            format!(
+                "{} {} ({} / {} rows)",
+                index + 1,
+                statement,
+                result.rows.len(),
+                total_rows
+            )
+        } else {
+            format!("{} {} ({} rows)", index + 1, statement, result.rows.len())
+        }
     } else {
         format!(
             "{} {} ({} affected)",

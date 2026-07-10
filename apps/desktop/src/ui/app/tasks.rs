@@ -293,7 +293,7 @@ impl DesktopApp {
                 }
                 _ => dialect.quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
             };
-            let sql = format!("SELECT * FROM {} LIMIT 500", qualified);
+            let sql = format!("SELECT * FROM {}", qualified);
 
             let columns_future = metadata_service.table_columns(
                 connection_id,
@@ -312,7 +312,9 @@ impl DesktopApp {
                 cursor_offset: 0,
                 selection: None,
                 timeout_ms: 30000,
-                result_limit: None,
+                result_limit: Some(500),
+                result_offset: 0,
+                result_total_rows: None,
             };
             let query_future = query_service.execute(request, None);
 
@@ -481,6 +483,8 @@ impl DesktopApp {
                         selection: None,
                         timeout_ms: 60_000,
                         result_limit: None,
+                        result_offset: 0,
+                        result_total_rows: None,
                     },
                     None,
                 )
@@ -580,6 +584,8 @@ impl DesktopApp {
                             selection: None,
                             timeout_ms: 60_000,
                             result_limit: None,
+                            result_offset: 0,
+                            result_total_rows: None,
                         },
                         None,
                     )
@@ -633,6 +639,8 @@ impl DesktopApp {
                             selection: None,
                             timeout_ms: 60_000,
                             result_limit: None,
+                            result_offset: 0,
+                            result_total_rows: None,
                         },
                         None,
                     )

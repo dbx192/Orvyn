@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+pub const QUERY_RESULT_METADATA_PAGE_LIMIT: &str = "page.limit";
+pub const QUERY_RESULT_METADATA_PAGE_OFFSET: &str = "page.offset";
+pub const QUERY_RESULT_METADATA_TOTAL_ROWS: &str = "page.total_rows";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogicalType {
     Null,

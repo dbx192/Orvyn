@@ -7,11 +7,13 @@ use crate::connection::ConnectionManager;
 use crate::storage::{FavoriteQueryStore, QueryHistoryStore};
 use crate::task::TaskManager;
 use db_common::{
-    highlight_sql, limit_result_preview_statement, split_statements, statement_at_offset,
-    statement_summary, unsupported_kind, AppError, ConnectionId, ConnectionPoolConfig,
-    ConnectionPoolStats, DataSourceKind, ErrorKind, FavoriteQuery, PageSize, QueryExecutionMode,
-    QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId, QueryResult, QueryTab,
-    RelationalQueryExecutor, Result, SqlHighlightToken, TextRange,
+    count_result_page_statement, highlight_sql, page_result_statement, split_statements,
+    statement_at_offset, statement_summary, unsupported_kind, AppError, CellValue, ConnectionId,
+    ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind, FavoriteQuery, PageSize,
+    QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
+    QueryResult, QueryTab, RelationalQueryExecutor, Result, SqlHighlightToken, TextRange,
+    QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
+    QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -260,8 +262,13 @@ impl QueryService {
         runtime_password: Option<&str>,
     ) -> Result<QueryExecutionReport> {
         let statements = statements_for_request(&request)?;
-        let (execution_statements, limited_statements) =
-            statements_for_execution(&statements, request.result_limit)?;
+        let execution_plan =
+            execution_plan_for(
+                &statements,
+                request.result_limit,
+                request.result_offset,
+                request.result_total_rows,
+            )?;
         let (mut profile, password) = self
             .connections
             .profile_with_password(request.connection_id, runtime_password)
@@ -276,8 +283,9 @@ impl QueryService {
         let executor = self.executor(profile.kind)?;
         let execution_id = QueryId::new();
         let started_at = Instant::now();
+        let record_history = request.result_offset == 0;
         let request_for_task = request.clone();
-        let statements_for_task = execution_statements.clone();
+        let statements_for_task = execution_plan.execution_statements.clone();
         let pool_config = self.pool_config;
         let password_for_task = password;
 
@@ -313,24 +321,28 @@ impl QueryService {
 
         let elapsed_ms = started_at.elapsed().as_millis();
         match result {
-            Ok(Ok(mut results)) => {
+            Ok(Ok(results)) => {
                 self.state.lock().await.running.remove(&request.tab_id);
-                add_result_limit_notices(&mut results, &limited_statements);
+                let results = execution_plan.into_report_results(results)?;
                 let report = QueryExecutionReport::new(
                     execution_id,
                     &request,
-                    execution_statements,
+                    statements,
                     results,
                     elapsed_ms,
                 );
-                self.record_history(&request, &report, None).await;
+                if record_history {
+                    self.record_history(&request, &report, None).await;
+                }
                 info!(execution_id = %execution_id, elapsed_ms, "query execution finished");
                 Ok(report)
             }
             Ok(Err(error)) | Err(error) => {
                 self.state.lock().await.running.remove(&request.tab_id);
-                self.record_failed_history(&request, &execution_statements, elapsed_ms, &error)
-                    .await;
+                if record_history {
+                    self.record_failed_history(&request, &statements, elapsed_ms, &error)
+                        .await;
+                }
                 Err(error)
             }
         }
@@ -362,6 +374,8 @@ impl QueryService {
             selection: tab.selection,
             timeout_ms,
             result_limit: None,
+            result_offset: 0,
+            result_total_rows: None,
         };
         self.execute(request, runtime_password).await
     }
@@ -623,38 +637,181 @@ fn statements_for_request(request: &QueryExecutionRequest) -> Result<Vec<String>
     Ok(statements)
 }
 
-fn statements_for_execution(
-    statements: &[String],
-    result_limit: Option<u32>,
-) -> Result<(Vec<String>, Vec<Option<u32>>)> {
-    let Some(limit) = result_limit else {
-        return Ok((statements.to_vec(), vec![None; statements.len()]));
-    };
-    let limit = PageSize::new(limit)?.get();
-    let mut execution_statements = Vec::with_capacity(statements.len());
-    let mut limited_statements = Vec::with_capacity(statements.len());
-
-    for statement in statements {
-        if let Some(limited_statement) = limit_result_preview_statement(statement, limit) {
-            execution_statements.push(limited_statement);
-            limited_statements.push(Some(limit));
-        } else {
-            execution_statements.push(statement.clone());
-            limited_statements.push(None);
-        }
-    }
-
-    Ok((execution_statements, limited_statements))
+struct ExecutionPlan {
+    execution_statements: Vec<String>,
+    result_plans: Vec<ResultPlan>,
 }
 
-fn add_result_limit_notices(results: &mut [QueryResult], limited_statements: &[Option<u32>]) {
-    for (result, limit) in results.iter_mut().zip(limited_statements) {
-        if let Some(limit) = limit {
-            result.notices.push(format!(
-                "Result preview limited to first {limit} rows. Add an explicit LIMIT to control the row count."
+enum ResultPlan {
+    Direct {
+        statement: String,
+    },
+    Paged {
+        statement: String,
+        limit: u32,
+        offset: u64,
+        total_rows: Option<u64>,
+    },
+}
+
+impl ExecutionPlan {
+    fn into_report_results(self, execution_results: Vec<QueryResult>) -> Result<Vec<QueryResult>> {
+        let mut results = Vec::with_capacity(self.result_plans.len());
+        let mut execution_results = execution_results.into_iter();
+
+        for plan in self.result_plans {
+            match plan {
+                ResultPlan::Direct { statement } => {
+                    let mut result = execution_results.next().ok_or_else(|| {
+                        AppError::new(ErrorKind::Internal, "query result count mismatch")
+                    })?;
+                    result.statement = statement;
+                    results.push(result);
+                }
+                ResultPlan::Paged {
+                    statement,
+                    limit,
+                    offset,
+                    total_rows,
+                } => {
+                    let (total_rows, count_execution_time_ms) = if let Some(total_rows) = total_rows
+                    {
+                        (total_rows, 0)
+                    } else {
+                        let count_result = execution_results.next().ok_or_else(|| {
+                            AppError::new(ErrorKind::Internal, "query count result missing")
+                        })?;
+                        let total_rows = query_count_from_result(&count_result)?;
+                        (total_rows, count_result.execution_time_ms)
+                    };
+                    let mut page_result = execution_results.next().ok_or_else(|| {
+                        AppError::new(ErrorKind::Internal, "query page result missing")
+                    })?;
+                    page_result.statement = statement;
+                    page_result.execution_time_ms += count_execution_time_ms;
+                    page_result.metadata.insert(
+                        QUERY_RESULT_METADATA_PAGE_LIMIT.to_string(),
+                        limit.to_string(),
+                    );
+                    page_result.metadata.insert(
+                        QUERY_RESULT_METADATA_PAGE_OFFSET.to_string(),
+                        offset.to_string(),
+                    );
+                    page_result.metadata.insert(
+                        QUERY_RESULT_METADATA_TOTAL_ROWS.to_string(),
+                        total_rows.to_string(),
+                    );
+                    page_result.notices.push(page_notice(
+                        offset,
+                        page_result.rows.len() as u64,
+                        total_rows,
+                    ));
+                    results.push(page_result);
+                }
+            }
+        }
+
+        if execution_results.next().is_some() {
+            return Err(AppError::new(
+                ErrorKind::Internal,
+                "query returned more result sets than expected",
             ));
         }
+
+        Ok(results)
     }
+}
+
+fn execution_plan_for(
+    statements: &[String],
+    result_limit: Option<u32>,
+    result_offset: u64,
+    result_total_rows: Option<u64>,
+) -> Result<ExecutionPlan> {
+    let mut execution_statements = Vec::with_capacity(statements.len());
+    let mut result_plans = Vec::with_capacity(statements.len());
+
+    for statement in statements {
+        let Some(limit) = result_limit else {
+            execution_statements.push(statement.clone());
+            result_plans.push(ResultPlan::Direct {
+                statement: statement.clone(),
+            });
+            continue;
+        };
+
+        let limit = PageSize::new(limit)?.get();
+        let Some(page_statement) = page_result_statement(statement, limit, result_offset) else {
+            execution_statements.push(statement.clone());
+            result_plans.push(ResultPlan::Direct {
+                statement: statement.clone(),
+            });
+            continue;
+        };
+
+        let total_rows = if result_offset == 0 {
+            None
+        } else {
+            result_total_rows
+        };
+        if total_rows.is_none() {
+            let Some(count_statement) = count_result_page_statement(statement) else {
+                execution_statements.push(statement.clone());
+                result_plans.push(ResultPlan::Direct {
+                    statement: statement.clone(),
+                });
+                continue;
+            };
+            execution_statements.push(count_statement);
+        }
+        execution_statements.push(page_statement);
+        result_plans.push(ResultPlan::Paged {
+            statement: statement.clone(),
+            limit,
+            offset: result_offset,
+            total_rows,
+        });
+    }
+
+    Ok(ExecutionPlan {
+        execution_statements,
+        result_plans,
+    })
+}
+
+fn query_count_from_result(result: &QueryResult) -> Result<u64> {
+    let value = result
+        .rows
+        .first()
+        .and_then(|row| row.values.first())
+        .ok_or_else(|| AppError::new(ErrorKind::Query, "failed to read query row count"))?;
+
+    match value {
+        CellValue::UInt(value) => Ok(*value),
+        CellValue::Int(value) if *value >= 0 => Ok(*value as u64),
+        CellValue::Text(value) | CellValue::Decimal(value) => {
+            value.parse::<u64>().map_err(|error| {
+                AppError::new(ErrorKind::Query, "failed to parse query row count")
+                    .with_detail(error.to_string())
+            })
+        }
+        _ => Err(AppError::new(
+            ErrorKind::Query,
+            "query row count had an unsupported type",
+        )),
+    }
+}
+
+fn page_notice(offset: u64, row_count: u64, total_rows: u64) -> String {
+    if row_count == 0 || total_rows == 0 {
+        return format!("Showing 0 rows of {total_rows}.");
+    }
+
+    format!(
+        "Showing rows {}-{} of {total_rows}.",
+        offset + 1,
+        offset + row_count
+    )
 }
 
 fn push_history(history: &mut VecDeque<QueryHistoryEntry>, entry: QueryHistoryEntry) {
@@ -683,6 +840,8 @@ mod tests {
             selection: None,
             timeout_ms: 1000,
             result_limit: None,
+            result_offset: 0,
+            result_total_rows: None,
         };
 
         assert_eq!(statements_for_request(&request).unwrap(), vec!["select 2"]);
@@ -702,30 +861,34 @@ mod tests {
             selection: Some(TextRange::new(10, 18)),
             timeout_ms: 1000,
             result_limit: None,
+            result_offset: 0,
+            result_total_rows: None,
         };
 
         assert_eq!(statements_for_request(&request).unwrap(), vec!["select 2"]);
     }
 
     #[test]
-    fn applies_preview_limit_to_unlimited_selects() {
+    fn builds_count_and_page_execution_plan_for_selects() {
         let statements = vec!["select * from books".to_string()];
 
-        let (execution_statements, limited_statements) =
-            statements_for_execution(&statements, Some(500)).unwrap();
+        let plan = execution_plan_for(&statements, Some(500), 1_000, None).unwrap();
 
-        assert_eq!(execution_statements, vec!["select * from books\nLIMIT 500"]);
-        assert_eq!(limited_statements, vec![Some(500)]);
+        assert_eq!(
+            plan.execution_statements,
+            vec![
+                "SELECT COUNT(*) AS total_rows FROM (select * from books) AS __query_count",
+                "SELECT * FROM (select * from books) AS __query_page LIMIT 500 OFFSET 1000"
+            ]
+        );
     }
 
     #[test]
-    fn does_not_apply_preview_limit_when_sql_has_explicit_limit() {
+    fn direct_execution_plan_when_query_is_not_pageable() {
         let statements = vec!["select * from books limit 25".to_string()];
 
-        let (execution_statements, limited_statements) =
-            statements_for_execution(&statements, Some(500)).unwrap();
+        let plan = execution_plan_for(&statements, None, 0, None).unwrap();
 
-        assert_eq!(execution_statements, statements);
-        assert_eq!(limited_statements, vec![None]);
+        assert_eq!(plan.execution_statements, statements);
     }
 }

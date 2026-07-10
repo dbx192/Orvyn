@@ -13,6 +13,8 @@ use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use db_common::{
     CellValue, ConnectionId, Dialect, Identifier, LogicalType, QueryExecutionMode,
     QueryExecutionRequest, QueryId, QueryResult, Result, Row, TableColumn,
+    QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
+    QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use eframe::egui::{
     pos2, vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Key, Layout, Margin,
@@ -77,6 +79,13 @@ struct TimePickerState {
     hour: u32,
     minute: u32,
     second: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemotePage {
+    limit: usize,
+    offset: u64,
+    total_rows: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +156,7 @@ pub struct TableEditor {
     error_row_index: Option<usize>,
     last_commit_result: Option<(usize, Vec<usize>)>,
     pending_refresh_page: Option<usize>,
+    pending_page_load: Option<Arc<Mutex<Option<Result<QueryResult>>>>>,
     table_hovered_last_frame: bool,
     hovered_dirty_cell: Option<CellKey>,
     hovered_dirty_new_row: Option<usize>,
@@ -161,6 +171,8 @@ impl TableEditor {
         dialect: Box<dyn Dialect>,
     ) -> Self {
         let column_widths = estimate_column_widths(&columns, &result);
+        let page = page_index_from_result(&result);
+        let page_size = page_size_from_result(&result);
 
         Self {
             schema: Some(schema.into()),
@@ -169,8 +181,8 @@ impl TableEditor {
             result,
             dialect,
             column_widths,
-            page: 0,
-            page_size: DEFAULT_PAGE_SIZE,
+            page,
+            page_size,
             filter_column: 0,
             filter_text: String::new(),
             sort: None,
@@ -194,6 +206,7 @@ impl TableEditor {
             error_row_index: None,
             last_commit_result: None,
             pending_refresh_page: None,
+            pending_page_load: None,
             table_hovered_last_frame: false,
             hovered_dirty_cell: None,
             hovered_dirty_new_row: None,
@@ -229,7 +242,7 @@ impl TableEditor {
     }
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
-        let mut message = self.poll_commit();
+        let mut message = self.poll_commit().or_else(|| self.poll_page_load());
 
         if self.show_commit_dialog {
             self.commit_dialog(ui, &mut message);
@@ -409,6 +422,30 @@ impl TableEditor {
         }
     }
 
+    fn poll_page_load(&mut self) -> Option<String> {
+        let Some(cell) = self.pending_page_load.take() else {
+            return None;
+        };
+
+        let poll_result = if let Ok(mut guard) = cell.lock() {
+            guard.take()
+        } else {
+            return Some("Internal error: page result lock poisoned".to_string());
+        };
+
+        match poll_result {
+            Some(Ok(result)) => {
+                self.replace_page_result(result);
+                Some(format!("Loaded page {} for {}", self.page + 1, self.table_name()))
+            }
+            Some(Err(error)) => Some(format!("Failed to load page: {}", error.message)),
+            None => {
+                self.pending_page_load = Some(cell);
+                None
+            }
+        }
+    }
+
     /// Replace the current dataset with freshly loaded data from the backend.
     pub fn load_data(
         &mut self,
@@ -421,18 +458,30 @@ impl TableEditor {
         self.schema = schema;
         self.table = table;
         self.columns = columns;
-        self.result = result;
-        self.page = self
-            .pending_refresh_page
-            .take()
-            .unwrap_or(0)
-            .min(self.total_pages().saturating_sub(1));
+        self.replace_page_result(result);
+        if self.remote_page().is_none() {
+            self.page = self
+                .pending_refresh_page
+                .take()
+                .unwrap_or(0)
+                .min(self.total_pages().saturating_sub(1));
+        }
         self.filter_text.clear();
         self.sort = None;
         self.scroll_x = 0.0;
         self.clear_changes();
         self.commit_state = CommitState::Idle;
         self.last_commit_result = None;
+    }
+
+    fn replace_page_result(&mut self, result: QueryResult) {
+        self.page_size = page_size_from_result(&result);
+        self.page = page_index_from_result(&result);
+        self.result = result;
+        self.selected_row = None;
+        self.selected_rows.clear();
+        self.hovered_dirty_cell = None;
+        self.hovered_dirty_new_row = None;
     }
 
     /// Return the fully qualified table name.
@@ -451,24 +500,32 @@ impl TableEditor {
         )
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
+    fn toolbar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(self.table_name()).strong());
-            ui.label(
-                RichText::new(format!("{} rows", self.filtered_existing_rows().len()))
-                    .small()
-                    .color(Color32::GRAY),
-            );
+            if let Some(total_rows) = self.remote_total_rows() {
+                ui.label(
+                    RichText::new(format!("{} / {} rows", self.result.rows.len(), total_rows))
+                        .small()
+                        .color(Color32::GRAY),
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!("{} rows", self.filtered_existing_rows().len()))
+                        .small()
+                        .color(Color32::GRAY),
+                );
+            }
             ui.separator();
             if ui.add_enabled(self.page > 0, Button::new("Prev")).clicked() {
-                self.page -= 1;
+                self.change_page(self.page.saturating_sub(1), message);
             }
             ui.label(format!("{} / {}", self.page + 1, self.total_pages().max(1)));
             if ui
                 .add_enabled(self.page + 1 < self.total_pages(), Button::new("Next"))
                 .clicked()
             {
-                self.page += 1;
+                self.change_page(self.page + 1, message);
             }
 
             let old_page_size = self.page_size;
@@ -479,7 +536,11 @@ impl TableEditor {
             );
             if old_page_size != self.page_size {
                 self.page_size = self.page_size.clamp(25, 1000);
-                self.page = self.page.min(self.total_pages().saturating_sub(1));
+                if self.remote_page().is_some() {
+                    self.request_remote_page(0, self.page_size as u32, message);
+                } else {
+                    self.page = self.page.min(self.total_pages().saturating_sub(1));
+                }
             }
 
             ui.separator();
@@ -520,6 +581,9 @@ impl TableEditor {
             if self.is_committing() {
                 ui.colored_label(Color32::YELLOW, "Saving...");
             }
+            if self.pending_page_load.is_some() {
+                ui.colored_label(Color32::YELLOW, "Loading page...");
+            }
             let pending = self.pending_change_count();
             if pending > 0 {
                 ui.label(
@@ -529,6 +593,14 @@ impl TableEditor {
                 );
             }
         });
+    }
+
+    fn change_page(&mut self, next_page: usize, message: &mut Option<String>) {
+        if self.remote_page().is_some() {
+            self.request_remote_page(next_page, self.page_size as u32, message);
+        } else {
+            self.page = next_page.min(self.total_pages().saturating_sub(1));
+        }
     }
 
     fn row_actions_bar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
@@ -1037,6 +1109,8 @@ impl TableEditor {
                         selection: None,
                         timeout_ms: 30000,
                         result_limit: None,
+                        result_offset: 0,
+                        result_total_rows: None,
                     },
                     None,
                 )
@@ -1116,21 +1190,10 @@ impl TableEditor {
         let database = self.database.clone();
         let schema = self.schema.clone();
         let table = self.table.clone();
-        let qualified = match schema.as_deref().filter(|value| !value.is_empty()) {
-            Some(schema_name) => {
-                format!(
-                    "{}.{}",
-                    self.dialect
-                        .quote_identifier(&Identifier::new(schema_name).unwrap()),
-                    self.dialect
-                        .quote_identifier(&Identifier::new(&table).unwrap()),
-                )
-            }
-            None => self
-                .dialect
-                .quote_identifier(&Identifier::new(&table).unwrap()),
-        };
-        let sql = format!("SELECT * FROM {} LIMIT 500", qualified);
+        let sql = format!(
+            "SELECT * FROM {}",
+            self.qualified_table_name().unwrap_or(table.clone())
+        );
 
         let cell = Arc::new(Mutex::new(None::<Result<(Vec<TableColumn>, QueryResult)>>));
         let cell_for_task = cell.clone();
@@ -1154,7 +1217,9 @@ impl TableEditor {
                     cursor_offset: 0,
                     selection: None,
                     timeout_ms: 30_000,
-                    result_limit: None,
+                    result_limit: Some(DEFAULT_PAGE_SIZE as u32),
+                    result_offset: 0,
+                    result_total_rows: None,
                 },
                 None,
             );
@@ -1173,6 +1238,79 @@ impl TableEditor {
             *cell_for_task.lock().unwrap() = Some(result);
         });
         self.commit_state = CommitState::Refreshing(cell);
+    }
+
+    fn request_remote_page(
+        &mut self,
+        next_page: usize,
+        page_size: u32,
+        message: &mut Option<String>,
+    ) {
+        if self.has_changes() {
+            *message = Some("Save current table changes before paging".to_string());
+            return;
+        }
+        if self.pending_page_load.is_some() || self.is_committing() {
+            return;
+        }
+
+        let Some(query_service) = self.query_service.clone() else {
+            self.page = next_page.min(self.total_pages().saturating_sub(1));
+            return;
+        };
+        let Some(connection_id) = self.connection_id else {
+            self.page = next_page.min(self.total_pages().saturating_sub(1));
+            return;
+        };
+        let Some(runtime) = self.runtime.clone() else {
+            self.page = next_page.min(self.total_pages().saturating_sub(1));
+            return;
+        };
+
+        let database = self.database.clone();
+        let schema = self.schema.clone();
+        let Ok(table_sql) = self.qualified_table_name() else {
+            *message = Some("Failed to build table SQL".to_string());
+            return;
+        };
+        let sql = format!("SELECT * FROM {}", table_sql);
+        let offset = (next_page as u64).saturating_mul(u64::from(page_size));
+        let total_rows = self.remote_total_rows();
+        let cell = Arc::new(Mutex::new(None::<Result<QueryResult>>));
+        let cell_for_task = cell.clone();
+
+        runtime.spawn(async move {
+            let result = query_service
+                .execute(
+                    QueryExecutionRequest {
+                        tab_id: QueryId::new(),
+                        connection_id,
+                        database,
+                        schema,
+                        sql,
+                        mode: QueryExecutionMode::All,
+                        cursor_offset: 0,
+                        selection: None,
+                        timeout_ms: 30_000,
+                        result_limit: Some(page_size),
+                        result_offset: offset,
+                        result_total_rows: total_rows,
+                    },
+                    None,
+                )
+                .await
+                .map(|report| {
+                    report
+                        .results
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| QueryResult::empty(""))
+                });
+            *cell_for_task.lock().unwrap() = Some(result);
+        });
+
+        self.pending_page_load = Some(cell);
+        *message = Some(format!("Loading page {}...", next_page + 1));
     }
 
     fn build_change_summary(&self) -> ChangeSummary {
@@ -1825,11 +1963,19 @@ impl TableEditor {
             rows.sort_by(|left, right| self.compare_rows(*left, *right, sort));
         }
 
-        let start = self.page.saturating_mul(self.page_size);
-        rows.into_iter()
-            .skip(start)
-            .take(self.page_size)
-            .map(RowKey::Existing)
+        let existing_rows = if self.remote_page().is_some() {
+            rows.into_iter().map(RowKey::Existing).collect::<Vec<_>>()
+        } else {
+            let start = self.page.saturating_mul(self.page_size);
+            rows.into_iter()
+                .skip(start)
+                .take(self.page_size)
+                .map(RowKey::Existing)
+                .collect::<Vec<_>>()
+        };
+
+        existing_rows
+            .into_iter()
             .chain((0..self.new_rows.len()).map(RowKey::New))
             .collect()
     }
@@ -1857,9 +2003,13 @@ impl TableEditor {
     }
 
     fn total_pages(&self) -> usize {
-        self.filtered_existing_rows()
-            .len()
-            .div_ceil(self.page_size.max(1))
+        if let Some(remote_page) = self.remote_page() {
+            remote_page.total_rows.div_ceil(self.page_size.max(1) as u64) as usize
+        } else {
+            self.filtered_existing_rows()
+                .len()
+                .div_ceil(self.page_size.max(1))
+        }
     }
 
     fn toggle_sort(&mut self, column: usize) {
@@ -2080,10 +2230,59 @@ impl TableEditor {
         Ok(output)
     }
 
+    fn remote_page(&self) -> Option<RemotePage> {
+        let limit = self
+            .result
+            .metadata
+            .get(QUERY_RESULT_METADATA_PAGE_LIMIT)?
+            .parse::<usize>()
+            .ok()?;
+        let offset = self
+            .result
+            .metadata
+            .get(QUERY_RESULT_METADATA_PAGE_OFFSET)?
+            .parse::<u64>()
+            .ok()?;
+        let total_rows = self
+            .result
+            .metadata
+            .get(QUERY_RESULT_METADATA_TOTAL_ROWS)?
+            .parse::<u64>()
+            .ok()?;
+        Some(RemotePage {
+            limit,
+            offset,
+            total_rows,
+        })
+    }
+
+    fn remote_total_rows(&self) -> Option<u64> {
+        self.remote_page().map(|page| page.total_rows)
+    }
+
     fn quote_identifier(&self, value: &str) -> std::result::Result<String, String> {
         let identifier = Identifier::new(value.to_string()).map_err(|error| error.message)?;
         Ok(self.dialect.quote_identifier(&identifier))
     }
+}
+
+fn page_size_from_result(result: &QueryResult) -> usize {
+    result
+        .metadata
+        .get(QUERY_RESULT_METADATA_PAGE_LIMIT)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+}
+
+fn page_index_from_result(result: &QueryResult) -> usize {
+    let page_size = page_size_from_result(result).max(1);
+    result
+        .metadata
+        .get(QUERY_RESULT_METADATA_PAGE_OFFSET)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|offset| (offset as usize) / page_size)
+        .unwrap_or(0)
 }
 
 impl TimePickerState {

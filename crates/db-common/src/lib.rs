@@ -35,12 +35,15 @@ pub use query::{
     DEFAULT_QUERY_RESULT_LIMIT, DEFAULT_QUERY_TIMEOUT_MS,
 };
 pub use redaction::{mask_secret, redact_connection_url, SecretString};
-pub use result_set::{CellValue, Column, LogicalType, QueryResult, Row};
+pub use result_set::{
+    CellValue, Column, LogicalType, QueryResult, Row, QUERY_RESULT_METADATA_PAGE_LIMIT,
+    QUERY_RESULT_METADATA_PAGE_OFFSET, QUERY_RESULT_METADATA_TOTAL_ROWS,
+};
 pub use session::{SessionInfo, SessionState, TaskInfo, TaskKind, TaskProgress, TaskStatus};
 pub use sql::{
-    highlight_sql, is_result_set_statement, limit_result_preview_statement,
-    looks_like_unqualified_mutation, split_statements, statement_at_offset, statement_summary,
-    trim_sql,
+    count_result_page_statement, highlight_sql, is_result_set_statement,
+    limit_result_preview_statement, looks_like_unqualified_mutation, page_result_statement,
+    split_statements, statement_at_offset, statement_summary, trim_sql,
 };
 pub use time::{elapsed_ms, now_utc};
 pub use traits::{

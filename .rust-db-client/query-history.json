@@ -1,6 +1,105 @@
 {
   "entries": [
     {
+      "id": "b5031281-e028-4672-946e-bb15721b062f",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `askme`.`acms_comments` LIMIT 500",
+      "summary": "SELECT * FROM `askme`.`acms_comments` LIMIT 500",
+      "executed_at": "2026-07-10T09:04:01.589571Z",
+      "elapsed_ms": 44,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "f5deaa57-e135-4143-93ab-6f339f451588",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "select * from books",
+      "summary": "select * from books",
+      "executed_at": "2026-07-10T09:03:31.382043900Z",
+      "elapsed_ms": 2082,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "2fbbe13d-323c-405a-b18b-f04fe9c3890f",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "select count(*) from books",
+      "summary": "select count(*) from books",
+      "executed_at": "2026-07-10T09:03:17.678568500Z",
+      "elapsed_ms": 4178,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "a7b511a4-d0ff-4886-9d9c-855e5e6efbe5",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `askme`.`acms_comments` LIMIT 500",
+      "summary": "SELECT * FROM `askme`.`acms_comments` LIMIT 500",
+      "executed_at": "2026-07-10T09:03:06.908498100Z",
+      "elapsed_ms": 65,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "e9767072-c0db-4f16-be72-1c16c7160c89",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `askme`.`acms_tags` LIMIT 500",
+      "summary": "SELECT * FROM `askme`.`acms_tags` LIMIT 500",
+      "executed_at": "2026-07-10T09:03:03.928045700Z",
+      "elapsed_ms": 177,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "650e122c-e625-43b9-9be1-c0bd45c1c7f9",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "select count(*) from books",
+      "summary": "select count(*) from books",
+      "executed_at": "2026-07-10T08:44:24.440664100Z",
+      "elapsed_ms": 4122,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "b5bb2454-8b5c-4852-8f0c-43564b3dd491",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "select * from books",
+      "summary": "select * from books",
+      "executed_at": "2026-07-10T08:41:28.272349100Z",
+      "elapsed_ms": 25020,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "id": "20ca2908-bc80-4e6a-bc65-d035cafc48f1",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "select * from books",
+      "summary": "select * from books",
+      "executed_at": "2026-07-10T08:40:52.652381500Z",
+      "elapsed_ms": 194,
+      "affected_rows": 0,
+      "success": false,
+      "error_message": "failed to query MySQL metadata"
+    },
+    {
+      "id": "9312298c-867d-40db-b0b0-7226579a62b4",
+      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
+      "sql": "SELECT * FROM `askme`.`books` LIMIT 500",
+      "summary": "SELECT * FROM `askme`.`books` LIMIT 500",
+      "executed_at": "2026-07-10T08:38:38.289354100Z",
+      "elapsed_ms": 280,
+      "affected_rows": 0,
+      "success": true,
+      "error_message": null
+    },
+    {
       "id": "ec7f8354-8aab-4609-a5df-8e82a5b3f2e7",
       "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
       "sql": "SELECT * FROM `askme`.`daily_calls` LIMIT 500",
@@ -997,105 +1096,6 @@
       "summary": "SELECT * FROM `askme`.`api_tokens` LIMIT 500",
       "executed_at": "2026-07-08T10:28:27.879426500Z",
       "elapsed_ms": 266,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "0978e6e8-e7f6-4f4c-a81e-a66ea5fb187d",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`wa_uploads` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`wa_uploads` LIMIT 500",
-      "executed_at": "2026-07-08T10:23:22.973183500Z",
-      "elapsed_ms": 44,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "36c1cb00-db41-4f23-8d3e-1743bcbb93d9",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`user_stock_strategy` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`user_stock_strategy` LIMIT 500",
-      "executed_at": "2026-07-08T10:23:17.111820400Z",
-      "elapsed_ms": 93,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "1133ca6c-ee88-4d27-ab58-20d9c4ebb1ae",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`wa_rules` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`wa_rules` LIMIT 500",
-      "executed_at": "2026-07-08T10:20:31.455135800Z",
-      "elapsed_ms": 146,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "b14906da-7d84-4f50-8067-5f07bf9ec319",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`wa_uploads` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`wa_uploads` LIMIT 500",
-      "executed_at": "2026-07-08T10:20:29.067031700Z",
-      "elapsed_ms": 107,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "1c9f8381-c852-4c1b-bae2-991f6f90f51e",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`omni_service` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`omni_service` LIMIT 500",
-      "executed_at": "2026-07-08T10:18:04.510395200Z",
-      "elapsed_ms": 44,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "1a7eee6e-bad5-4aaa-91af-f4c6cde615df",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`omni_schedule_exception` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`omni_schedule_exception` LIMIT 500",
-      "executed_at": "2026-07-08T10:18:03.408629800Z",
-      "elapsed_ms": 52,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "2831a4ad-230d-4218-89ff-bfe023215d56",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`omni_service` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`omni_service` LIMIT 500",
-      "executed_at": "2026-07-08T10:17:39.405986600Z",
-      "elapsed_ms": 86,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "815a799f-02f7-4d80-b4d2-097d338e66f8",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`omni_service_category` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`omni_service_category` LIMIT 500",
-      "executed_at": "2026-07-08T10:17:37.041899300Z",
-      "elapsed_ms": 84,
-      "affected_rows": 0,
-      "success": true,
-      "error_message": null
-    },
-    {
-      "id": "017d4807-6c5e-4e1b-830e-b30e2947cdee",
-      "connection_id": "b6b3542c-92cf-4fbd-9875-6a72851927fb",
-      "sql": "SELECT * FROM `base_webman`.`omni_schedule_exception` LIMIT 500",
-      "summary": "SELECT * FROM `base_webman`.`omni_schedule_exception` LIMIT 500",
-      "executed_at": "2026-07-08T10:17:22.961199500Z",
-      "elapsed_ms": 67,
       "affected_rows": 0,
       "success": true,
       "error_message": null
