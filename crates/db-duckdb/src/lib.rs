@@ -5,8 +5,8 @@ use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
     DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
-    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey,
-    TableIndex,
+    QueryId, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
+    TableForeignKey, TableIndex,
 };
 use std::{
     collections::BTreeMap,
@@ -26,6 +26,7 @@ pub struct DuckDbMetadataReader;
 #[derive(Debug, Clone, Default)]
 pub struct DuckDbQueryExecutor {
     pools: Arc<tokio::sync::Mutex<BTreeMap<ConnectionId, Arc<BlockingDuckDbPool>>>>,
+    transactions: Arc<Mutex<BTreeMap<QueryId, PooledDuckDbConnection>>>,
 }
 
 impl DuckDbQueryExecutor {
@@ -153,10 +154,10 @@ struct PooledDuckDbConnection {
 }
 
 impl PooledDuckDbConnection {
-    fn connection(&self) -> &duckdb::Connection {
+    fn connection(&self) -> Result<&duckdb::Connection> {
         self.conn
             .as_ref()
-            .expect("DuckDB pooled connection missing")
+            .ok_or_else(|| AppError::internal("DuckDB pooled connection missing"))
     }
 }
 
@@ -364,25 +365,7 @@ impl RelationalQueryExecutor for DuckDbQueryExecutor {
 
         tokio::task::spawn_blocking(move || {
             let pooled = pool.acquire()?;
-            let conn = pooled.connection();
-            let mut results = Vec::with_capacity(statements.len());
-
-            for statement in statements {
-                let started_at = Instant::now();
-                if is_result_set_statement(&statement) {
-                    results.push(
-                        duckdb_query_result(conn, &statement)?.with_elapsed(started_at.elapsed()),
-                    );
-                    continue;
-                }
-
-                let affected_rows = conn.execute(&statement, []).map_err(duckdb_query_error)?;
-                let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
-                result.affected_rows = affected_rows as u64;
-                results.push(result);
-            }
-
-            Ok(results)
+            execute_duckdb_statements(pooled.connection()?, &statements)
         })
         .await
         .map_err(|error| {
@@ -402,6 +385,121 @@ impl RelationalQueryExecutor for DuckDbQueryExecutor {
         self.pools.lock().await.remove(&connection_id);
         Ok(())
     }
+
+    async fn begin_transaction(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        transaction_id: QueryId,
+        pool_config: ConnectionPoolConfig,
+    ) -> Result<()> {
+        let pool = self.pool_for(profile, pool_config).await?;
+        let transactions = self.transactions.clone();
+        tokio::task::spawn_blocking(move || {
+            let pooled = pool.acquire()?;
+            pooled
+                .connection()?
+                .execute("BEGIN TRANSACTION", [])
+                .map_err(duckdb_query_error)?;
+            transactions
+                .lock()
+                .map_err(|_| AppError::internal("DuckDB transaction lock poisoned"))?
+                .insert(transaction_id, pooled);
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            AppError::new(ErrorKind::Internal, "DuckDB transaction task failed")
+                .with_detail(error.to_string())
+        })?
+    }
+
+    async fn execute_in_transaction(
+        &self,
+        transaction_id: QueryId,
+        statements: &[String],
+    ) -> Result<Vec<QueryResult>> {
+        let statements = statements.to_vec();
+        let transactions = self.transactions.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut transactions = transactions
+                .lock()
+                .map_err(|_| AppError::internal("DuckDB transaction lock poisoned"))?;
+            let pooled = transactions
+                .get_mut(&transaction_id)
+                .ok_or_else(|| AppError::validation("transaction is not active"))?;
+            execute_duckdb_statements(pooled.connection()?, &statements)
+        })
+        .await
+        .map_err(|error| {
+            AppError::new(ErrorKind::Internal, "DuckDB transaction task failed")
+                .with_detail(error.to_string())
+        })?
+    }
+
+    async fn commit_transaction(&self, transaction_id: QueryId) -> Result<()> {
+        let transactions = self.transactions.clone();
+        tokio::task::spawn_blocking(move || {
+            let pooled = transactions
+                .lock()
+                .map_err(|_| AppError::internal("DuckDB transaction lock poisoned"))?
+                .remove(&transaction_id)
+                .ok_or_else(|| AppError::validation("transaction is not active"))?;
+            pooled
+                .connection()?
+                .execute("COMMIT", [])
+                .map_err(duckdb_query_error)?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            AppError::new(ErrorKind::Internal, "DuckDB transaction task failed")
+                .with_detail(error.to_string())
+        })?
+    }
+
+    async fn rollback_transaction(&self, transaction_id: QueryId) -> Result<()> {
+        let transactions = self.transactions.clone();
+        tokio::task::spawn_blocking(move || {
+            let pooled = transactions
+                .lock()
+                .map_err(|_| AppError::internal("DuckDB transaction lock poisoned"))?
+                .remove(&transaction_id)
+                .ok_or_else(|| AppError::validation("transaction is not active"))?;
+            pooled
+                .connection()?
+                .execute("ROLLBACK", [])
+                .map_err(duckdb_query_error)?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            AppError::new(ErrorKind::Internal, "DuckDB transaction task failed")
+                .with_detail(error.to_string())
+        })?
+    }
+}
+
+fn execute_duckdb_statements(
+    conn: &duckdb::Connection,
+    statements: &[String],
+) -> Result<Vec<QueryResult>> {
+    let mut results = Vec::with_capacity(statements.len());
+
+    for statement in statements {
+        let started_at = Instant::now();
+        if is_result_set_statement(statement) {
+            results.push(duckdb_query_result(conn, statement)?.with_elapsed(started_at.elapsed()));
+            continue;
+        }
+
+        let affected_rows = conn.execute(statement, []).map_err(duckdb_query_error)?;
+        let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
+        result.affected_rows = affected_rows as u64;
+        results.push(result);
+    }
+
+    Ok(results)
 }
 
 fn duckdb_version(path: PathBuf) -> Result<String> {

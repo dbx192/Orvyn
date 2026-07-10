@@ -5,8 +5,11 @@ use db_common::{
     SessionState,
 };
 use std::{collections::BTreeMap, sync::Arc};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, instrument};
+
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct SessionManager {
@@ -123,7 +126,8 @@ impl SessionManager {
         session.mark_reconnecting();
         self.update_session(session.clone()).await;
 
-        let delay = session.reconnect_delay * session.reconnect_attempts as u32;
+        let delay = (session.reconnect_delay * session.reconnect_attempts as u32)
+            .min(MAX_RECONNECT_DELAY);
         debug!(connection_id = %id, delay_ms = %delay.as_millis(), "waiting before reconnect");
         tokio::time::sleep(delay).await;
 

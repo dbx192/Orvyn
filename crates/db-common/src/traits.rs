@@ -1,6 +1,6 @@
 use crate::{
     CellValue, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, ConnectionProfile,
-    ConnectionTestReport, DataSourceKind, PageRequest, QueryResult, Result,
+    ConnectionTestReport, DataSourceKind, PageRequest, QueryId, QueryResult, Result,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -300,6 +300,24 @@ pub trait RelationalQueryExecutor: Send + Sync {
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>>;
 
     async fn close_pool(&self, connection_id: ConnectionId) -> Result<()>;
+
+    async fn begin_transaction(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        transaction_id: QueryId,
+        pool_config: ConnectionPoolConfig,
+    ) -> Result<()>;
+
+    async fn execute_in_transaction(
+        &self,
+        transaction_id: QueryId,
+        statements: &[String],
+    ) -> Result<Vec<QueryResult>>;
+
+    async fn commit_transaction(&self, transaction_id: QueryId) -> Result<()>;
+
+    async fn rollback_transaction(&self, transaction_id: QueryId) -> Result<()>;
 }
 
 #[async_trait]

@@ -6,8 +6,8 @@ use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
     DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
-    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey,
-    TableIndex, TableTrigger,
+    QueryId, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
+    TableForeignKey, TableIndex, TableTrigger,
 };
 use std::{collections::BTreeMap, error::Error, fmt::Write, sync::Arc, time::Instant};
 use tokio::sync::{Mutex, Semaphore};
@@ -27,6 +27,7 @@ pub struct PostgresMetadataReader;
 #[derive(Debug, Clone, Default)]
 pub struct PostgresQueryExecutor {
     pools: Arc<Mutex<BTreeMap<PostgresPoolKey, Arc<PostgresPool>>>>,
+    transactions: Arc<Mutex<BTreeMap<QueryId, PostgresPoolClient>>>,
 }
 
 type PostgresPoolKey = (ConnectionId, Option<String>);
@@ -151,8 +152,10 @@ struct PostgresPoolClient {
 }
 
 impl PostgresPoolClient {
-    fn client(&self) -> &Client {
-        self.client.as_ref().expect("pool client missing")
+    fn client(&self) -> Result<&Client> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| AppError::internal("PostgreSQL pool client missing"))
     }
 
     async fn release(mut self) {
@@ -532,27 +535,7 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
     ) -> Result<Vec<QueryResult>> {
         let pool = self.pool_for(profile, password, pool_config).await?;
         let pooled = pool.acquire().await?;
-        let client = pooled.client();
-        let mut results = Vec::with_capacity(statements.len());
-
-        for statement in statements {
-            let started_at = Instant::now();
-            let statement = statement.as_str();
-
-            if is_result_set_statement(statement) {
-                let rows = client.query(statement, &[]).await.map_err(query_error)?;
-                results.push(
-                    postgres_rows_to_query_result(statement, rows)
-                        .with_elapsed(started_at.elapsed()),
-                );
-                continue;
-            }
-
-            let affected_rows = client.execute(statement, &[]).await.map_err(query_error)?;
-            let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
-            result.affected_rows = affected_rows;
-            results.push(result);
-        }
+        let results = execute_postgres_statements(pooled.client()?, statements).await?;
 
         pooled.release().await;
         Ok(results)
@@ -593,6 +576,95 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
             .retain(|key, _| key.0 != connection_id);
         Ok(())
     }
+
+    async fn begin_transaction(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        transaction_id: QueryId,
+        pool_config: ConnectionPoolConfig,
+    ) -> Result<()> {
+        let pool = self.pool_for(profile, password, pool_config).await?;
+        let pooled = pool.acquire().await?;
+        pooled
+            .client()?
+            .batch_execute("BEGIN")
+            .await
+            .map_err(query_error)?;
+        self.transactions.lock().await.insert(transaction_id, pooled);
+        Ok(())
+    }
+
+    async fn execute_in_transaction(
+        &self,
+        transaction_id: QueryId,
+        statements: &[String],
+    ) -> Result<Vec<QueryResult>> {
+        let transactions = self.transactions.lock().await;
+        let pooled = transactions
+            .get(&transaction_id)
+            .ok_or_else(|| AppError::validation("transaction is not active"))?;
+        execute_postgres_statements(pooled.client()?, statements).await
+    }
+
+    async fn commit_transaction(&self, transaction_id: QueryId) -> Result<()> {
+        let pooled = self
+            .transactions
+            .lock()
+            .await
+            .remove(&transaction_id)
+            .ok_or_else(|| AppError::validation("transaction is not active"))?;
+        pooled
+            .client()?
+            .batch_execute("COMMIT")
+            .await
+            .map_err(query_error)?;
+        pooled.release().await;
+        Ok(())
+    }
+
+    async fn rollback_transaction(&self, transaction_id: QueryId) -> Result<()> {
+        let pooled = self
+            .transactions
+            .lock()
+            .await
+            .remove(&transaction_id)
+            .ok_or_else(|| AppError::validation("transaction is not active"))?;
+        pooled
+            .client()?
+            .batch_execute("ROLLBACK")
+            .await
+            .map_err(query_error)?;
+        pooled.release().await;
+        Ok(())
+    }
+}
+
+async fn execute_postgres_statements(
+    client: &Client,
+    statements: &[String],
+) -> Result<Vec<QueryResult>> {
+    let mut results = Vec::with_capacity(statements.len());
+
+    for statement in statements {
+        let started_at = Instant::now();
+        let statement = statement.as_str();
+
+        if is_result_set_statement(statement) {
+            let rows = client.query(statement, &[]).await.map_err(query_error)?;
+            results.push(
+                postgres_rows_to_query_result(statement, rows).with_elapsed(started_at.elapsed()),
+            );
+            continue;
+        }
+
+        let affected_rows = client.execute(statement, &[]).await.map_err(query_error)?;
+        let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
+        result.affected_rows = affected_rows;
+        results.push(result);
+    }
+
+    Ok(results)
 }
 
 async fn postgres_client(

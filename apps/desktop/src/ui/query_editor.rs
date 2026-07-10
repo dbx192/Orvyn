@@ -4,18 +4,19 @@ use db_common::{
     looks_like_unqualified_mutation, split_statements, statement_at_offset, AppError, ConnectionId,
     ConnectionProfile, DataSourceKind, DatabaseObject, ErrorKind, FavoriteQuery,
     QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
-    SqlHighlightToken, SqlTokenKind, TextRange, DEFAULT_QUERY_RESULT_LIMIT,
+    SqlHighlightToken, SqlTokenKind, TableColumn, TextRange, DEFAULT_QUERY_RESULT_LIMIT,
     QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use eframe::egui::{
-    text::LayoutJob, Align, Button, Color32, ComboBox, FontId, Frame, Layout, Margin, RichText,
-    ScrollArea, Stroke, TextEdit, TextFormat, Ui, Window,
+    text::LayoutJob, Align, Button, Color32, ComboBox, FontId, Frame, Key, Layout, Margin,
+    RichText, ScrollArea, Stroke, TextEdit, TextFormat, Ui, Window,
 };
 use import_export::{export_query_result_to_file, ExportFormat};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::mpsc::{self, Receiver, Sender},
     sync::Arc,
+    time::{Duration, Instant},
 };
 use tokio::runtime::Handle;
 
@@ -35,16 +36,54 @@ enum QueryEditorEvent {
     ConnectionList(Vec<ConnectionProfile>),
     DatabaseList(QueryId, Vec<String>),
     SchemaList(QueryId, Vec<String>),
+    TableList(QueryId, Vec<String>),
+    ColumnList(QueryId, String, Vec<TableColumn>),
     HistoryLoaded(Vec<QueryHistoryEntry>),
     FavoritesLoaded(Vec<FavoriteQuery>),
     FavoriteSaved(Result<FavoriteQuery, AppError>),
     FavoriteRemoved(Result<QueryId, AppError>),
+    TransactionCompleted(QueryId, TransactionAction, Result<(), AppError>),
     MetadataLoadFailed(QueryId, String),
 }
 
 struct PendingDangerConfirm {
     mode: QueryExecutionMode,
     sql: String,
+}
+
+const LARGE_SQL_HIGHLIGHT_THRESHOLD: usize = 20_000;
+const SQL_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(140);
+const MAX_COMPLETION_ITEMS: usize = 24;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionAction {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionKind {
+    Keyword,
+    Table,
+    Column,
+}
+
+#[derive(Debug, Clone)]
+struct CompletionItem {
+    label: String,
+    insert_text: String,
+    kind: CompletionKind,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompletionState {
+    visible: bool,
+    replacement: Option<TextRange>,
+    items: Vec<CompletionItem>,
+    selected: usize,
+    waiting_for_metadata: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -65,6 +104,9 @@ struct QueryEditorTab {
     schema: Option<String>,
     available_databases: Vec<String>,
     available_schemas: Vec<String>,
+    available_tables: Vec<String>,
+    columns_by_table: BTreeMap<String, Vec<TableColumn>>,
+    pending_column_loads: BTreeSet<String>,
     results: Vec<QueryResultView>,
     selected_result: usize,
     execution_report: Option<QueryExecutionReport>,
@@ -72,6 +114,11 @@ struct QueryEditorTab {
     execution_cancelling: bool,
     execution_error: Option<String>,
     highlighted_sql: Vec<SqlHighlightToken>,
+    highlight_due_at: Option<Instant>,
+    completion: CompletionState,
+    transaction_active: bool,
+    transaction_busy: bool,
+    transaction_error: Option<String>,
 }
 
 impl QueryEditorTab {
@@ -88,6 +135,9 @@ impl QueryEditorTab {
             schema: None,
             available_databases: Vec::new(),
             available_schemas: Vec::new(),
+            available_tables: Vec::new(),
+            columns_by_table: BTreeMap::new(),
+            pending_column_loads: BTreeSet::new(),
             results: Vec::new(),
             selected_result: 0,
             execution_report: None,
@@ -95,6 +145,11 @@ impl QueryEditorTab {
             execution_cancelling: false,
             execution_error: None,
             highlighted_sql: Vec::new(),
+            highlight_due_at: None,
+            completion: CompletionState::default(),
+            transaction_active: false,
+            transaction_busy: false,
+            transaction_error: None,
         }
     }
 
@@ -290,6 +345,10 @@ impl QueryEditor {
         tab.schema = schema;
         tab.available_databases.clear();
         tab.available_schemas.clear();
+        tab.available_tables.clear();
+        tab.columns_by_table.clear();
+        tab.pending_column_loads.clear();
+        tab.completion.visible = false;
         self.refresh_metadata_for_tab(tab_id);
     }
 
@@ -385,16 +444,18 @@ impl QueryEditor {
             ui.separator();
 
             let active_tab_id = self.active_tab;
-            let (is_running, is_cancelling, has_selection) = active_tab_id
+            let (is_running, is_cancelling, has_selection, transaction_active, transaction_busy) = active_tab_id
                 .and_then(|id| self.tabs.get(&id))
                 .map(|tab| {
                     (
                         tab.execution_running,
                         tab.execution_cancelling,
                         tab.has_selection(),
+                        tab.transaction_active,
+                        tab.transaction_busy,
                     )
                 })
-                .unwrap_or((false, false, false));
+                .unwrap_or((false, false, false, false, false));
 
             if !is_running {
                 if ui.button("Run Current").clicked() {
@@ -429,6 +490,41 @@ impl QueryEditor {
             }
 
             if let Some(tab) = active_tab_id.and_then(|id| self.tabs.get(&id)) {
+                ui.separator();
+                let tx_label = if tab.transaction_active {
+                    "Txn: active"
+                } else {
+                    "Txn: idle"
+                };
+                let tx_color = if tab.transaction_active {
+                    Color32::from_rgb(220, 160, 60)
+                } else {
+                    Color32::GRAY
+                };
+                ui.label(RichText::new(tx_label).small().color(tx_color));
+                let can_tx = !is_running && !transaction_busy;
+                if ui
+                    .add_enabled(can_tx && !transaction_active, Button::new("BEGIN"))
+                    .clicked()
+                {
+                    self.begin_transaction();
+                }
+                if ui
+                    .add_enabled(can_tx && transaction_active, Button::new("COMMIT"))
+                    .clicked()
+                {
+                    self.commit_transaction();
+                }
+                if ui
+                    .add_enabled(can_tx && transaction_active, Button::new("ROLLBACK"))
+                    .clicked()
+                {
+                    self.rollback_transaction();
+                }
+                if let Some(error) = &tab.transaction_error {
+                    ui.colored_label(Color32::RED, RichText::new(error).small());
+                }
+
                 ui.separator();
                 if tab.execution_running {
                     ui.label(
@@ -611,8 +707,11 @@ impl QueryEditor {
             return;
         };
 
+        self.refresh_deferred_highlight(tab_id);
         let editor_height = (ui.available_height() * 0.42).max(180.0);
         let side_width = 280.0;
+        let connections_snapshot = self.connections.clone();
+        let mut column_loads = Vec::new();
         ui.horizontal(|ui| {
             let main_width = if self.side_panel_open {
                 (ui.available_width() - side_width - 12.0).max(360.0)
@@ -660,7 +759,7 @@ impl QueryEditor {
                             .show(ui, |ui| {
                                 let tokens = tab.highlighted_sql.clone();
                                 let dialect =
-                                    connection_kind_for(&self.connections, tab.connection_id);
+                                    connection_kind_for(&connections_snapshot, tab.connection_id);
                                 let mut layouter =
                                     move |ui: &Ui,
                                           text: &str,
@@ -680,18 +779,51 @@ impl QueryEditor {
                                     .layouter(&mut layouter)
                                     .show(ui);
 
+                                let mut refresh_completion = output.response.has_focus()
+                                    && ui.input(|input| {
+                                        input.key_pressed(Key::Space) && input.modifiers.ctrl
+                                    });
+
                                 if output.response.changed() {
                                     tab.dirty = true;
-                                    tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                                    schedule_sql_highlight(tab);
+                                    refresh_completion = true;
                                 }
 
                                 if let Some(range) = output.cursor_range {
-                                    tab.cursor_offset = range.primary.ccursor.index;
-                                    let selection = TextRange::new(
+                                    let primary = char_index_to_byte_offset(
+                                        &tab.sql,
                                         range.primary.ccursor.index,
+                                    );
+                                    let secondary = char_index_to_byte_offset(
+                                        &tab.sql,
                                         range.secondary.ccursor.index,
                                     );
+                                    tab.cursor_offset = primary;
+                                    let selection = TextRange::new(
+                                        primary,
+                                        secondary,
+                                    );
                                     tab.selection = (!selection.is_empty()).then_some(selection);
+                                }
+
+                                if refresh_completion {
+                                    update_completion_for_tab(tab);
+                                    column_loads.extend(missing_completion_columns(tab));
+                                }
+
+                                if output.response.has_focus()
+                                    && tab.completion.visible
+                                    && ui.input(|input| input.key_pressed(Key::Escape))
+                                {
+                                    tab.completion.visible = false;
+                                }
+
+                                if let Some(inserted) = completion_panel(ui, tab) {
+                                    tab.sql = inserted;
+                                    tab.dirty = true;
+                                    schedule_sql_highlight(tab);
+                                    update_completion_for_tab(tab);
                                 }
                             });
                     });
@@ -708,6 +840,9 @@ impl QueryEditor {
 
         ui.separator();
         self.results_panel(ui, tab_id);
+        for table in column_loads {
+            self.load_columns_for_tab(tab_id, table);
+        }
     }
 
     fn history_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
@@ -1067,11 +1202,20 @@ impl QueryEditor {
         };
 
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            if tab.transaction_active {
+                self.status = "Commit or rollback the active transaction before changing connection"
+                    .to_string();
+                return;
+            }
             tab.connection_id = connection_id;
             tab.database = profile.database.clone();
             tab.schema = None;
             tab.available_databases.clear();
             tab.available_schemas.clear();
+            tab.available_tables.clear();
+            tab.columns_by_table.clear();
+            tab.pending_column_loads.clear();
+            tab.completion.visible = false;
             tab.results.clear();
             tab.execution_report = None;
             tab.execution_error = None;
@@ -1085,14 +1229,25 @@ impl QueryEditor {
             return;
         };
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            if tab.transaction_active {
+                self.status =
+                    "Commit or rollback the active transaction before changing database"
+                        .to_string();
+                return;
+            }
             tab.database = database;
             tab.schema = None;
             tab.available_schemas.clear();
+            tab.available_tables.clear();
+            tab.columns_by_table.clear();
+            tab.pending_column_loads.clear();
+            tab.completion.visible = false;
             tab.results.clear();
             tab.execution_report = None;
             self.status = "Database changed".to_string();
         }
         self.load_schemas_for_tab(tab_id);
+        self.load_tables_for_tab(tab_id);
     }
 
     fn set_active_schema(&mut self, schema: Option<String>) {
@@ -1100,16 +1255,27 @@ impl QueryEditor {
             return;
         };
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            if tab.transaction_active {
+                self.status = "Commit or rollback the active transaction before changing schema"
+                    .to_string();
+                return;
+            }
             tab.schema = schema;
+            tab.available_tables.clear();
+            tab.columns_by_table.clear();
+            tab.pending_column_loads.clear();
+            tab.completion.visible = false;
             tab.results.clear();
             tab.execution_report = None;
             self.status = "Schema changed".to_string();
         }
+        self.load_tables_for_tab(tab_id);
     }
 
     fn refresh_metadata_for_tab(&mut self, tab_id: QueryId) {
         self.load_databases_for_tab(tab_id);
         self.load_schemas_for_tab(tab_id);
+        self.load_tables_for_tab(tab_id);
     }
 
     fn load_connections(&mut self) {
@@ -1180,6 +1346,60 @@ impl QueryEditor {
                         tab_id,
                         database_names(schemas),
                     ));
+                }
+                Err(error) => {
+                    let _ = tx.send(QueryEditorEvent::MetadataLoadFailed(tab_id, error.message));
+                }
+            }
+        });
+    }
+
+    fn load_tables_for_tab(&mut self, tab_id: QueryId) {
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let service = self.metadata_service.clone();
+        let connection_id = tab.connection_id;
+        let database = tab.database.clone();
+        let schema = tab.schema.clone();
+        self.runtime.spawn(async move {
+            match service
+                .list_tables(connection_id, database.as_deref(), schema.as_deref(), None)
+                .await
+            {
+                Ok(tables) => {
+                    let _ = tx.send(QueryEditorEvent::TableList(tab_id, database_names(tables)));
+                }
+                Err(error) => {
+                    let _ = tx.send(QueryEditorEvent::MetadataLoadFailed(tab_id, error.message));
+                }
+            }
+        });
+    }
+
+    fn load_columns_for_tab(&mut self, tab_id: QueryId, table: String) {
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let service = self.metadata_service.clone();
+        let connection_id = tab.connection_id;
+        let database = tab.database.clone();
+        let schema = tab.schema.clone();
+        self.runtime.spawn(async move {
+            match service
+                .table_columns(
+                    connection_id,
+                    database.as_deref(),
+                    schema.as_deref(),
+                    &table,
+                    None,
+                )
+                .await
+            {
+                Ok(columns) => {
+                    let _ = tx.send(QueryEditorEvent::ColumnList(tab_id, table, columns));
                 }
                 Err(error) => {
                     let _ = tx.send(QueryEditorEvent::MetadataLoadFailed(tab_id, error.message));
@@ -1315,6 +1535,47 @@ impl QueryEditor {
                         tab.available_schemas = schemas;
                         if tab.schema.is_none() {
                             tab.schema = tab.available_schemas.first().cloned();
+                        }
+                    }
+                }
+                QueryEditorEvent::TableList(tab_id, tables) => {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.available_tables = tables;
+                        update_completion_for_tab(tab);
+                    }
+                }
+                QueryEditorEvent::ColumnList(tab_id, table, columns) => {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.pending_column_loads.remove(&normalize_identifier(&table));
+                        tab.columns_by_table
+                            .insert(normalize_identifier(&table), columns);
+                        update_completion_for_tab(tab);
+                    }
+                }
+                QueryEditorEvent::TransactionCompleted(tab_id, action, result) => {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.transaction_busy = false;
+                        match (action, result) {
+                            (TransactionAction::Begin, Ok(())) => {
+                                tab.transaction_active = true;
+                                tab.transaction_error = None;
+                                self.status = "Transaction started".to_string();
+                            }
+                            (TransactionAction::Commit, Ok(())) => {
+                                tab.transaction_active = false;
+                                tab.transaction_error = None;
+                                self.status = "Transaction committed".to_string();
+                            }
+                            (TransactionAction::Rollback, Ok(())) => {
+                                tab.transaction_active = false;
+                                tab.transaction_error = None;
+                                self.status = "Transaction rolled back".to_string();
+                            }
+                            (_, Err(error)) => {
+                                tab.transaction_error = Some(error.message.clone());
+                                self.status =
+                                    format!("Transaction operation failed: {}", error.message);
+                            }
                         }
                     }
                 }

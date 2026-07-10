@@ -50,7 +50,7 @@ impl MetadataService {
         Self::new(
             connections,
             vec![
-                Arc::new(db_mysql::MySqlMetadataReader),
+                Arc::new(db_mysql::MySqlMetadataReader::new()),
                 Arc::new(db_postgres::PostgresMetadataReader),
                 Arc::new(db_sqlite::SqliteMetadataReader),
                 Arc::new(db_duckdb::DuckDbMetadataReader),

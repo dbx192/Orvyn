@@ -24,6 +24,7 @@ const DEFAULT_PAGE_SIZE: usize = 500;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 320.0;
+const COLUMN_WIDTH_SAMPLE_LIMIT: usize = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResultSetGridAction {
@@ -280,7 +281,7 @@ impl ResultSetGrid {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!(
-                        "Sorted by {}{}",
+                        "Local sort by {}{}",
                         self.result.columns[sort.column].name,
                         match sort.direction {
                             SortDirection::Asc => " ↑",
@@ -763,6 +764,7 @@ fn page_size_from_result(result: &QueryResult) -> usize {
 }
 
 fn estimate_column_widths(result: &QueryResult) -> Vec<f32> {
+    let sampled_rows = sampled_row_indexes(result.rows.len(), COLUMN_WIDTH_SAMPLE_LIMIT);
     result
         .columns
         .iter()
@@ -772,8 +774,12 @@ fn estimate_column_widths(result: &QueryResult) -> Vec<f32> {
                 .max(estimate_text_width(&column.database_type))
                 .max(MIN_COLUMN_WIDTH);
 
-            for row in result.rows.iter().take(200) {
-                if let Some(value) = row.values.get(column_index) {
+            for row_index in &sampled_rows {
+                if let Some(value) = result
+                    .rows
+                    .get(*row_index)
+                    .and_then(|row| row.values.get(column_index))
+                {
                     estimated = estimated.max(estimate_text_width(&display_cell_value(value)));
                 }
             }
@@ -781,4 +787,19 @@ fn estimate_column_widths(result: &QueryResult) -> Vec<f32> {
             estimated.clamp(MIN_COLUMN_WIDTH, INITIAL_MAX_COLUMN_WIDTH)
         })
         .collect()
+}
+
+fn sampled_row_indexes(row_count: usize, limit: usize) -> Vec<usize> {
+    if row_count <= limit {
+        return (0..row_count).collect();
+    }
+
+    let step = (row_count / limit).max(1);
+    let mut rows = (0..row_count).step_by(step).take(limit).collect::<Vec<_>>();
+    if rows.last().copied() != row_count.checked_sub(1) {
+        if let Some(last) = row_count.checked_sub(1) {
+            rows.push(last);
+        }
+    }
+    rows
 }

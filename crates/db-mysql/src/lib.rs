@@ -5,16 +5,17 @@ use db_common::{
     is_result_set_statement, redact_connection_url, AppError, CellValue, Column, ConnectionId,
     ConnectionPoolConfig, ConnectionPoolStats, ConnectionProfile, ConnectionTestReport,
     ConnectionTester, DataSourceKind, DatabaseFunction, DatabaseObject, DatabaseObjectKind,
-    ErrorKind, LogicalType, QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result,
-    Row, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+    ErrorKind, LogicalType, QueryId, QueryResult, RelationalMetadataReader,
+    RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
 use sqlx::{
-    mysql::{MySqlPoolOptions, MySqlRow},
+    mysql::{MySqlConnection, MySqlPoolOptions, MySqlRow},
+    pool::PoolConnection,
     types::{
         chrono::{NaiveDate, NaiveDateTime, NaiveTime},
         Decimal,
     },
-    Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo,
+    Column as SqlxColumn, MySql, MySqlPool, Row as SqlxRow, TypeInfo,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
@@ -24,12 +25,15 @@ pub const ADAPTER_NAME: &str = "mysql";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MySqlConnectionTester;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MySqlMetadataReader;
+#[derive(Debug, Clone, Default)]
+pub struct MySqlMetadataReader {
+    pools: Arc<Mutex<BTreeMap<MySqlPoolKey, MySqlPool>>>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct MySqlQueryExecutor {
     pools: Arc<Mutex<BTreeMap<MySqlPoolKey, MySqlPool>>>,
+    transactions: Arc<Mutex<BTreeMap<QueryId, PoolConnection<MySql>>>>,
 }
 
 type MySqlPoolKey = (ConnectionId, Option<String>);
@@ -51,6 +55,27 @@ impl MySqlQueryExecutor {
         }
 
         let pool = mysql_pool(profile, password, config).await?;
+        self.pools.lock().await.insert(key, pool.clone());
+        Ok(pool)
+    }
+}
+
+impl MySqlMetadataReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn pool_for(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<MySqlPool> {
+        let key = mysql_pool_key(profile);
+        if let Some(pool) = self.pools.lock().await.get(&key).cloned() {
+            return Ok(pool);
+        }
+
+        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
         self.pools.lock().await.insert(key, pool.clone());
         Ok(pool)
     }
@@ -99,12 +124,11 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         profile: &ConnectionProfile,
         password: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let pool = self.pool_for(profile, password).await?;
         let rows = sqlx::query("SHOW DATABASES")
             .fetch_all(&pool)
             .await
             .map_err(mysql_query_error)?;
-        pool.close().await;
 
         let mut databases = Vec::new();
         for row in rows {
@@ -147,14 +171,14 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         database: Option<&str>,
         _schema: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        list_mysql_objects(
-            profile,
-            password,
-            database,
-            "BASE TABLE",
-            DatabaseObjectKind::Table,
-        )
-        .await
+        let database = database.or(profile.database.as_deref()).ok_or_else(|| {
+            AppError::new(
+                ErrorKind::Validation,
+                "database is required for MySQL objects",
+            )
+        })?;
+        let pool = self.pool_for(profile, password).await?;
+        list_mysql_objects(&pool, database, "BASE TABLE", DatabaseObjectKind::Table).await
     }
 
     async fn list_views(
@@ -164,14 +188,14 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         database: Option<&str>,
         _schema: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
-        list_mysql_objects(
-            profile,
-            password,
-            database,
-            "VIEW",
-            DatabaseObjectKind::View,
-        )
-        .await
+        let database = database.or(profile.database.as_deref()).ok_or_else(|| {
+            AppError::new(
+                ErrorKind::Validation,
+                "database is required for MySQL objects",
+            )
+        })?;
+        let pool = self.pool_for(profile, password).await?;
+        list_mysql_objects(&pool, database, "VIEW", DatabaseObjectKind::View).await
     }
 
     async fn list_columns(
@@ -188,7 +212,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL columns",
             )
         })?;
-        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let pool = self.pool_for(profile, password).await?;
         let rows = sqlx::query(
             "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, COLUMN_COMMENT \
              FROM information_schema.COLUMNS \
@@ -200,7 +224,6 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .fetch_all(&pool)
         .await
         .map_err(mysql_query_error)?;
-        pool.close().await;
 
         let mut columns = Vec::new();
         for row in rows {
@@ -231,7 +254,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL indexes",
             )
         })?;
-        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let pool = self.pool_for(profile, password).await?;
         let rows = sqlx::query(
             "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
              FROM information_schema.STATISTICS \
@@ -243,7 +266,6 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .fetch_all(&pool)
         .await
         .map_err(mysql_query_error)?;
-        pool.close().await;
 
         group_mysql_indexes(rows)
     }
@@ -262,7 +284,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL foreign keys",
             )
         })?;
-        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let pool = self.pool_for(profile, password).await?;
         let rows = sqlx::query(
             "SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME, \
                     kcu.REFERENCED_COLUMN_NAME, rc.UPDATE_RULE, rc.DELETE_RULE \
@@ -279,7 +301,6 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .fetch_all(&pool)
         .await
         .map_err(mysql_query_error)?;
-        pool.close().await;
 
         group_mysql_foreign_keys(rows)
     }
@@ -298,7 +319,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL triggers",
             )
         })?;
-        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let pool = self.pool_for(profile, password).await?;
         let rows = sqlx::query(
             "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \
              FROM information_schema.TRIGGERS \
@@ -310,7 +331,6 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .fetch_all(&pool)
         .await
         .map_err(mysql_query_error)?;
-        pool.close().await;
 
         let mut triggers = Vec::new();
         for row in rows {
@@ -337,7 +357,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL functions",
             )
         })?;
-        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let pool = self.pool_for(profile, password).await?;
         let rows = sqlx::query(
             "SELECT ROUTINE_NAME, ROUTINE_TYPE, DTD_IDENTIFIER, EXTERNAL_LANGUAGE \
              FROM information_schema.ROUTINES \
@@ -348,7 +368,6 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         .fetch_all(&pool)
         .await
         .map_err(mysql_query_error)?;
-        pool.close().await;
 
         let mut functions = Vec::new();
         for row in rows {
@@ -376,13 +395,12 @@ impl RelationalMetadataReader for MySqlMetadataReader {
                 "database is required for MySQL create table",
             )
         })?;
-        let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
+        let pool = self.pool_for(profile, password).await?;
         let sql = format!("SHOW CREATE TABLE `{}`.`{}`", database, table);
         let row = sqlx::query(&sql)
             .fetch_one(&pool)
             .await
             .map_err(mysql_query_error)?;
-        pool.close().await;
 
         mysql_string_at(&row, 1)
     }
@@ -402,33 +420,8 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         pool_config: ConnectionPoolConfig,
     ) -> Result<Vec<QueryResult>> {
         let pool = self.pool_for(profile, password, pool_config).await?;
-        let mut results = Vec::with_capacity(statements.len());
-
-        for statement in statements {
-            let started_at = Instant::now();
-            let statement = statement.as_str();
-
-            if is_result_set_statement(statement) {
-                let rows = sqlx::query(statement)
-                    .fetch_all(&pool)
-                    .await
-                    .map_err(mysql_query_error)?;
-                results.push(
-                    mysql_rows_to_query_result(statement, rows).with_elapsed(started_at.elapsed()),
-                );
-                continue;
-            }
-
-            let done = sqlx::query(statement)
-                .execute(&pool)
-                .await
-                .map_err(mysql_query_error)?;
-            let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
-            result.affected_rows = done.rows_affected();
-            results.push(result);
-        }
-
-        Ok(results)
+        let mut conn = pool.acquire().await.map_err(mysql_query_error)?;
+        execute_mysql_statements_on_connection(&mut *conn, statements).await
     }
 
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
@@ -475,6 +468,63 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         }
         Ok(())
     }
+
+    async fn begin_transaction(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        transaction_id: QueryId,
+        pool_config: ConnectionPoolConfig,
+    ) -> Result<()> {
+        let pool = self.pool_for(profile, password, pool_config).await?;
+        let mut conn = pool.acquire().await.map_err(mysql_query_error)?;
+        sqlx::query("BEGIN")
+            .execute(&mut *conn)
+            .await
+            .map_err(mysql_query_error)?;
+        self.transactions.lock().await.insert(transaction_id, conn);
+        Ok(())
+    }
+
+    async fn execute_in_transaction(
+        &self,
+        transaction_id: QueryId,
+        statements: &[String],
+    ) -> Result<Vec<QueryResult>> {
+        let mut transactions = self.transactions.lock().await;
+        let conn = transactions
+            .get_mut(&transaction_id)
+            .ok_or_else(|| AppError::validation("transaction is not active"))?;
+        execute_mysql_statements_on_connection(&mut **conn, statements).await
+    }
+
+    async fn commit_transaction(&self, transaction_id: QueryId) -> Result<()> {
+        let mut conn = self
+            .transactions
+            .lock()
+            .await
+            .remove(&transaction_id)
+            .ok_or_else(|| AppError::validation("transaction is not active"))?;
+        sqlx::query("COMMIT")
+            .execute(&mut *conn)
+            .await
+            .map_err(mysql_query_error)?;
+        Ok(())
+    }
+
+    async fn rollback_transaction(&self, transaction_id: QueryId) -> Result<()> {
+        let mut conn = self
+            .transactions
+            .lock()
+            .await
+            .remove(&transaction_id)
+            .ok_or_else(|| AppError::validation("transaction is not active"))?;
+        sqlx::query("ROLLBACK")
+            .execute(&mut *conn)
+            .await
+            .map_err(mysql_query_error)?;
+        Ok(())
+    }
 }
 
 fn mysql_pool_key(profile: &ConnectionProfile) -> MySqlPoolKey {
@@ -486,6 +536,37 @@ fn mysql_pool_key(profile: &ConnectionProfile) -> MySqlPoolKey {
             .filter(|value| !value.trim().is_empty())
             .map(ToOwned::to_owned),
     )
+}
+
+async fn execute_mysql_statements_on_connection(
+    conn: &mut MySqlConnection,
+    statements: &[String],
+) -> Result<Vec<QueryResult>> {
+    let mut results = Vec::with_capacity(statements.len());
+
+    for statement in statements {
+        let started_at = Instant::now();
+        let statement = statement.as_str();
+
+        if is_result_set_statement(statement) {
+            let rows = sqlx::query(statement)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(mysql_query_error)?;
+            results.push(mysql_rows_to_query_result(statement, rows).with_elapsed(started_at.elapsed()));
+            continue;
+        }
+
+        let done = sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .map_err(mysql_query_error)?;
+        let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
+        result.affected_rows = done.rows_affected();
+        results.push(result);
+    }
+
+    Ok(results)
 }
 
 fn mysql_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<String> {
@@ -543,19 +624,11 @@ fn mysql_query_error(error: sqlx::Error) -> AppError {
 }
 
 async fn list_mysql_objects(
-    profile: &ConnectionProfile,
-    password: Option<&str>,
-    database: Option<&str>,
+    pool: &MySqlPool,
+    database: &str,
     table_type: &str,
     kind: DatabaseObjectKind,
 ) -> Result<Vec<DatabaseObject>> {
-    let database = database.or(profile.database.as_deref()).ok_or_else(|| {
-        AppError::new(
-            ErrorKind::Validation,
-            "database is required for MySQL objects",
-        )
-    })?;
-    let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
     let rows = sqlx::query(
         "SELECT TABLE_NAME FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = ? \
@@ -563,10 +636,9 @@ async fn list_mysql_objects(
     )
     .bind(database)
     .bind(table_type)
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .map_err(mysql_query_error)?;
-    pool.close().await;
 
     let mut objects = Vec::new();
     for row in rows {

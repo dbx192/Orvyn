@@ -21,7 +21,6 @@ use std::{
     time::Instant,
 };
 use tokio::{
-    runtime::{Handle, Runtime},
     sync::Mutex,
     task::AbortHandle,
 };
@@ -63,7 +62,7 @@ impl QueryService {
             favorite_store,
             state: Arc::new(Mutex::new(QueryServiceState::default())),
         };
-        service.load_history_and_favorites().unwrap();
+        service.spawn_history_and_favorites_load();
         service
     }
 
@@ -117,12 +116,12 @@ impl QueryService {
         )
     }
 
-    fn load_history_and_favorites(&self) -> Result<()> {
+    fn spawn_history_and_favorites_load(&self) {
         let history_store = self.history_store.clone();
         let favorite_store = self.favorite_store.clone();
         let state = self.state.clone();
 
-        run_blocking_on_runtime(async move {
+        let load_future = async move {
             if let Some(store) = history_store {
                 match store.list().await {
                     Ok(entries) => {
@@ -148,9 +147,23 @@ impl QueryService {
                     }
                 }
             }
-        });
+        };
 
-        Ok(())
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(load_future);
+        } else {
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                match runtime {
+                    Ok(runtime) => runtime.block_on(load_future),
+                    Err(error) => {
+                        tracing::warn!("failed to start query history load runtime: {error}");
+                    }
+                }
+            });
+        }
     }
 
     pub async fn open_tab(
@@ -215,6 +228,21 @@ impl QueryService {
         state.tabs.remove(&tab_id);
         if let Some(handle) = state.running.remove(&tab_id) {
             handle.abort();
+        }
+        if let Some(transaction) = state.transactions.remove(&tab_id) {
+            drop(state);
+            if let Err(error) = self
+                .executor(transaction.kind)?
+                .rollback_transaction(tab_id)
+                .await
+            {
+                tracing::warn!(
+                    tab_id = %tab_id,
+                    "failed to rollback transaction while closing tab: {}",
+                    error.message
+                );
+            }
+            return Ok(());
         }
         Ok(())
     }
@@ -281,6 +309,10 @@ impl QueryService {
             profile.database = Some(database.to_string());
         }
         let executor = self.executor(profile.kind)?;
+        let active_transaction = self
+            .active_transaction_for_request(&request, profile.kind)
+            .await?
+            .is_some();
         let execution_id = QueryId::new();
         let started_at = Instant::now();
         let record_history = request.result_offset == 0;
@@ -292,12 +324,22 @@ impl QueryService {
         let handle = tokio::spawn(async move {
             tokio::time::timeout(
                 request_for_task.timeout(),
-                executor.execute(
-                    &profile,
-                    password_for_task.as_deref(),
-                    &statements_for_task,
-                    pool_config,
-                ),
+                async {
+                    if active_transaction {
+                        executor
+                            .execute_in_transaction(request_for_task.tab_id, &statements_for_task)
+                            .await
+                    } else {
+                        executor
+                            .execute(
+                                &profile,
+                                password_for_task.as_deref(),
+                                &statements_for_task,
+                                pool_config,
+                            )
+                            .await
+                    }
+                },
             )
             .await
             .map_err(|_| AppError::new(ErrorKind::Timeout, "query execution timed out"))?
@@ -346,6 +388,157 @@ impl QueryService {
                 Err(error)
             }
         }
+    }
+
+    #[instrument(skip(self, request, runtime_password), fields(tab_id = %request.tab_id))]
+    pub async fn execute_transactional(
+        &self,
+        request: QueryExecutionRequest,
+        runtime_password: Option<&str>,
+    ) -> Result<QueryExecutionReport> {
+        let statements = statements_for_request(&request)?;
+        let execution_plan = execution_plan_for(
+            &statements,
+            request.result_limit,
+            request.result_offset,
+            request.result_total_rows,
+        )?;
+        let (mut profile, password) = self
+            .connections
+            .profile_with_password(request.connection_id, runtime_password)
+            .await?;
+        if let Some(database) = request
+            .database
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            profile.database = Some(database.to_string());
+        }
+        let executor = self.executor(profile.kind)?;
+        let execution_id = QueryId::new();
+        let started_at = Instant::now();
+        let transaction_id = execution_id;
+        let pool_config = self.pool_config;
+
+        executor
+            .begin_transaction(
+                &profile,
+                password.as_deref(),
+                transaction_id,
+                pool_config,
+            )
+            .await?;
+
+        let execute_result = executor
+            .execute_in_transaction(transaction_id, &execution_plan.execution_statements)
+            .await;
+
+        let results = match execute_result {
+            Ok(results) => {
+                if let Err(error) = executor.commit_transaction(transaction_id).await {
+                    let _ = executor.rollback_transaction(transaction_id).await;
+                    return Err(error);
+                }
+                results
+            }
+            Err(error) => {
+                let _ = executor.rollback_transaction(transaction_id).await;
+                self.record_failed_history(
+                    &request,
+                    &statements,
+                    started_at.elapsed().as_millis(),
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+
+        let elapsed_ms = started_at.elapsed().as_millis();
+        let results = execution_plan.into_report_results(results)?;
+        let report = QueryExecutionReport::new(
+            execution_id,
+            &request,
+            statements,
+            results,
+            elapsed_ms,
+        );
+        self.record_history(&request, &report, None).await;
+        info!(execution_id = %execution_id, elapsed_ms, "transactional query execution finished");
+        Ok(report)
+    }
+
+    pub async fn begin_transaction(
+        &self,
+        tab_id: QueryId,
+        connection_id: ConnectionId,
+        database: Option<String>,
+        _schema: Option<String>,
+        runtime_password: Option<&str>,
+    ) -> Result<()> {
+        {
+            let state = self.state.lock().await;
+            if state.transactions.contains_key(&tab_id) {
+                return Err(AppError::validation("transaction is already active"));
+            }
+        }
+
+        let (mut profile, password) = self
+            .connections
+            .profile_with_password(connection_id, runtime_password)
+            .await?;
+        if let Some(database) = database
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            profile.database = Some(database.to_string());
+        }
+        let executor = self.executor(profile.kind)?;
+        executor
+            .begin_transaction(&profile, password.as_deref(), tab_id, self.pool_config)
+            .await?;
+        self.state.lock().await.transactions.insert(
+            tab_id,
+            TransactionState {
+                connection_id,
+                kind: profile.kind,
+            },
+        );
+        Ok(())
+    }
+
+    pub async fn commit_transaction(&self, tab_id: QueryId) -> Result<()> {
+        let transaction = self
+            .state
+            .lock()
+            .await
+            .transactions
+            .remove(&tab_id)
+            .ok_or_else(|| AppError::validation("transaction is not active"))?;
+        self.executor(transaction.kind)?
+            .commit_transaction(tab_id)
+            .await
+    }
+
+    pub async fn rollback_transaction(&self, tab_id: QueryId) -> Result<()> {
+        let transaction = self
+            .state
+            .lock()
+            .await
+            .transactions
+            .remove(&tab_id)
+            .ok_or_else(|| AppError::validation("transaction is not active"))?;
+        self.executor(transaction.kind)?
+            .rollback_transaction(tab_id)
+            .await
+    }
+
+    pub async fn transaction_active(&self, tab_id: QueryId) -> bool {
+        self.state
+            .lock()
+            .await
+            .transactions
+            .contains_key(&tab_id)
     }
 
     pub async fn execute_tab(
@@ -589,17 +782,24 @@ impl QueryService {
             }
         }
     }
-}
 
-fn run_blocking_on_runtime<F, T>(future: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    match Handle::try_current() {
-        Ok(handle) => handle.block_on(future),
-        Err(_) => Runtime::new()
-            .expect("failed to create runtime for query service initialization")
-            .block_on(future),
+    async fn active_transaction_for_request(
+        &self,
+        request: &QueryExecutionRequest,
+        kind: DataSourceKind,
+    ) -> Result<Option<TransactionState>> {
+        let state = self.state.lock().await;
+        let Some(transaction) = state.transactions.get(&request.tab_id).copied() else {
+            return Ok(None);
+        };
+
+        if transaction.connection_id != request.connection_id || transaction.kind != kind {
+            return Err(AppError::validation(
+                "active transaction belongs to a different connection",
+            ));
+        }
+
+        Ok(Some(transaction))
     }
 }
 
@@ -607,8 +807,15 @@ where
 struct QueryServiceState {
     tabs: BTreeMap<QueryId, QueryTab>,
     running: BTreeMap<QueryId, AbortHandle>,
+    transactions: BTreeMap<QueryId, TransactionState>,
     history: VecDeque<QueryHistoryEntry>,
     favorites: BTreeMap<QueryId, FavoriteQuery>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransactionState {
+    connection_id: ConnectionId,
+    kind: DataSourceKind,
 }
 
 fn statements_for_request(request: &QueryExecutionRequest) -> Result<Vec<String>> {
