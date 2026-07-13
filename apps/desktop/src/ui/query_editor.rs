@@ -424,6 +424,7 @@ impl QueryEditor {
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
+        let mut transaction_action = None;
         ui.horizontal_wrapped(|ui| {
             if ui.button("New Query").clicked() {
                 self.new_query();
@@ -444,18 +445,19 @@ impl QueryEditor {
             ui.separator();
 
             let active_tab_id = self.active_tab;
-            let (is_running, is_cancelling, has_selection, transaction_active, transaction_busy) = active_tab_id
-                .and_then(|id| self.tabs.get(&id))
-                .map(|tab| {
-                    (
-                        tab.execution_running,
-                        tab.execution_cancelling,
-                        tab.has_selection(),
-                        tab.transaction_active,
-                        tab.transaction_busy,
-                    )
-                })
-                .unwrap_or((false, false, false, false, false));
+            let (is_running, is_cancelling, has_selection, transaction_active, transaction_busy) =
+                active_tab_id
+                    .and_then(|id| self.tabs.get(&id))
+                    .map(|tab| {
+                        (
+                            tab.execution_running,
+                            tab.execution_cancelling,
+                            tab.has_selection(),
+                            tab.transaction_active,
+                            tab.transaction_busy,
+                        )
+                    })
+                    .unwrap_or((false, false, false, false, false));
 
             if !is_running {
                 if ui.button("Run Current").clicked() {
@@ -507,19 +509,19 @@ impl QueryEditor {
                     .add_enabled(can_tx && !transaction_active, Button::new("BEGIN"))
                     .clicked()
                 {
-                    self.begin_transaction();
+                    transaction_action = Some(TransactionAction::Begin);
                 }
                 if ui
                     .add_enabled(can_tx && transaction_active, Button::new("COMMIT"))
                     .clicked()
                 {
-                    self.commit_transaction();
+                    transaction_action = Some(TransactionAction::Commit);
                 }
                 if ui
                     .add_enabled(can_tx && transaction_active, Button::new("ROLLBACK"))
                     .clicked()
                 {
-                    self.rollback_transaction();
+                    transaction_action = Some(TransactionAction::Rollback);
                 }
                 if let Some(error) = &tab.transaction_error {
                     ui.colored_label(Color32::RED, RichText::new(error).small());
@@ -551,6 +553,12 @@ impl QueryEditor {
                 }
             }
         });
+        match transaction_action {
+            Some(TransactionAction::Begin) => self.begin_transaction(),
+            Some(TransactionAction::Commit) => self.commit_transaction(),
+            Some(TransactionAction::Rollback) => self.rollback_transaction(),
+            None => {}
+        }
     }
 
     fn connection_selector(&mut self, ui: &mut Ui) {
@@ -800,10 +808,7 @@ impl QueryEditor {
                                         range.secondary.ccursor.index,
                                     );
                                     tab.cursor_offset = primary;
-                                    let selection = TextRange::new(
-                                        primary,
-                                        secondary,
-                                    );
+                                    let selection = TextRange::new(primary, secondary);
                                     tab.selection = (!selection.is_empty()).then_some(selection);
                                 }
 
@@ -1203,8 +1208,12 @@ impl QueryEditor {
     }
 
     fn begin_transaction(&mut self) {
-        let Some(tab_id) = self.active_tab else { return };
-        let Some(tab) = self.tabs.get(&tab_id) else { return };
+        let Some(tab_id) = self.active_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
         if tab.transaction_active || tab.transaction_busy {
             return;
         }
@@ -1231,8 +1240,12 @@ impl QueryEditor {
     }
 
     fn commit_transaction(&mut self) {
-        let Some(tab_id) = self.active_tab else { return };
-        let Some(tab) = self.tabs.get(&tab_id) else { return };
+        let Some(tab_id) = self.active_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
         if !tab.transaction_active || tab.transaction_busy {
             return;
         }
@@ -1254,8 +1267,12 @@ impl QueryEditor {
     }
 
     fn rollback_transaction(&mut self) {
-        let Some(tab_id) = self.active_tab else { return };
-        let Some(tab) = self.tabs.get(&tab_id) else { return };
+        let Some(tab_id) = self.active_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
         if !tab.transaction_active || tab.transaction_busy {
             return;
         }
@@ -1293,8 +1310,9 @@ impl QueryEditor {
 
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             if tab.transaction_active {
-                self.status = "Commit or rollback the active transaction before changing connection"
-                    .to_string();
+                self.status =
+                    "Commit or rollback the active transaction before changing connection"
+                        .to_string();
                 return;
             }
             tab.connection_id = connection_id;
@@ -1320,9 +1338,8 @@ impl QueryEditor {
         };
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             if tab.transaction_active {
-                self.status =
-                    "Commit or rollback the active transaction before changing database"
-                        .to_string();
+                self.status = "Commit or rollback the active transaction before changing database"
+                    .to_string();
                 return;
             }
             tab.database = database;
@@ -1346,8 +1363,8 @@ impl QueryEditor {
         };
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             if tab.transaction_active {
-                self.status = "Commit or rollback the active transaction before changing schema"
-                    .to_string();
+                self.status =
+                    "Commit or rollback the active transaction before changing schema".to_string();
                 return;
             }
             tab.schema = schema;
@@ -1636,7 +1653,8 @@ impl QueryEditor {
                 }
                 QueryEditorEvent::ColumnList(tab_id, table, columns) => {
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                        tab.pending_column_loads.remove(&normalize_identifier(&table));
+                        tab.pending_column_loads
+                            .remove(&normalize_identifier(&table));
                         tab.columns_by_table
                             .insert(normalize_identifier(&table), columns);
                         update_completion_for_tab(tab);
@@ -2225,13 +2243,71 @@ fn schedule_sql_highlight(tab: &mut QueryEditorTab) {
 /// A short list of SQL keywords offered when no table/column context is
 /// available. Kept lowercase to match the user's typing style.
 const SQL_KEYWORD_SUGGESTIONS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
-    "CREATE", "TABLE", "ALTER", "DROP", "INDEX", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
-    "ON", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION", "AS", "AND", "OR",
-    "NOT", "NULL", "IS", "IN", "BETWEEN", "LIKE", "DISTINCT", "CASE", "WHEN", "THEN", "ELSE",
-    "END", "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "PRIMARY", "KEY", "FOREIGN",
-    "REFERENCES", "DEFAULT", "CASCADE", "EXISTS", "EXPLAIN", "ANALYZE", "WITH", "RETURNING",
-    "TRUNCATE", "GRANT", "REVOKE", "VIEW", "SCHEMA", "DATABASE", "IF", "EXISTS",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "TABLE",
+    "ALTER",
+    "DROP",
+    "INDEX",
+    "JOIN",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "OUTER",
+    "ON",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "UNION",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IS",
+    "IN",
+    "BETWEEN",
+    "LIKE",
+    "DISTINCT",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "TRANSACTION",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "DEFAULT",
+    "CASCADE",
+    "EXISTS",
+    "EXPLAIN",
+    "ANALYZE",
+    "WITH",
+    "RETURNING",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+    "VIEW",
+    "SCHEMA",
+    "DATABASE",
+    "IF",
+    "EXISTS",
 ];
 
 /// Determine what the user is currently typing and refresh the completion list.
@@ -2402,10 +2478,33 @@ fn matches_prefix(candidate: &str, prefix: &str) -> bool {
 
 /// Render the completion popup and return the SQL with the selected item
 /// inserted if the user accepted a suggestion.
-fn completion_panel(ui: &Ui, tab: &mut QueryEditorTab) -> Option<String> {
+fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab) -> Option<String> {
     if !tab.completion.visible || tab.completion.items.is_empty() {
         return None;
     }
+
+    Frame::popup(ui.style()).show(ui, |ui| {
+        for (index, item) in tab.completion.items.iter().take(8).enumerate() {
+            let selected = index == tab.completion.selected;
+            let kind = match item.kind {
+                CompletionKind::Keyword => "keyword",
+                CompletionKind::Table => "table",
+                CompletionKind::Column => "column",
+            };
+            let detail = if item.detail.is_empty() {
+                String::new()
+            } else {
+                format!(" - {}", item.detail)
+            };
+            ui.label(
+                RichText::new(format!("{}  [{}]{}", item.label, kind, detail)).color(if selected {
+                    ui.visuals().selection.stroke.color
+                } else {
+                    ui.visuals().text_color()
+                }),
+            );
+        }
+    });
 
     let input = ui.input(|input| {
         (

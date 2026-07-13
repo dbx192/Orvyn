@@ -114,6 +114,7 @@ pub fn text_edit_cell(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn resizable_header_cell(
     ui: &mut Ui,
     width: &mut f32,

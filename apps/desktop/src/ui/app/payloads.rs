@@ -1,7 +1,7 @@
 use crate::ui::object_tree::DatabaseExportMode;
 use db_common::{
-    AppError, ConnectionId, DatabaseFunction, Dialect, QueryResult, TableColumn, TableForeignKey,
-    TableIndex, TableTrigger,
+    AppError, ConnectionId, DataSourceKind, DatabaseFunction, Dialect, QueryResult, TableColumn,
+    TableForeignKey, TableIndex, TableTrigger,
 };
 use import_export::ExportFormat;
 use std::{

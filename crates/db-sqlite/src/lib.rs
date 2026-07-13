@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
-    DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
-    QueryId, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
-    TableForeignKey, TableIndex, TableTrigger,
+    DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryId, QueryResult,
+    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey,
+    TableIndex, TableTrigger,
 };
 use std::{
     collections::BTreeMap,
@@ -148,6 +148,7 @@ impl BlockingSqlitePool {
     }
 }
 
+#[derive(Debug)]
 struct PooledSqliteConnection {
     pool: Arc<BlockingSqlitePool>,
     conn: Option<rusqlite::Connection>,

@@ -20,10 +20,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use tokio::{
-    sync::Mutex,
-    task::AbortHandle,
-};
+use tokio::{sync::Mutex, task::AbortHandle};
 use tracing::{info, instrument};
 
 pub const DEFAULT_HISTORY_LIMIT: usize = 500;
@@ -290,13 +287,12 @@ impl QueryService {
         runtime_password: Option<&str>,
     ) -> Result<QueryExecutionReport> {
         let statements = statements_for_request(&request)?;
-        let execution_plan =
-            execution_plan_for(
-                &statements,
-                request.result_limit,
-                request.result_offset,
-                request.result_total_rows,
-            )?;
+        let execution_plan = execution_plan_for(
+            &statements,
+            request.result_limit,
+            request.result_offset,
+            request.result_total_rows,
+        )?;
         let (mut profile, password) = self
             .connections
             .profile_with_password(request.connection_id, runtime_password)
@@ -322,25 +318,22 @@ impl QueryService {
         let password_for_task = password;
 
         let handle = tokio::spawn(async move {
-            tokio::time::timeout(
-                request_for_task.timeout(),
-                async {
-                    if active_transaction {
-                        executor
-                            .execute_in_transaction(request_for_task.tab_id, &statements_for_task)
-                            .await
-                    } else {
-                        executor
-                            .execute(
-                                &profile,
-                                password_for_task.as_deref(),
-                                &statements_for_task,
-                                pool_config,
-                            )
-                            .await
-                    }
-                },
-            )
+            tokio::time::timeout(request_for_task.timeout(), async {
+                if active_transaction {
+                    executor
+                        .execute_in_transaction(request_for_task.tab_id, &statements_for_task)
+                        .await
+                } else {
+                    executor
+                        .execute(
+                            &profile,
+                            password_for_task.as_deref(),
+                            &statements_for_task,
+                            pool_config,
+                        )
+                        .await
+                }
+            })
             .await
             .map_err(|_| AppError::new(ErrorKind::Timeout, "query execution timed out"))?
         });
@@ -421,12 +414,7 @@ impl QueryService {
         let pool_config = self.pool_config;
 
         executor
-            .begin_transaction(
-                &profile,
-                password.as_deref(),
-                transaction_id,
-                pool_config,
-            )
+            .begin_transaction(&profile, password.as_deref(), transaction_id, pool_config)
             .await?;
 
         let execute_result = executor
@@ -456,13 +444,8 @@ impl QueryService {
 
         let elapsed_ms = started_at.elapsed().as_millis();
         let results = execution_plan.into_report_results(results)?;
-        let report = QueryExecutionReport::new(
-            execution_id,
-            &request,
-            statements,
-            results,
-            elapsed_ms,
-        );
+        let report =
+            QueryExecutionReport::new(execution_id, &request, statements, results, elapsed_ms);
         self.record_history(&request, &report, None).await;
         info!(execution_id = %execution_id, elapsed_ms, "transactional query execution finished");
         Ok(report)
@@ -487,10 +470,7 @@ impl QueryService {
             .connections
             .profile_with_password(connection_id, runtime_password)
             .await?;
-        if let Some(database) = database
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
+        if let Some(database) = database.as_deref().filter(|value| !value.trim().is_empty()) {
             profile.database = Some(database.to_string());
         }
         let executor = self.executor(profile.kind)?;
@@ -534,11 +514,7 @@ impl QueryService {
     }
 
     pub async fn transaction_active(&self, tab_id: QueryId) -> bool {
-        self.state
-            .lock()
-            .await
-            .transactions
-            .contains_key(&tab_id)
+        self.state.lock().await.transactions.contains_key(&tab_id)
     }
 
     pub async fn execute_tab(

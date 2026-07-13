@@ -12,7 +12,9 @@ use super::{
 };
 use crate::ui::{
     table_editor::TableEditor,
-    table_structure::{build_alter_table_sql, AlterTableRequest, CreateIndexRequest, TableStructureView},
+    table_structure::{
+        build_alter_table_sql, AlterTableRequest, CreateIndexRequest, TableStructureView,
+    },
 };
 use db_common::{
     dialect::{BacktickDialect, DoubleQuoteDialect},
@@ -730,7 +732,9 @@ impl DesktopApp {
             AlterTableRequest::DropIndex { index_name, .. } => {
                 format!("drop index {index_name} on {table}")
             }
-            AlterTableRequest::AddForeignKey { constraint_name, .. } => {
+            AlterTableRequest::AddForeignKey {
+                constraint_name, ..
+            } => {
                 format!("add foreign key {constraint_name} on {table}")
             }
         };

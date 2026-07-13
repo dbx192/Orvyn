@@ -119,7 +119,7 @@ impl QueryExecutionRequest {
         }
     }
 
-    pub fn timeout(self) -> Duration {
+    pub fn timeout(&self) -> Duration {
         Duration::from_millis(self.timeout_ms.max(1))
     }
 }

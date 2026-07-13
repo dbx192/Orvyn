@@ -160,9 +160,8 @@ pub fn compare_cell_values(left: &CellValue, right: &CellValue) -> Ordering {
 }
 
 fn compare_numeric_cells(left: &CellValue, right: &CellValue) -> Option<Ordering> {
-    match (decimal_sort_text(left), decimal_sort_text(right)) {
-        (Some(left), Some(right)) => return compare_decimal_text(&left, &right),
-        _ => {}
+    if let (Some(left), Some(right)) = (decimal_sort_text(left), decimal_sort_text(right)) {
+        return compare_decimal_text(&left, &right);
     }
 
     let left = numeric_f64(left)?;

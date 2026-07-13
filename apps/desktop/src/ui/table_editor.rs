@@ -423,9 +423,7 @@ impl TableEditor {
     }
 
     fn poll_page_load(&mut self) -> Option<String> {
-        let Some(cell) = self.pending_page_load.take() else {
-            return None;
-        };
+        let cell = self.pending_page_load.take()?;
 
         let poll_result = if let Ok(mut guard) = cell.lock() {
             guard.take()
@@ -436,7 +434,11 @@ impl TableEditor {
         match poll_result {
             Some(Ok(result)) => {
                 self.replace_page_result(result);
-                Some(format!("Loaded page {} for {}", self.page + 1, self.table_name()))
+                Some(format!(
+                    "Loaded page {} for {}",
+                    self.page + 1,
+                    self.table_name()
+                ))
             }
             Some(Err(error)) => Some(format!("Failed to load page: {}", error.message)),
             None => {
@@ -2004,7 +2006,9 @@ impl TableEditor {
 
     fn total_pages(&self) -> usize {
         if let Some(remote_page) = self.remote_page() {
-            remote_page.total_rows.div_ceil(self.page_size.max(1) as u64) as usize
+            remote_page
+                .total_rows
+                .div_ceil(self.page_size.max(1) as u64) as usize
         } else {
             self.filtered_existing_rows()
                 .len()

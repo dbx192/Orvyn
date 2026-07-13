@@ -44,8 +44,11 @@ impl DesktopApp {
                     schema,
                     table,
                 } => {
-                    self.query_editor
-                        .sync_active_context(connection_id, database.clone(), schema.clone());
+                    self.query_editor.sync_active_context(
+                        connection_id,
+                        database.clone(),
+                        schema.clone(),
+                    );
                     self.state.set_status(format!(
                         "Loading table {}.{} ...",
                         schema.as_deref().unwrap_or(""),
@@ -109,8 +112,11 @@ impl DesktopApp {
                     schema,
                     table,
                 } => {
-                    self.query_editor
-                        .sync_active_context(connection_id, database.clone(), schema.clone());
+                    self.query_editor.sync_active_context(
+                        connection_id,
+                        database.clone(),
+                        schema.clone(),
+                    );
                     self.state.set_status(format!(
                         "Loading structure for {}.{} ...",
                         schema.as_deref().unwrap_or(""),

@@ -4,8 +4,8 @@ use db_common::{
     ConnectionTestReport, ConnectionTester, DataSourceKind, ErrorKind, Result, SessionInfo,
     SessionState,
 };
-use std::{collections::BTreeMap, sync::Arc};
 use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, instrument};
 

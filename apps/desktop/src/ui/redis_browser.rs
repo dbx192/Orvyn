@@ -40,6 +40,9 @@ const LARGE_VALUE_THRESHOLD: usize = 64 * 1024;
 const REDIS_KEY_SIDEBAR_WIDTH: f32 = 330.0;
 const REDIS_VALUE_ROW_LIMIT: usize = 250;
 
+type RedisKeyGroupRow = (String, Option<i64>, Option<u64>);
+type RedisKeyGroup = (String, Vec<RedisKeyGroupRow>);
+
 /// Events emitted by the Redis browser.
 #[derive(Debug, Clone)]
 pub enum RedisBrowserEvent {
@@ -733,8 +736,8 @@ impl RedisBrowserUi {
         Some(format!("{host}:{port}"))
     }
 
-    fn key_groups(&self) -> Vec<(String, Vec<(String, Option<i64>, Option<u64>)>)> {
-        let mut groups: BTreeMap<String, Vec<(String, Option<i64>, Option<u64>)>> = BTreeMap::new();
+    fn key_groups(&self) -> Vec<RedisKeyGroup> {
+        let mut groups: BTreeMap<String, Vec<RedisKeyGroupRow>> = BTreeMap::new();
         for entry in &self.keys {
             groups
                 .entry(entry.info.type_name.clone())
@@ -3014,7 +3017,7 @@ fn redis_type_rank(type_name: &str) -> u8 {
 
 fn key_leaf_label(key_name: &str) -> String {
     key_name
-        .rsplit(|ch| matches!(ch, ':' | '/' | '.'))
+        .rsplit([':', '/', '.'])
         .next()
         .filter(|value| !value.is_empty())
         .unwrap_or(key_name)
@@ -3029,7 +3032,7 @@ fn key_parent_label(key_name: &str) -> Option<String> {
     } else {
         Some(format!(
             "({})",
-            key_name[..prefix_len].trim_end_matches(|ch| matches!(ch, ':' | '/' | '.'))
+            key_name[..prefix_len].trim_end_matches([':', '/', '.'])
         ))
     }
 }

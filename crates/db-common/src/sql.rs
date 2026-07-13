@@ -630,8 +630,8 @@ fn is_pageable_result_query(sql: &str) -> bool {
         return false;
     }
 
-    let is_select_query =
-        first.value == "SELECT" || (first.value == "WITH" && words.iter().any(|word| word.value == "SELECT"));
+    let is_select_query = first.value == "SELECT"
+        || (first.value == "WITH" && words.iter().any(|word| word.value == "SELECT"));
 
     is_select_query && !is_single_row_result_query(&words)
 }
@@ -661,9 +661,10 @@ fn is_single_row_result_query(words: &[SqlWord]) -> bool {
         None => return true,
     };
 
-    projection.iter().any(|word| {
-        matches!(word.value.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX")
-    }) && !projection.iter().any(|word| word.value == "OVER")
+    projection
+        .iter()
+        .any(|word| matches!(word.value.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"))
+        && !projection.iter().any(|word| word.value == "OVER")
 }
 
 fn top_level_sql_words(sql: &str) -> Vec<SqlWord> {
@@ -906,7 +907,10 @@ mod tests {
 
     #[test]
     fn skips_page_wrappers_for_single_row_aggregate_queries() {
-        assert_eq!(page_result_statement("SELECT COUNT(*) FROM books", 500, 0), None);
+        assert_eq!(
+            page_result_statement("SELECT COUNT(*) FROM books", 500, 0),
+            None
+        );
         assert_eq!(
             count_result_page_statement("SELECT COUNT(*) FROM books"),
             None

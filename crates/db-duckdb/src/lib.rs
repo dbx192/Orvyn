@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
-    DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
-    QueryId, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
+    DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryId,
+    QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
     TableForeignKey, TableIndex,
 };
 use std::{
@@ -148,6 +148,7 @@ impl BlockingDuckDbPool {
     }
 }
 
+#[derive(Debug)]
 struct PooledDuckDbConnection {
     pool: Arc<BlockingDuckDbPool>,
     conn: Option<duckdb::Connection>,

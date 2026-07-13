@@ -5,8 +5,8 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
-    DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryResult,
-    QueryId, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
+    DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryId,
+    QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
     TableForeignKey, TableIndex, TableTrigger,
 };
 use std::{collections::BTreeMap, error::Error, fmt::Write, sync::Arc, time::Instant};
@@ -145,6 +145,7 @@ impl PostgresPool {
     }
 }
 
+#[derive(Debug)]
 struct PostgresPoolClient {
     pool: Arc<PostgresPool>,
     client: Option<Client>,
@@ -591,7 +592,10 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
             .batch_execute("BEGIN")
             .await
             .map_err(query_error)?;
-        self.transactions.lock().await.insert(transaction_id, pooled);
+        self.transactions
+            .lock()
+            .await
+            .insert(transaction_id, pooled);
         Ok(())
     }
 

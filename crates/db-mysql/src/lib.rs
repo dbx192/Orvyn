@@ -421,7 +421,7 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
     ) -> Result<Vec<QueryResult>> {
         let pool = self.pool_for(profile, password, pool_config).await?;
         let mut conn = pool.acquire().await.map_err(mysql_query_error)?;
-        execute_mysql_statements_on_connection(&mut *conn, statements).await
+        execute_mysql_statements_on_connection(&mut conn, statements).await
     }
 
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
@@ -495,7 +495,7 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         let conn = transactions
             .get_mut(&transaction_id)
             .ok_or_else(|| AppError::validation("transaction is not active"))?;
-        execute_mysql_statements_on_connection(&mut **conn, statements).await
+        execute_mysql_statements_on_connection(conn, statements).await
     }
 
     async fn commit_transaction(&self, transaction_id: QueryId) -> Result<()> {
@@ -553,7 +553,9 @@ async fn execute_mysql_statements_on_connection(
                 .fetch_all(&mut *conn)
                 .await
                 .map_err(mysql_query_error)?;
-            results.push(mysql_rows_to_query_result(statement, rows).with_elapsed(started_at.elapsed()));
+            results.push(
+                mysql_rows_to_query_result(statement, rows).with_elapsed(started_at.elapsed()),
+            );
             continue;
         }
 

@@ -2,8 +2,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use db_common::{
-    dialect::{BacktickDialect, DoubleQuoteDialect, Dialect, Identifier},
-    AppError, ConnectionId, DatabaseFunction, DataSourceKind, TableColumn, TableForeignKey,
+    dialect::{BacktickDialect, Dialect, DoubleQuoteDialect, Identifier},
+    AppError, ConnectionId, DataSourceKind, DatabaseFunction, TableColumn, TableForeignKey,
     TableIndex, TableTrigger,
 };
 use eframe::egui::{
@@ -117,7 +117,10 @@ impl AlterTableRequest {
 }
 
 /// Generate the dialect-aware SQL for an `AlterTableRequest`.
-pub fn build_alter_table_sql(request: &AlterTableRequest, kind: DataSourceKind) -> Result<String, AppError> {
+pub fn build_alter_table_sql(
+    request: &AlterTableRequest,
+    kind: DataSourceKind,
+) -> Result<String, AppError> {
     let dialect = dialect_for_kind(kind);
     match request {
         AlterTableRequest::AddColumn {
@@ -128,12 +131,32 @@ pub fn build_alter_table_sql(request: &AlterTableRequest, kind: DataSourceKind) 
             default_value,
             ..
         } => {
-            let table_sql = qualified_table_sql(dialect.as_ref(), kind, request.database(), request.schema(), table)?;
-            let column_sql = build_column_definition(dialect.as_ref(), column_name, column_type, *nullable, default_value.as_deref())?;
+            let table_sql = qualified_table_sql(
+                dialect.as_ref(),
+                kind,
+                request.database(),
+                request.schema(),
+                table,
+            )?;
+            let column_sql = build_column_definition(
+                dialect.as_ref(),
+                column_name,
+                column_type,
+                *nullable,
+                default_value.as_deref(),
+            )?;
             Ok(format!("ALTER TABLE {table_sql} ADD COLUMN {column_sql}"))
         }
-        AlterTableRequest::DropColumn { table, column_name, .. } => {
-            let table_sql = qualified_table_sql(dialect.as_ref(), kind, request.database(), request.schema(), table)?;
+        AlterTableRequest::DropColumn {
+            table, column_name, ..
+        } => {
+            let table_sql = qualified_table_sql(
+                dialect.as_ref(),
+                kind,
+                request.database(),
+                request.schema(),
+                table,
+            )?;
             let column_sql = quote_id(dialect.as_ref(), column_name)?;
             Ok(format!("ALTER TABLE {table_sql} DROP COLUMN {column_sql}"))
         }
@@ -145,14 +168,26 @@ pub fn build_alter_table_sql(request: &AlterTableRequest, kind: DataSourceKind) 
             default_value,
             ..
         } => {
-            let table_sql = qualified_table_sql(dialect.as_ref(), kind, request.database(), request.schema(), table)?;
+            let table_sql = qualified_table_sql(
+                dialect.as_ref(),
+                kind,
+                request.database(),
+                request.schema(),
+                table,
+            )?;
             let column_sql = quote_id(dialect.as_ref(), column_name)?;
-            let column_def = build_column_definition(dialect.as_ref(), column_name, new_type, *nullable, default_value.as_deref())?;
+            let column_def = build_column_definition(
+                dialect.as_ref(),
+                column_name,
+                new_type,
+                *nullable,
+                default_value.as_deref(),
+            )?;
             // MySQL uses MODIFY COLUMN, PostgreSQL/SQLite/DuckDB use ALTER COLUMN ... TYPE
             match kind {
-                DataSourceKind::MySql => {
-                    Ok(format!("ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"))
-                }
+                DataSourceKind::MySql => Ok(format!(
+                    "ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"
+                )),
                 DataSourceKind::PostgreSql => {
                     let mut statements = vec![format!(
                         "ALTER TABLE {table_sql} ALTER COLUMN {column_sql} TYPE {new_type}"
@@ -177,15 +212,25 @@ pub fn build_alter_table_sql(request: &AlterTableRequest, kind: DataSourceKind) 
                     // SQLite < 3.35 doesn't support full ALTER COLUMN; DuckDB does.
                     Ok(format!("ALTER TABLE {table_sql} ALTER COLUMN {column_sql} SET DATA TYPE {new_type}"))
                 }
-                DataSourceKind::Redis => Err(AppError::validation("unsupported data source for ALTER TABLE")),
+                DataSourceKind::Redis => Err(AppError::validation(
+                    "unsupported data source for ALTER TABLE",
+                )),
             }
         }
-        AlterTableRequest::DropIndex { table, index_name, .. } => {
+        AlterTableRequest::DropIndex {
+            table, index_name, ..
+        } => {
             let _ = table;
             let index_sql = quote_id(dialect.as_ref(), index_name)?;
             match kind {
                 DataSourceKind::MySql => {
-                    let table_sql = qualified_table_sql(dialect.as_ref(), kind, request.database(), request.schema(), table)?;
+                    let table_sql = qualified_table_sql(
+                        dialect.as_ref(),
+                        kind,
+                        request.database(),
+                        request.schema(),
+                        table,
+                    )?;
                     Ok(format!("DROP INDEX {index_sql} ON {table_sql}"))
                 }
                 DataSourceKind::PostgreSql => {
@@ -202,7 +247,9 @@ pub fn build_alter_table_sql(request: &AlterTableRequest, kind: DataSourceKind) 
                 DataSourceKind::Sqlite | DataSourceKind::DuckDb => {
                     Ok(format!("DROP INDEX IF EXISTS {index_sql}"))
                 }
-                DataSourceKind::Redis => Err(AppError::validation("unsupported data source for DROP INDEX")),
+                DataSourceKind::Redis => Err(AppError::validation(
+                    "unsupported data source for DROP INDEX",
+                )),
             }
         }
         AlterTableRequest::AddForeignKey {
@@ -215,14 +262,26 @@ pub fn build_alter_table_sql(request: &AlterTableRequest, kind: DataSourceKind) 
             on_delete,
             ..
         } => {
-            let table_sql = qualified_table_sql(dialect.as_ref(), kind, request.database(), request.schema(), table)?;
+            let table_sql = qualified_table_sql(
+                dialect.as_ref(),
+                kind,
+                request.database(),
+                request.schema(),
+                table,
+            )?;
             let constraint_sql = quote_id(dialect.as_ref(), constraint_name)?;
             let cols = columns
                 .iter()
                 .map(|c| quote_id(dialect.as_ref(), c))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
-            let ref_table_sql = qualified_table_sql(dialect.as_ref(), kind, request.database(), request.schema(), referenced_table)?;
+            let ref_table_sql = qualified_table_sql(
+                dialect.as_ref(),
+                kind,
+                request.database(),
+                request.schema(),
+                referenced_table,
+            )?;
             let ref_cols = referenced_columns
                 .iter()
                 .map(|c| quote_id(dialect.as_ref(), c))
@@ -283,10 +342,7 @@ fn qualified_table_sql(
         _ => schema,
     };
     match qualifier.filter(|value| !value.is_empty()) {
-        Some(qualifier) => Ok(format!(
-            "{}.{table_sql}",
-            quote_id(dialect, qualifier)?
-        )),
+        Some(qualifier) => Ok(format!("{}.{table_sql}", quote_id(dialect, qualifier)?)),
         None => Ok(table_sql),
     }
 }
@@ -341,7 +397,7 @@ pub struct TableStructureView {
     draft_fk_name: String,
     draft_fk_columns: Vec<bool>,
     draft_fk_ref_table: String,
-    draft_fk_ref_columns: Vec<bool>,
+    draft_fk_ref_columns: Vec<String>,
     draft_fk_on_update: String,
     draft_fk_on_delete: String,
     add_fk_error: Option<String>,
@@ -717,7 +773,8 @@ impl TableStructureView {
                 .columns
                 .iter()
                 .zip(self.draft_index_columns.iter())
-                .filter_map(|(column, selected)| selected.then(|| column.name.clone()))
+                .filter(|(_, selected)| **selected)
+                .map(|(column, _)| column.name.clone())
                 .collect::<Vec<_>>();
 
             if name.is_empty() {
@@ -787,7 +844,8 @@ impl TableStructureView {
                         ui.end_row();
                         ui.label("Default (raw SQL, optional)");
                         ui.add(
-                            TextEdit::singleline(&mut self.draft_column_default).desired_width(240.0),
+                            TextEdit::singleline(&mut self.draft_column_default)
+                                .desired_width(240.0),
                         );
                         ui.end_row();
                     });
@@ -922,7 +980,8 @@ impl TableStructureView {
                         ui.end_row();
                         ui.label("Default (raw SQL, optional)");
                         ui.add(
-                            TextEdit::singleline(&mut self.draft_modify_default).desired_width(240.0),
+                            TextEdit::singleline(&mut self.draft_modify_default)
+                                .desired_width(240.0),
                         );
                         ui.end_row();
                     });
@@ -1054,9 +1113,7 @@ impl TableStructureView {
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| {
                         ui.label("Constraint name");
-                        ui.add(
-                            TextEdit::singleline(&mut self.draft_fk_name).desired_width(240.0),
-                        );
+                        ui.add(TextEdit::singleline(&mut self.draft_fk_name).desired_width(240.0));
                         ui.end_row();
                         ui.label("Referenced table");
                         ui.add(
@@ -1074,9 +1131,20 @@ impl TableStructureView {
                                 .to_string(),
                             )
                             .show_ui(ui, |ui| {
-                                let opts = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION", "SET DEFAULT"];
+                                let opts = [
+                                    "",
+                                    "CASCADE",
+                                    "SET NULL",
+                                    "RESTRICT",
+                                    "NO ACTION",
+                                    "SET DEFAULT",
+                                ];
                                 for opt in opts {
-                                    ui.selectable_value(&mut self.draft_fk_on_update, opt.to_string(), opt);
+                                    ui.selectable_value(
+                                        &mut self.draft_fk_on_update,
+                                        opt.to_string(),
+                                        opt,
+                                    );
                                 }
                             });
                         ui.end_row();
@@ -1091,9 +1159,20 @@ impl TableStructureView {
                                 .to_string(),
                             )
                             .show_ui(ui, |ui| {
-                                let opts = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION", "SET DEFAULT"];
+                                let opts = [
+                                    "",
+                                    "CASCADE",
+                                    "SET NULL",
+                                    "RESTRICT",
+                                    "NO ACTION",
+                                    "SET DEFAULT",
+                                ];
                                 for opt in opts {
-                                    ui.selectable_value(&mut self.draft_fk_on_delete, opt.to_string(), opt);
+                                    ui.selectable_value(
+                                        &mut self.draft_fk_on_delete,
+                                        opt.to_string(),
+                                        opt,
+                                    );
                                 }
                             });
                         ui.end_row();
@@ -1108,13 +1187,11 @@ impl TableStructureView {
                 });
 
                 ui.add_space(4.0);
-                ui.label(RichText::new(format!(
-                    "Referenced columns (comma-separated, one per selected local column)"
-                )));
+                ui.label(RichText::new(
+                    "Referenced columns (comma-separated, one per selected local column)",
+                ));
                 let mut ref_cols_text = self.draft_fk_ref_columns.join(", ");
-                ui.add(
-                    TextEdit::singleline(&mut ref_cols_text).desired_width(300.0),
-                );
+                ui.add(TextEdit::singleline(&mut ref_cols_text).desired_width(300.0));
                 self.draft_fk_ref_columns = ref_cols_text
                     .split(',')
                     .map(|s| s.trim().to_string())
@@ -1146,7 +1223,8 @@ impl TableStructureView {
                 .columns
                 .iter()
                 .zip(self.draft_fk_columns.iter())
-                .filter_map(|(c, sel)| sel.then(|| c.name.clone()))
+                .filter(|(_, sel)| **sel)
+                .map(|(c, _)| c.name.clone())
                 .collect::<Vec<_>>();
 
             if name.is_empty() {
