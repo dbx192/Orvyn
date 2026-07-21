@@ -12,7 +12,7 @@ use sqlx::{
     mysql::{MySqlConnection, MySqlPoolOptions, MySqlRow},
     pool::PoolConnection,
     types::{
-        chrono::{NaiveDate, NaiveDateTime, NaiveTime},
+        chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc},
         Decimal,
     },
     Column as SqlxColumn, MySql, MySqlPool, Row as SqlxRow, TypeInfo,
@@ -735,7 +735,17 @@ fn mysql_cell_value(row: &sqlx::mysql::MySqlRow, index: usize) -> CellValue {
         .map(|column| column.type_info().name().to_ascii_lowercase())
         .unwrap_or_default();
 
-    if type_name.contains("datetime") || type_name.contains("timestamp") {
+    if type_name.contains("timestamp") {
+        // SQLx's NaiveDateTime is only type-compatible with MySQL DATETIME.
+        // DateTime<Utc> explicitly supports TIMESTAMP; keep the displayed value
+        // naive so it matches the session-local value returned by MySQL.
+        if let Ok(value) = row.try_get::<Option<DateTime<Utc>>, _>(index) {
+            return value
+                .map(|value| CellValue::DateTime(value.naive_utc()))
+                .unwrap_or(CellValue::Null);
+        }
+    }
+    if type_name.contains("datetime") {
         if let Ok(value) = row.try_get::<Option<NaiveDateTime>, _>(index) {
             return value.map(CellValue::DateTime).unwrap_or(CellValue::Null);
         }
@@ -868,4 +878,24 @@ fn group_mysql_foreign_keys(rows: Vec<MySqlRow>) -> Result<Vec<TableForeignKey>>
     }
 
     Ok(fks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::Type;
+
+    #[test]
+    fn mysql_timestamp_uses_timezone_aware_decoder() {
+        let timestamp_type = <DateTime<Utc> as Type<MySql>>::type_info();
+
+        assert!(<DateTime<Utc> as Type<MySql>>::compatible(&timestamp_type));
+        assert!(!<NaiveDateTime as Type<MySql>>::compatible(&timestamp_type));
+    }
+
+    #[test]
+    fn mysql_temporal_types_are_classified_as_datetime() {
+        assert_eq!(mysql_logical_type("TIMESTAMP"), LogicalType::DateTime);
+        assert_eq!(mysql_logical_type("DATETIME"), LogicalType::DateTime);
+    }
 }
