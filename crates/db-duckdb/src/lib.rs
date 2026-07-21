@@ -823,10 +823,14 @@ fn duckdb_query_error(error: duckdb::Error) -> AppError {
 
 fn duckdb_query_result(conn: &duckdb::Connection, statement: &str) -> Result<QueryResult> {
     let mut stmt = conn.prepare(statement).map_err(duckdb_query_error)?;
-    let column_count = stmt.column_count();
+    let mut rows = stmt.query([]).map_err(duckdb_query_error)?;
+    let executed_statement = rows
+        .as_ref()
+        .ok_or_else(|| AppError::internal("DuckDB query did not return statement metadata"))?;
+    let column_count = executed_statement.column_count();
     let columns = (0..column_count)
         .map(|index| Column {
-            name: stmt
+            name: executed_statement
                 .column_name(index)
                 .map_or_else(|_| String::new(), ToString::to_string),
             database_type: String::new(),
@@ -836,18 +840,13 @@ fn duckdb_query_result(conn: &duckdb::Connection, statement: &str) -> Result<Que
         })
         .collect();
 
-    let rows = stmt
-        .query_map([], |row| {
-            let values = (0..column_count)
-                .map(|index| duckdb_cell_value(row, index))
-                .collect::<duckdb::Result<Vec<_>>>()?;
-            Ok(Row::new(values))
-        })
-        .map_err(duckdb_query_error)?;
-
     let mut result_rows = Vec::new();
-    for row in rows {
-        result_rows.push(row.map_err(duckdb_query_error)?);
+    while let Some(row) = rows.next().map_err(duckdb_query_error)? {
+        let values = (0..column_count)
+            .map(|index| duckdb_cell_value(row, index))
+            .collect::<duckdb::Result<Vec<_>>>()
+            .map_err(duckdb_query_error)?;
+        result_rows.push(Row::new(values));
     }
 
     Ok(QueryResult {
@@ -948,5 +947,23 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["analytics", "main"]);
+    }
+
+    #[test]
+    fn query_result_reads_columns_after_execution() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory DuckDB database");
+
+        let result = duckdb_query_result(&conn, "SELECT 7 AS id, 'duck' AS name")
+            .expect("execute query result");
+
+        assert_eq!(result.columns.len(), 2);
+        assert_eq!(result.columns[0].name, "id");
+        assert_eq!(result.columns[1].name, "name");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].values[0], CellValue::Int(7));
+        assert_eq!(
+            result.rows[0].values[1],
+            CellValue::Text("duck".to_string())
+        );
     }
 }

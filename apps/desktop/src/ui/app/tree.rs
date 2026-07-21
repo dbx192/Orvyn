@@ -185,9 +185,10 @@ impl DesktopApp {
                 }
                 ObjectTreeAction::ExportDatabase {
                     connection_id,
+                    database,
                     mode,
                 } => {
-                    self.request_database_export(connection_id, mode);
+                    self.request_database_export(connection_id, database, mode);
                 }
                 ObjectTreeAction::ImportTable { connection_id } => {
                     self.import_table_request = Some(ImportTableRequest {

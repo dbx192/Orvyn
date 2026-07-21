@@ -9,6 +9,7 @@ use db_common::{
     ConnectionTester, DataSourceKind, ErrorKind, RedisConnector, RedisDatabase, RedisKeyInfo,
     RedisKeyScan, RedisMetadataReader, RedisValue, Result,
 };
+use encoding_rs::GB18030;
 use std::time::Instant;
 
 pub const ADAPTER_NAME: &str = "redis";
@@ -242,17 +243,29 @@ async fn select_database(conn: &mut redis::aio::MultiplexedConnection, database:
 }
 
 fn redis_cell(bytes: Vec<u8>) -> CellValue {
-    match String::from_utf8(bytes) {
-        Ok(text) => CellValue::Text(text),
-        Err(error) => CellValue::Bytes(error.into_bytes()),
-    }
+    decode_redis_text(&bytes)
+        .map(CellValue::Text)
+        .unwrap_or(CellValue::Bytes(bytes))
 }
 
 fn redis_field_name(bytes: Vec<u8>) -> String {
-    match String::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(error) => BASE64.encode(error.into_bytes()),
+    decode_redis_text(&bytes).unwrap_or_else(|| BASE64.encode(bytes))
+}
+
+pub fn decode_redis_text(bytes: &[u8]) -> Option<String> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return is_textual(text).then(|| text.to_string());
     }
+
+    let (decoded, had_errors) = GB18030.decode_without_bom_handling(bytes);
+    (!had_errors && is_textual(&decoded)).then(|| decoded.into_owned())
+}
+
+fn is_textual(value: &str) -> bool {
+    !value.contains('\0')
+        && value
+            .chars()
+            .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
 }
 
 #[async_trait]
@@ -1026,10 +1039,7 @@ fn redis_cell_from_raw(value: redis::Value) -> Result<CellValue> {
     match value {
         redis::Value::Nil => Ok(CellValue::Null),
         redis::Value::Int(number) => Ok(CellValue::Int(number)),
-        redis::Value::Data(bytes) => match String::from_utf8(bytes.clone()) {
-            Ok(text) => Ok(CellValue::Text(text)),
-            Err(_) => Ok(CellValue::Bytes(bytes)),
-        },
+        redis::Value::Data(bytes) => Ok(redis_cell(bytes)),
         redis::Value::Status(text) => Ok(CellValue::Text(text)),
         redis::Value::Okay => Ok(CellValue::Text("OK".to_string())),
         redis::Value::Bulk(items) => Ok(CellValue::Json(serde_json::Value::Array(
@@ -1055,5 +1065,31 @@ fn redis_json_from_raw(value: redis::Value) -> Result<serde_json::Value> {
         CellValue::DateTime(value) => Ok(serde_json::Value::String(value.to_string())),
         CellValue::Timestamp(value) => Ok(serde_json::Value::String(value.to_rfc3339())),
         CellValue::Json(value) => Ok(value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_utf8_and_gbk_redis_text() {
+        assert_eq!(
+            decode_redis_text("中文".as_bytes()).as_deref(),
+            Some("中文")
+        );
+        assert_eq!(
+            decode_redis_text(&[0xD6, 0xD0, 0xCE, 0xC4]).as_deref(),
+            Some("中文")
+        );
+    }
+
+    #[test]
+    fn keeps_binary_redis_values_as_bytes() {
+        assert_eq!(decode_redis_text(&[0, 0xFF, 0x01]), None);
+        assert_eq!(
+            redis_cell(vec![0, 0xFF, 0x01]),
+            CellValue::Bytes(vec![0, 0xFF, 0x01])
+        );
     }
 }

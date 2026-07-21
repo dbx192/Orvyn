@@ -28,6 +28,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 csv = "1.3"
 db-common = { path = "crates/db-common" }
 duckdb = { version = "~1.10504.0" }
+encoding_rs = "0.8"
 eframe = "0.27"
 redis = { version = "0.25", default-features = false, features = ["aio", "tokio-comp"] }
 rfd = "0.14"

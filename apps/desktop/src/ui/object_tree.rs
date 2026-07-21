@@ -160,6 +160,7 @@ pub enum ObjectTreeAction {
     },
     ExportDatabase {
         connection_id: ConnectionId,
+        database: Option<String>,
         mode: DatabaseExportMode,
     },
     ImportTable {
@@ -484,14 +485,8 @@ impl ObjectTree {
             if !is_leaf && (clicked_in_arrow(&response, depth) || double_clicked) {
                 self.toggle_node(node_clone.clone());
             }
-            let opens_on_click = opens_leaf_on_single_click(node.kind);
-            if is_leaf
-                && ((opens_on_click && response.clicked() && !double_clicked)
-                    || (!opens_on_click && double_clicked))
-            {
+            if should_activate_leaf(node.kind, is_leaf, response.clicked(), double_clicked) {
                 self.activate_node(&node_clone, message, actions);
-            } else if is_leaf && opens_on_click && double_clicked {
-                *message = Some(format!("Opening {}", node.label));
             } else {
                 *message = Some(format!("Selected: {}", node.label));
             }
@@ -665,6 +660,7 @@ impl ObjectTree {
                 if ui.button("Structure Only...").clicked() {
                     actions.push(ObjectTreeAction::ExportDatabase {
                         connection_id,
+                        database: None,
                         mode: DatabaseExportMode::Structure,
                     });
                     *message = Some("Export database structure".to_string());
@@ -673,6 +669,7 @@ impl ObjectTree {
                 if ui.button("Structure and Data...").clicked() {
                     actions.push(ObjectTreeAction::ExportDatabase {
                         connection_id,
+                        database: None,
                         mode: DatabaseExportMode::StructureAndData,
                     });
                     *message = Some("Export database structure and data".to_string());
@@ -705,6 +702,29 @@ impl ObjectTree {
         actions: &mut Vec<ObjectTreeAction>,
     ) {
         match node.kind {
+            MetadataNodeKind::Database => {
+                ui.menu_button("Export Database", |ui| {
+                    if ui.button("Structure Only...").clicked() {
+                        actions.push(ObjectTreeAction::ExportDatabase {
+                            connection_id: node.path.connection_id,
+                            database: node.path.database.clone(),
+                            mode: DatabaseExportMode::Structure,
+                        });
+                        *message = Some(format!("Export structure: {}", node.label));
+                        ui.close_menu();
+                    }
+                    if ui.button("Structure and Data...").clicked() {
+                        actions.push(ObjectTreeAction::ExportDatabase {
+                            connection_id: node.path.connection_id,
+                            database: node.path.database.clone(),
+                            mode: DatabaseExportMode::StructureAndData,
+                        });
+                        *message = Some(format!("Export structure and data: {}", node.label));
+                        ui.close_menu();
+                    }
+                });
+                ui.separator();
+            }
             MetadataNodeKind::Table => {
                 if ui.button("Open Table Data").clicked() {
                     self.emit_table_action(
@@ -1549,6 +1569,15 @@ fn opens_leaf_on_single_click(kind: MetadataNodeKind) -> bool {
     matches!(kind, MetadataNodeKind::Table | MetadataNodeKind::View)
 }
 
+fn should_activate_leaf(
+    kind: MetadataNodeKind,
+    is_leaf: bool,
+    clicked: bool,
+    double_clicked: bool,
+) -> bool {
+    is_leaf && ((opens_leaf_on_single_click(kind) && clicked) || double_clicked)
+}
+
 struct TreeRowSpec<'a> {
     depth: usize,
     kind: MetadataNodeKind,
@@ -1617,19 +1646,37 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
     }
 
     let (badge, badge_color) = node_kind_badge(spec.kind, spec.detail);
-    let badge_width = if badge.len() > 2 { 28.0 } else { 23.0 };
+    let uses_object_icon = matches!(
+        spec.kind,
+        MetadataNodeKind::Database | MetadataNodeKind::RedisDatabase | MetadataNodeKind::Table
+    );
+    let badge_width = if uses_object_icon {
+        23.0
+    } else if badge.len() > 2 {
+        28.0
+    } else {
+        23.0
+    };
     let badge_rect = Rect::from_center_size(
         pos2(x + badge_width * 0.5, center_y),
         vec2(badge_width, 15.0),
     );
-    painter.rect_filled(badge_rect, Rounding::same(3.0), badge_color);
-    painter.text(
-        badge_rect.center(),
-        Align2::CENTER_CENTER,
-        badge,
-        FontId::monospace(9.0),
-        badge_text_color(badge_color),
-    );
+    match spec.kind {
+        MetadataNodeKind::Database | MetadataNodeKind::RedisDatabase => {
+            paint_database_icon(painter, badge_rect, badge_color);
+        }
+        MetadataNodeKind::Table => paint_table_icon(painter, badge_rect, badge_color),
+        _ => {
+            painter.rect_filled(badge_rect, Rounding::same(3.0), badge_color);
+            painter.text(
+                badge_rect.center(),
+                Align2::CENTER_CENTER,
+                badge,
+                FontId::monospace(9.0),
+                badge_text_color(badge_color),
+            );
+        }
+    }
     x += badge_width + TREE_BADGE_GAP;
 
     let right_label = spec
@@ -1664,6 +1711,62 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
     }
 
     response
+}
+
+fn paint_database_icon(painter: &eframe::egui::Painter, rect: Rect, color: Color32) {
+    let body = rect.shrink2(vec2(1.5, 0.5));
+    painter.rect_filled(body, Rounding::same(3.0), color);
+    let highlight = Color32::from_rgba_unmultiplied(255, 255, 255, 65);
+    let shadow = Color32::from_rgba_unmultiplied(0, 0, 0, 55);
+    painter.line_segment(
+        [
+            pos2(body.left() + 2.0, body.top() + 4.5),
+            pos2(body.right() - 2.0, body.top() + 4.5),
+        ],
+        Stroke::new(1.0, highlight),
+    );
+    painter.line_segment(
+        [
+            pos2(body.left() + 2.0, body.bottom() - 4.0),
+            pos2(body.right() - 2.0, body.bottom() - 4.0),
+        ],
+        Stroke::new(1.0, shadow),
+    );
+    painter.line_segment(
+        [
+            pos2(body.left() + 3.0, body.top() + 1.5),
+            pos2(body.right() - 3.0, body.top() + 1.5),
+        ],
+        Stroke::new(1.0, highlight),
+    );
+}
+
+fn paint_table_icon(painter: &eframe::egui::Painter, rect: Rect, color: Color32) {
+    let body = rect.shrink2(vec2(1.5, 0.5));
+    painter.rect_filled(body, Rounding::same(2.0), color);
+    let grid = Color32::from_rgba_unmultiplied(255, 255, 255, 150);
+    let header_y = body.top() + 4.5;
+    painter.line_segment(
+        [
+            pos2(body.left() + 1.5, header_y),
+            pos2(body.right() - 1.5, header_y),
+        ],
+        Stroke::new(1.0, grid),
+    );
+    painter.line_segment(
+        [
+            pos2(body.center().x, header_y + 0.5),
+            pos2(body.center().x, body.bottom() - 1.5),
+        ],
+        Stroke::new(1.0, grid),
+    );
+    painter.line_segment(
+        [
+            pos2(body.left() + 1.5, body.top() + 9.0),
+            pos2(body.right() - 1.5, body.top() + 9.0),
+        ],
+        Stroke::new(1.0, grid),
+    );
 }
 
 fn tree_message_row(ui: &mut Ui, depth: usize, text: &str, error: bool) {
@@ -1935,5 +2038,27 @@ mod tests {
         assert!(opens_leaf_on_single_click(MetadataNodeKind::Table));
         assert!(opens_leaf_on_single_click(MetadataNodeKind::View));
         assert!(!opens_leaf_on_single_click(MetadataNodeKind::Query));
+    }
+
+    #[test]
+    fn double_click_always_activates_leaf_nodes() {
+        assert!(should_activate_leaf(
+            MetadataNodeKind::Table,
+            true,
+            true,
+            true
+        ));
+        assert!(should_activate_leaf(
+            MetadataNodeKind::Query,
+            true,
+            false,
+            true
+        ));
+        assert!(!should_activate_leaf(
+            MetadataNodeKind::Table,
+            false,
+            true,
+            true
+        ));
     }
 }

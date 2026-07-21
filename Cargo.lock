@@ -1496,6 +1496,7 @@ dependencies = [
  "async-trait",
  "base64",
  "db-common",
+ "encoding_rs",
  "redis",
  "serde_json",
  "urlencoding",
@@ -1556,6 +1557,7 @@ dependencies = [
  "db-postgres",
  "db-redis",
  "db-sqlite",
+ "duckdb",
  "eframe",
  "import-export",
  "rfd",
@@ -1788,6 +1790,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4c3a552cfca14630702449d35f41c84a0d15963273771c6059175a803620f3f"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]

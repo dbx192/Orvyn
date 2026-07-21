@@ -19,6 +19,7 @@ pub(super) async fn export_database_sql(
     query_service: QueryService,
     connection_manager: ConnectionManager,
     connection_id: ConnectionId,
+    selected_database: Option<String>,
     mode: DatabaseExportMode,
     path: PathBuf,
 ) -> Result<DatabaseExportPayload, AppError> {
@@ -33,7 +34,13 @@ pub(super) async fn export_database_sql(
     }
 
     let dialect = dialect_for_kind(profile.kind);
-    let targets = database_export_targets(&metadata_service, &profile, connection_id).await?;
+    let targets = database_export_targets(
+        &metadata_service,
+        &profile,
+        connection_id,
+        selected_database.as_deref(),
+    )
+    .await?;
     let mut output = String::new();
     let _ = writeln!(
         &mut output,
@@ -41,6 +48,12 @@ pub(super) async fn export_database_sql(
         database_export_mode_label(mode),
         profile.name
     );
+    if let Some(database) = selected_database.as_deref() {
+        let _ = writeln!(&mut output, "-- database: {database}\n");
+    }
+    if targets.is_empty() {
+        let _ = writeln!(&mut output, "-- no tables found\n");
+    }
 
     let mut row_count = 0usize;
     let mut current_mysql_database: Option<String> = None;
@@ -150,19 +163,24 @@ async fn database_export_targets(
     metadata_service: &MetadataService,
     profile: &db_common::ConnectionProfile,
     connection_id: ConnectionId,
+    selected_database: Option<&str>,
 ) -> Result<Vec<DatabaseExportTarget>, AppError> {
     let mut targets = Vec::new();
 
     match profile.kind {
         DataSourceKind::MySql => {
-            let databases = metadata_service.list_databases(connection_id, None).await?;
-            let database_names = if databases.is_empty() {
-                profile.database.clone().into_iter().collect::<Vec<_>>()
+            let database_names = if let Some(database) = selected_database {
+                vec![database.to_string()]
             } else {
-                databases
-                    .into_iter()
-                    .map(|database| database.name)
-                    .collect()
+                let databases = metadata_service.list_databases(connection_id, None).await?;
+                if databases.is_empty() {
+                    profile.database.clone().into_iter().collect::<Vec<_>>()
+                } else {
+                    databases
+                        .into_iter()
+                        .map(|database| database.name)
+                        .collect()
+                }
             };
 
             for database in database_names {
@@ -177,7 +195,9 @@ async fn database_export_targets(
             }
         }
         DataSourceKind::PostgreSql | DataSourceKind::Sqlite | DataSourceKind::DuckDb => {
-            let database = profile.database.clone();
+            let database = selected_database
+                .map(ToOwned::to_owned)
+                .or_else(|| profile.database.clone());
             let schemas = metadata_service
                 .list_schemas(connection_id, database.as_deref(), None)
                 .await?;
@@ -373,5 +393,99 @@ pub(super) fn qualified_table_label(qualifier: Option<&str>, table: &str) -> Str
     match qualifier.filter(|value| !value.is_empty()) {
         Some(qualifier) => format!("{qualifier}.{table}"),
         None => table.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use app_core::{storage::MemoryConnectionProfileStore, task::TaskManager};
+    use db_common::{ConnectionPoolConfig, ConnectionProfile, PasswordUpdate};
+    use secure_store::EncryptedFileStore;
+    use std::{sync::Arc, time::SystemTime};
+
+    struct TempExport {
+        database: PathBuf,
+        output: PathBuf,
+        secrets: PathBuf,
+    }
+
+    impl TempExport {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            let base = std::env::temp_dir().join(format!(
+                "rust-db-client-export-{}-{nonce}",
+                std::process::id()
+            ));
+            Self {
+                database: base.with_extension("duckdb"),
+                output: base.with_extension("sql"),
+                secrets: base.with_extension("secrets.json"),
+            }
+        }
+    }
+
+    impl Drop for TempExport {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.database);
+            let _ = std::fs::remove_file(&self.output);
+            let _ = std::fs::remove_file(&self.secrets);
+        }
+    }
+
+    #[tokio::test]
+    async fn exports_selected_duckdb_structure_and_data_to_file() {
+        let files = TempExport::new();
+        let conn = duckdb::Connection::open(&files.database).expect("open temporary DuckDB");
+        conn.execute_batch(
+            "CREATE TABLE items (id INTEGER, name VARCHAR); \
+             INSERT INTO items VALUES (1, 'first')",
+        )
+        .expect("seed temporary DuckDB");
+        drop(conn);
+
+        let connection_manager = ConnectionManager::new(
+            Arc::new(MemoryConnectionProfileStore::default()),
+            Arc::new(EncryptedFileStore::new(&files.secrets, "test-key")),
+            Vec::new(),
+        );
+        let profile = ConnectionProfile::builder(DataSourceKind::DuckDb, "export test")
+            .file_path(files.database.to_string_lossy())
+            .build()
+            .expect("build profile");
+        let profile = connection_manager
+            .create_profile(profile, PasswordUpdate::Keep)
+            .await
+            .expect("create profile");
+        let metadata_service = MetadataService::with_default_readers(connection_manager.clone());
+        let query_service = QueryService::new(
+            connection_manager.clone(),
+            vec![Arc::new(db_duckdb::DuckDbQueryExecutor::new())],
+            ConnectionPoolConfig::default(),
+            TaskManager::default(),
+            None,
+            None,
+        );
+        let payload = export_database_sql(
+            metadata_service,
+            query_service,
+            connection_manager,
+            profile.id,
+            Some(files.database.to_string_lossy().into_owned()),
+            DatabaseExportMode::StructureAndData,
+            files.output.clone(),
+        )
+        .await
+        .expect("export database");
+
+        let sql = std::fs::read_to_string(&files.output).expect("read export file");
+        assert_eq!(payload.table_count, 1);
+        assert_eq!(payload.row_count, 1);
+        assert!(sql.contains("CREATE TABLE \"main\".\"items\""));
+        assert!(sql.contains("INSERT INTO \"main\".\"items\""));
+        assert!(sql.contains("'first'"));
     }
 }

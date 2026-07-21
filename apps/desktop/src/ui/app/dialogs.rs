@@ -94,12 +94,20 @@ impl DesktopApp {
     pub(super) fn request_database_export(
         &mut self,
         connection_id: ConnectionId,
+        database: Option<String>,
         mode: DatabaseExportMode,
     ) {
         let mode_label = database_export_mode_label(mode);
+        let target_name = database
+            .as_deref()
+            .map(safe_export_file_stem)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "database".to_string());
         let file_name = match mode {
-            DatabaseExportMode::Structure => "database_structure.sql",
-            DatabaseExportMode::StructureAndData => "database_structure_data.sql",
+            DatabaseExportMode::Structure => format!("{target_name}_structure.sql"),
+            DatabaseExportMode::StructureAndData => {
+                format!("{target_name}_structure_data.sql")
+            }
         };
         let path = rfd::FileDialog::new()
             .set_title(mode_label)
@@ -108,7 +116,9 @@ impl DesktopApp {
             .save_file();
 
         if let Some(path) = path {
-            self.spawn_database_export(connection_id, mode, path);
+            self.spawn_database_export(connection_id, database, mode, path);
+        } else {
+            self.state.set_status("Database export canceled");
         }
     }
 
@@ -390,6 +400,21 @@ impl DesktopApp {
 fn trimmed_option(value: String) -> Option<String> {
     let value = value.trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+fn safe_export_file_stem(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
 }
 
 fn task_status_label(status: TaskStatus) -> &'static str {

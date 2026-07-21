@@ -1102,7 +1102,7 @@ impl RedisBrowserUi {
                             if let ValueDisplay::Loaded(RedisValue::String(bytes)) =
                                 &self.value_display
                             {
-                                self.string_edit_value = String::from_utf8_lossy(bytes).to_string();
+                                self.string_edit_value = redis_display_text(bytes);
                             }
                         }
                         if ui.button("Copy").clicked() {
@@ -1217,7 +1217,7 @@ impl RedisBrowserUi {
     }
 
     fn render_string_value(&mut self, ui: &mut Ui, style: RedisBrowserStyle, bytes: &[u8]) {
-        let text_preview = String::from_utf8_lossy(bytes);
+        let text_preview = redis_display_text(bytes);
 
         self.value_filter_bar(ui, style, bytes.len(), "bytes");
         style.inset_frame().show(ui, |ui| {
@@ -3098,15 +3098,16 @@ fn parse_ttl_from_detail(detail: Option<&str>) -> Option<i64> {
 fn format_value_preview(value: &RedisValue, max_bytes: usize) -> String {
     match value {
         RedisValue::String(bytes) => {
-            let text = String::from_utf8_lossy(bytes);
-            if text.len() > max_bytes {
+            let text = redis_display_text(bytes);
+            if text.chars().count() > max_bytes {
+                let preview = text.chars().take(max_bytes).collect::<String>();
                 format!(
                     "{}...\n\n(truncated, full size: {})",
-                    &text[..max_bytes],
+                    preview,
                     human_bytes(bytes.len() as u64)
                 )
             } else {
-                text.to_string()
+                text
             }
         }
         RedisValue::Hash(fields) => {
@@ -3184,7 +3185,7 @@ fn estimate_value_size(value: &RedisValue) -> usize {
 
 fn format_redis_command_result(value: &RedisValue) -> String {
     match value {
-        RedisValue::String(bytes) => String::from_utf8_lossy(bytes).to_string(),
+        RedisValue::String(bytes) => redis_display_text(bytes),
         RedisValue::Hash(fields) => fields
             .iter()
             .map(|(key, value)| format!("{key}: {}", cell_value_to_string(value)))
@@ -3224,7 +3225,7 @@ fn cell_value_to_string(value: &CellValue) -> String {
         CellValue::Float(f) => f.to_string(),
         CellValue::Decimal(s) => s.clone(),
         CellValue::Text(s) => s.clone(),
-        CellValue::Bytes(b) => format!("[{} bytes]", b.len()),
+        CellValue::Bytes(bytes) => redis_display_text(bytes),
         CellValue::Date(_) => "(date)".to_string(),
         CellValue::Time(_) => "(time)".to_string(),
         CellValue::DateTime(_) => "(datetime)".to_string(),
@@ -3235,4 +3236,8 @@ fn cell_value_to_string(value: &CellValue) -> String {
 
 fn cell_value_len(value: &CellValue) -> usize {
     cell_value_to_string(value).len()
+}
+
+fn redis_display_text(bytes: &[u8]) -> String {
+    db_redis::decode_redis_text(bytes).unwrap_or_else(|| format!("[{} binary bytes]", bytes.len()))
 }

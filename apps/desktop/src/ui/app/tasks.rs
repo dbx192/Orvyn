@@ -577,6 +577,7 @@ impl DesktopApp {
     pub(super) fn spawn_database_export(
         &mut self,
         connection_id: db_common::ConnectionId,
+        database: Option<String>,
         mode: crate::ui::object_tree::DatabaseExportMode,
         path: PathBuf,
     ) {
@@ -593,6 +594,7 @@ impl DesktopApp {
                 query_service,
                 connection_manager,
                 connection_id,
+                database,
                 mode,
                 path,
             )
