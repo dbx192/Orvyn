@@ -484,8 +484,14 @@ impl ObjectTree {
             if !is_leaf && (clicked_in_arrow(&response, depth) || double_clicked) {
                 self.toggle_node(node_clone.clone());
             }
-            if double_clicked && is_leaf {
+            let opens_on_click = opens_leaf_on_single_click(node.kind);
+            if is_leaf
+                && ((opens_on_click && response.clicked() && !double_clicked)
+                    || (!opens_on_click && double_clicked))
+            {
                 self.activate_node(&node_clone, message, actions);
+            } else if is_leaf && opens_on_click && double_clicked {
+                *message = Some(format!("Opening {}", node.label));
             } else {
                 *message = Some(format!("Selected: {}", node.label));
             }
@@ -1539,6 +1545,10 @@ impl ObjectTree {
     }
 }
 
+fn opens_leaf_on_single_click(kind: MetadataNodeKind) -> bool {
+    matches!(kind, MetadataNodeKind::Table | MetadataNodeKind::View)
+}
+
 struct TreeRowSpec<'a> {
     depth: usize,
     kind: MetadataNodeKind,
@@ -1913,5 +1923,17 @@ fn node_label_color(ui: &Ui, selected: bool, matched: bool, strong: bool) -> Col
         }
     } else {
         ui.visuals().text_color()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tables_and_views_open_on_single_click() {
+        assert!(opens_leaf_on_single_click(MetadataNodeKind::Table));
+        assert!(opens_leaf_on_single_click(MetadataNodeKind::View));
+        assert!(!opens_leaf_on_single_click(MetadataNodeKind::Query));
     }
 }

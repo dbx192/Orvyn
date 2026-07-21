@@ -527,8 +527,9 @@ fn duckdb_schemas(path: PathBuf) -> Result<Vec<DatabaseObject>> {
     let conn = duckdb_connection(path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT schema_name FROM information_schema.schemata \
-             WHERE schema_name NOT IN ('information_schema', 'pg_catalog') \
+            "SELECT DISTINCT schema_name FROM information_schema.schemata \
+             WHERE catalog_name = current_database() \
+               AND schema_name NOT IN ('information_schema', 'pg_catalog') \
              ORDER BY schema_name",
         )
         .map_err(duckdb_query_error)?;
@@ -575,7 +576,8 @@ fn duckdb_objects_blocking(
     let mut stmt = conn
         .prepare(
             "SELECT table_name FROM information_schema.tables \
-             WHERE table_schema = ?1 AND table_type = ?2 \
+             WHERE table_catalog = current_database() \
+               AND table_schema = ?1 AND table_type = ?2 \
              ORDER BY table_name",
         )
         .map_err(duckdb_query_error)?;
@@ -601,7 +603,8 @@ fn duckdb_columns(path: PathBuf, schema: &str, table: &str) -> Result<Vec<TableC
         .prepare(
             "SELECT column_name, data_type, is_nullable, column_default \
              FROM information_schema.columns \
-             WHERE table_schema = ?1 AND table_name = ?2 \
+             WHERE table_catalog = current_database() \
+               AND table_schema = ?1 AND table_name = ?2 \
              ORDER BY ordinal_position",
         )
         .map_err(duckdb_query_error)?;
@@ -738,7 +741,8 @@ fn duckdb_create_table_sql(path: PathBuf, schema: &str, table: &str) -> Result<S
         .prepare(
             "SELECT column_name, data_type, is_nullable, column_default \
              FROM information_schema.columns \
-             WHERE table_schema = ?1 AND table_name = ?2 \
+             WHERE table_catalog = current_database() \
+               AND table_schema = ?1 AND table_name = ?2 \
              ORDER BY ordinal_position",
         )
         .map_err(duckdb_query_error)?;
@@ -901,4 +905,48 @@ fn duckdb_cell_value(row: &duckdb::Row<'_>, index: usize) -> duckdb::Result<Cell
             CellValue::Text(format!("{:?}", value.to_owned()))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDatabase(PathBuf);
+
+    impl TempDatabase {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            Self(std::env::temp_dir().join(format!(
+                "rust-db-client-duckdb-{}-{nonce}.duckdb",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for TempDatabase {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn schemas_only_include_the_current_catalog() {
+        let database = TempDatabase::new();
+        let conn = duckdb::Connection::open(&database.0).expect("open temporary DuckDB database");
+        conn.execute_batch("CREATE SCHEMA analytics")
+            .expect("create test schema");
+        drop(conn);
+
+        let schemas = duckdb_schemas(database.0.clone()).expect("load schemas");
+        let names = schemas
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["analytics", "main"]);
+    }
 }
