@@ -9,7 +9,7 @@ use db_common::{
     TableForeignKey, TableIndex,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Condvar, Mutex},
     time::Instant,
@@ -599,31 +599,60 @@ fn duckdb_objects_blocking(
 
 fn duckdb_columns(path: PathBuf, schema: &str, table: &str) -> Result<Vec<TableColumn>> {
     let conn = duckdb_connection(path)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT column_name, data_type, is_nullable, column_default \
-             FROM information_schema.columns \
-             WHERE table_catalog = current_database() \
-               AND table_schema = ?1 AND table_name = ?2 \
-             ORDER BY ordinal_position",
-        )
-        .map_err(duckdb_query_error)?;
-    let rows = stmt
-        .query_map([schema, table], |row| {
-            Ok(TableColumn {
-                name: row.get(0)?,
-                database_type: row.get(1)?,
-                nullable: row.get::<_, String>(2)?.eq_ignore_ascii_case("YES"),
-                default_value: row.get(3)?,
-                primary_key: false,
-                comment: None,
+    let mut columns = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT column_name, data_type, is_nullable, column_default \
+                 FROM information_schema.columns \
+                 WHERE table_catalog = current_database() \
+                   AND table_schema = ?1 AND table_name = ?2 \
+                 ORDER BY ordinal_position",
+            )
+            .map_err(duckdb_query_error)?;
+        let rows = stmt
+            .query_map([schema, table], |row| {
+                Ok(TableColumn {
+                    name: row.get(0)?,
+                    database_type: row.get(1)?,
+                    nullable: row.get::<_, String>(2)?.eq_ignore_ascii_case("YES"),
+                    default_value: row.get(3)?,
+                    primary_key: false,
+                    comment: None,
+                })
             })
-        })
-        .map_err(duckdb_query_error)?;
+            .map_err(duckdb_query_error)?;
+        let mut columns = Vec::new();
+        for row in rows {
+            columns.push(row.map_err(duckdb_query_error)?);
+        }
+        columns
+    };
 
-    let mut columns = Vec::new();
-    for row in rows {
-        columns.push(row.map_err(duckdb_query_error)?);
+    let primary_keys = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT k.column_name \
+                 FROM information_schema.table_constraints AS t \
+                 JOIN information_schema.key_column_usage AS k \
+                   ON k.constraint_catalog = t.constraint_catalog \
+                  AND k.constraint_schema = t.constraint_schema \
+                  AND k.constraint_name = t.constraint_name \
+                 WHERE t.constraint_catalog = current_database() \
+                   AND t.table_schema = ?1 AND t.table_name = ?2 \
+                   AND t.constraint_type = 'PRIMARY KEY'",
+            )
+            .map_err(duckdb_query_error)?;
+        let rows = stmt
+            .query_map([schema, table], |row| row.get::<_, String>(0))
+            .map_err(duckdb_query_error)?;
+        let mut keys = BTreeSet::new();
+        for row in rows {
+            keys.insert(row.map_err(duckdb_query_error)?);
+        }
+        keys
+    };
+    for column in &mut columns {
+        column.primary_key = primary_keys.contains(&column.name);
     }
     Ok(columns)
 }
@@ -965,5 +994,18 @@ mod tests {
             result.rows[0].values[1],
             CellValue::Text("duck".to_string())
         );
+    }
+
+    #[test]
+    fn columns_include_primary_key_metadata() {
+        let database = TempDatabase::new();
+        let conn = duckdb::Connection::open(&database.0).expect("open temporary DuckDB database");
+        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, name VARCHAR)")
+            .expect("create table");
+        drop(conn);
+
+        let columns = duckdb_columns(database.0.clone(), "main", "users").expect("load columns");
+        assert!(columns[0].primary_key);
+        assert!(!columns[1].primary_key);
     }
 }

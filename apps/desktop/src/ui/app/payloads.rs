@@ -50,6 +50,7 @@ pub(super) struct TableExportPayload {
     pub(super) table_name: String,
     pub(super) path: PathBuf,
     pub(super) format: ExportFormat,
+    pub(super) row_count: usize,
 }
 
 pub(super) struct DatabaseExportPayload {
@@ -85,6 +86,24 @@ pub(super) struct DropTablePayload {
     pub(super) database: Option<String>,
     pub(super) schema: Option<String>,
     pub(super) table: String,
+}
+
+#[derive(Clone)]
+pub(super) enum ClearRequest {
+    Table {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    },
+    RedisDatabase {
+        connection_id: ConnectionId,
+        database: u8,
+    },
+}
+
+pub(super) struct ClearPayload {
+    pub(super) request: ClearRequest,
 }
 
 /// Payload produced by the alter-table async executor.

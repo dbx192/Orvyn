@@ -158,6 +158,16 @@ pub enum ObjectTreeAction {
         schema: Option<String>,
         table: String,
     },
+    ClearTable {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+    },
+    ClearRedisDatabase {
+        connection_id: ConnectionId,
+        database: u8,
+    },
     ExportDatabase {
         connection_id: ConnectionId,
         database: Option<String>,
@@ -485,7 +495,7 @@ impl ObjectTree {
             if !is_leaf && (clicked_in_arrow(&response, depth) || double_clicked) {
                 self.toggle_node(node_clone.clone());
             }
-            if should_activate_leaf(node.kind, is_leaf, response.clicked(), double_clicked) {
+            if should_activate_leaf(is_leaf, double_clicked) {
                 self.activate_node(&node_clone, message, actions);
             } else {
                 *message = Some(format!("Selected: {}", node.label));
@@ -791,6 +801,19 @@ impl ObjectTree {
                     ui.close_menu();
                 }
                 ui.separator();
+                if ui.button("Clear Table...").clicked() {
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, table| ObjectTreeAction::ClearTable {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            table,
+                        },
+                        actions,
+                    );
+                    ui.close_menu();
+                }
                 if ui.button("Drop Table...").clicked() {
                     self.emit_table_action(
                         node,
@@ -873,6 +896,22 @@ impl ObjectTree {
                     self.refresh_node(node.clone());
                     ui.close_menu();
                 }
+            }
+            MetadataNodeKind::RedisDatabase => {
+                if ui.button("Clear Database...").clicked() {
+                    let database = node
+                        .path
+                        .database
+                        .as_deref()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    actions.push(ObjectTreeAction::ClearRedisDatabase {
+                        connection_id: node.path.connection_id,
+                        database,
+                    });
+                    ui.close_menu();
+                }
+                ui.separator();
             }
             MetadataNodeKind::RedisKey => {
                 if ui.button("View Key").clicked() {
@@ -1565,17 +1604,8 @@ impl ObjectTree {
     }
 }
 
-fn opens_leaf_on_single_click(kind: MetadataNodeKind) -> bool {
-    matches!(kind, MetadataNodeKind::Table | MetadataNodeKind::View)
-}
-
-fn should_activate_leaf(
-    kind: MetadataNodeKind,
-    is_leaf: bool,
-    clicked: bool,
-    double_clicked: bool,
-) -> bool {
-    is_leaf && ((opens_leaf_on_single_click(kind) && clicked) || double_clicked)
+fn should_activate_leaf(is_leaf: bool, double_clicked: bool) -> bool {
+    is_leaf && double_clicked
 }
 
 struct TreeRowSpec<'a> {
@@ -1714,36 +1744,45 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
 }
 
 fn paint_database_icon(painter: &eframe::egui::Painter, rect: Rect, color: Color32) {
-    let body = rect.shrink2(vec2(1.5, 0.5));
-    painter.rect_filled(body, Rounding::same(3.0), color);
-    let highlight = Color32::from_rgba_unmultiplied(255, 255, 255, 65);
-    let shadow = Color32::from_rgba_unmultiplied(0, 0, 0, 55);
-    painter.line_segment(
-        [
-            pos2(body.left() + 2.0, body.top() + 4.5),
-            pos2(body.right() - 2.0, body.top() + 4.5),
-        ],
-        Stroke::new(1.0, highlight),
+    let body = rect.shrink2(vec2(2.5, 0.5));
+    let cap_height = 5.0;
+    let middle = Rect::from_min_max(
+        pos2(body.left(), body.top() + cap_height * 0.5),
+        pos2(body.right(), body.bottom() - cap_height * 0.5),
     );
-    painter.line_segment(
-        [
-            pos2(body.left() + 2.0, body.bottom() - 4.0),
-            pos2(body.right() - 2.0, body.bottom() - 4.0),
-        ],
-        Stroke::new(1.0, shadow),
+    let top = Rect::from_center_size(
+        pos2(body.center().x, body.top() + cap_height * 0.5),
+        vec2(body.width(), cap_height),
     );
-    painter.line_segment(
-        [
-            pos2(body.left() + 3.0, body.top() + 1.5),
-            pos2(body.right() - 3.0, body.top() + 1.5),
-        ],
-        Stroke::new(1.0, highlight),
+    let bottom = Rect::from_center_size(
+        pos2(body.center().x, body.bottom() - cap_height * 0.5),
+        vec2(body.width(), cap_height),
     );
+    painter.rect_filled(middle, Rounding::ZERO, color);
+    painter.rect_filled(bottom, Rounding::same(cap_height * 0.5), color);
+    painter.rect_filled(top, Rounding::same(cap_height * 0.5), color);
+    painter.rect_stroke(
+        top,
+        Rounding::same(cap_height * 0.5),
+        Stroke::new(1.0, Color32::WHITE),
+    );
+    let divider = Color32::from_rgba_unmultiplied(255, 255, 255, 95);
+    for y in [body.top() + 5.0, body.top() + 9.5] {
+        painter.line_segment(
+            [pos2(body.left() + 1.0, y), pos2(body.right() - 1.0, y)],
+            Stroke::new(0.8, divider),
+        );
+    }
 }
 
 fn paint_table_icon(painter: &eframe::egui::Painter, rect: Rect, color: Color32) {
     let body = rect.shrink2(vec2(1.5, 0.5));
     painter.rect_filled(body, Rounding::same(2.0), color);
+    painter.rect_stroke(
+        body,
+        Rounding::same(2.0),
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 120)),
+    );
     let grid = Color32::from_rgba_unmultiplied(255, 255, 255, 150);
     let header_y = body.top() + 4.5;
     painter.line_segment(
@@ -2034,31 +2073,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tables_and_views_open_on_single_click() {
-        assert!(opens_leaf_on_single_click(MetadataNodeKind::Table));
-        assert!(opens_leaf_on_single_click(MetadataNodeKind::View));
-        assert!(!opens_leaf_on_single_click(MetadataNodeKind::Query));
+    fn single_click_only_selects_leaf_nodes() {
+        assert!(!should_activate_leaf(true, false));
     }
 
     #[test]
     fn double_click_always_activates_leaf_nodes() {
-        assert!(should_activate_leaf(
-            MetadataNodeKind::Table,
-            true,
-            true,
-            true
-        ));
-        assert!(should_activate_leaf(
-            MetadataNodeKind::Query,
-            true,
-            false,
-            true
-        ));
-        assert!(!should_activate_leaf(
-            MetadataNodeKind::Table,
-            false,
-            true,
-            true
-        ));
+        assert!(should_activate_leaf(true, true));
+        assert!(!should_activate_leaf(false, true));
     }
 }

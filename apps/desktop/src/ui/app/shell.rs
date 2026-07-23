@@ -3,10 +3,22 @@ use eframe::egui::{
     Align, Button, CentralPanel, Context, Frame, Layout, Margin, RichText, Stroke, TopBottomPanel,
     Ui,
 };
+use std::time::Duration;
 
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.poll_pending_loads();
+        if self.pending_table_load.is_some()
+            || self.pending_structure_load.is_some()
+            || self.pending_table_export.is_some()
+            || self.pending_database_export.is_some()
+            || self.pending_index_create.is_some()
+            || self.pending_table_drop.is_some()
+            || self.pending_clear.is_some()
+            || self.pending_alter_table.is_some()
+        {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         self.handle_shortcuts(ctx);
 
         apply_app_style(ctx, self.state.theme);
@@ -18,6 +30,7 @@ impl eframe::App for DesktopApp {
         self.table_export_window(ctx);
         self.import_table_window(ctx);
         self.drop_table_window(ctx);
+        self.clear_window(ctx);
         self.bottom_status(ctx);
         self.error_window(ctx);
     }

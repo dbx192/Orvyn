@@ -9,6 +9,110 @@ use std::{
     path::Path,
 };
 
+pub struct QueryResultFileWriter {
+    output: ExportWriter,
+    columns: Vec<String>,
+    rows_written: usize,
+}
+
+enum ExportWriter {
+    Delimited(Box<csv::Writer<File>>),
+    Json(BufWriter<File>),
+}
+
+impl QueryResultFileWriter {
+    pub fn create(format: ExportFormat, path: &Path, columns: Vec<String>) -> Result<Self> {
+        let output = match format {
+            ExportFormat::Csv | ExportFormat::ExcelCompatible => {
+                let delimiter = if format == ExportFormat::Csv {
+                    b','
+                } else {
+                    b'\t'
+                };
+                let mut writer = csv::WriterBuilder::new()
+                    .delimiter(delimiter)
+                    .from_path(path)
+                    .map_err(|error| db_common::AppError::internal(error.to_string()))?;
+                writer
+                    .write_record(columns.iter().map(String::as_str))
+                    .map_err(|error| db_common::AppError::internal(error.to_string()))?;
+                ExportWriter::Delimited(Box::new(writer))
+            }
+            ExportFormat::Json => {
+                let file = File::create(path).map_err(db_common::AppError::from)?;
+                let mut writer = BufWriter::new(file);
+                writer
+                    .write_all(b"[\n")
+                    .map_err(db_common::AppError::from)?;
+                ExportWriter::Json(writer)
+            }
+        };
+        Ok(Self {
+            output,
+            columns,
+            rows_written: 0,
+        })
+    }
+
+    pub fn write_page(&mut self, result: &QueryResult) -> Result<usize> {
+        let page_rows = result.rows.len();
+        match &mut self.output {
+            ExportWriter::Delimited(writer) => {
+                for row in &result.rows {
+                    let record = (0..self.columns.len())
+                        .map(|index| {
+                            row.values
+                                .get(index)
+                                .map(export_cell_value)
+                                .unwrap_or_else(|| "NULL".to_string())
+                        })
+                        .collect::<Vec<_>>();
+                    writer
+                        .write_record(&record)
+                        .map_err(|error| db_common::AppError::internal(error.to_string()))?;
+                }
+            }
+            ExportWriter::Json(writer) => {
+                for row in &result.rows {
+                    if self.rows_written > 0 {
+                        writer
+                            .write_all(b",\n")
+                            .map_err(db_common::AppError::from)?;
+                    }
+                    let object = self
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .map(|(index, column)| {
+                            let value = row.values.get(index).unwrap_or(&CellValue::Null);
+                            (column.clone(), json_cell_value(value))
+                        })
+                        .collect::<serde_json::Map<_, _>>();
+                    serde_json::to_writer(&mut *writer, &serde_json::Value::Object(object))
+                        .map_err(db_common::AppError::from)?;
+                    self.rows_written += 1;
+                }
+                return Ok(page_rows);
+            }
+        }
+        self.rows_written += page_rows;
+        Ok(page_rows)
+    }
+
+    pub fn finish(mut self) -> Result<usize> {
+        match &mut self.output {
+            ExportWriter::Delimited(writer) => writer.flush().map_err(db_common::AppError::from)?,
+            ExportWriter::Json(writer) => {
+                writer
+                    .write_all(b"\n]\n")
+                    .map_err(db_common::AppError::from)?;
+                writer.flush().map_err(db_common::AppError::from)?;
+            }
+        }
+        Ok(self.rows_written)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Csv,
@@ -33,11 +137,15 @@ pub fn export_query_result_to_file(
     format: ExportFormat,
     path: &Path,
 ) -> Result<()> {
-    match format {
-        ExportFormat::Csv => export_delimited_to_file(result, b',', path),
-        ExportFormat::Json => export_json_to_file(result, path),
-        ExportFormat::ExcelCompatible => export_delimited_to_file(result, b'\t', path),
-    }
+    let columns = result
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+    let mut writer = QueryResultFileWriter::create(format, path, columns)?;
+    writer.write_page(result)?;
+    writer.finish()?;
+    Ok(())
 }
 
 fn export_delimited(result: &QueryResult, delimiter: char) -> String {
@@ -86,65 +194,6 @@ fn export_json(result: &QueryResult) -> Result<String> {
         .collect::<Vec<_>>();
 
     serde_json::to_string_pretty(&rows).map_err(Into::into)
-}
-
-fn export_delimited_to_file(result: &QueryResult, delimiter: u8, path: &Path) -> Result<()> {
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(delimiter)
-        .from_path(path)
-        .map_err(|error| db_common::AppError::internal(error.to_string()))?;
-
-    writer
-        .write_record(result.columns.iter().map(|column| column.name.as_str()))
-        .map_err(|error| db_common::AppError::internal(error.to_string()))?;
-
-    for row in &result.rows {
-        let record = (0..result.columns.len())
-            .map(|index| {
-                row.values
-                    .get(index)
-                    .map(export_cell_value)
-                    .unwrap_or_else(|| "NULL".to_string())
-            })
-            .collect::<Vec<_>>();
-        writer
-            .write_record(&record)
-            .map_err(|error| db_common::AppError::internal(error.to_string()))?;
-    }
-
-    writer.flush().map_err(db_common::AppError::from)?;
-    Ok(())
-}
-
-fn export_json_to_file(result: &QueryResult, path: &Path) -> Result<()> {
-    let file = File::create(path).map_err(db_common::AppError::from)?;
-    let mut writer = BufWriter::new(file);
-    writer
-        .write_all(b"[\n")
-        .map_err(db_common::AppError::from)?;
-
-    for (row_index, row) in result.rows.iter().enumerate() {
-        if row_index > 0 {
-            writer
-                .write_all(b",\n")
-                .map_err(db_common::AppError::from)?;
-        }
-
-        let mut object = serde_json::Map::new();
-        for (column_index, column) in result.columns.iter().enumerate() {
-            let value = row.values.get(column_index).unwrap_or(&CellValue::Null);
-            object.insert(column.name.clone(), json_cell_value(value));
-        }
-
-        serde_json::to_writer(&mut writer, &serde_json::Value::Object(object))
-            .map_err(db_common::AppError::from)?;
-    }
-
-    writer
-        .write_all(b"\n]")
-        .map_err(db_common::AppError::from)?;
-    writer.flush().map_err(db_common::AppError::from)?;
-    Ok(())
 }
 
 fn json_cell_value(value: &CellValue) -> serde_json::Value {
@@ -295,6 +344,37 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(content, "id,name\n1,alice\n");
+    }
+
+    #[test]
+    fn streams_multiple_pages_into_one_export_file() {
+        let path = temp_test_file_path("csv");
+        let mut writer = QueryResultFileWriter::create(
+            ExportFormat::Csv,
+            &path,
+            vec!["id".to_string(), "name".to_string()],
+        )
+        .unwrap();
+        let page = |id, name: &str| QueryResult {
+            statement: "select id, name from users".to_string(),
+            columns: Vec::new(),
+            rows: vec![Row::new(vec![
+                CellValue::Int(id),
+                CellValue::Text(name.to_string()),
+            ])],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            notices: Vec::new(),
+            metadata: Default::default(),
+        };
+
+        writer.write_page(&page(1, "alice")).unwrap();
+        writer.write_page(&page(2, "bob")).unwrap();
+        assert_eq!(writer.finish().unwrap(), 2);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(content, "id,name\n1,alice\n2,bob\n");
     }
 
     fn typed_column(name: &str, logical_type: LogicalType) -> Column {

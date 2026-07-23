@@ -1974,6 +1974,13 @@ impl RedisBrowserUi {
         self.confirm_delete = Some(key_name);
     }
 
+    pub fn refresh_database(&mut self, connection_id: ConnectionId, database: u8) {
+        if self.connection_id != connection_id {
+            return;
+        }
+        self.switch_database(database);
+    }
+
     fn switch_database(&mut self, database: u8) {
         self.selected_database = database;
         self.keys.clear();

@@ -24,6 +24,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::runtime::Handle;
 
@@ -243,6 +244,9 @@ impl TableEditor {
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
         let mut message = self.poll_commit().or_else(|| self.poll_page_load());
+        if self.pending_page_load.is_some() || self.is_committing() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
 
         if self.show_commit_dialog {
             self.commit_dialog(ui, &mut message);
@@ -1192,10 +1196,9 @@ impl TableEditor {
         let database = self.database.clone();
         let schema = self.schema.clone();
         let table = self.table.clone();
-        let sql = format!(
-            "SELECT * FROM {}",
-            self.qualified_table_name().unwrap_or(table.clone())
-        );
+        let sql = self
+            .ordered_table_query()
+            .unwrap_or_else(|_| format!("SELECT * FROM {table}"));
 
         let cell = Arc::new(Mutex::new(None::<Result<(Vec<TableColumn>, QueryResult)>>));
         let cell_for_task = cell.clone();
@@ -1275,9 +1278,18 @@ impl TableEditor {
             *message = Some("Failed to build table SQL".to_string());
             return;
         };
-        let sql = format!("SELECT * FROM {}", table_sql);
         let offset = (next_page as u64).saturating_mul(u64::from(page_size));
         let total_rows = self.remote_total_rows();
+        let keyset_page = self.keyset_page_query(next_page, page_size);
+        let (sql, reverse_rows, uses_keyset) = match keyset_page {
+            Some((sql, reverse_rows)) => (sql, reverse_rows, true),
+            None => (
+                self.ordered_table_query()
+                    .unwrap_or_else(|_| format!("SELECT * FROM {table_sql}")),
+                false,
+                false,
+            ),
+        };
         let cell = Arc::new(Mutex::new(None::<Result<QueryResult>>));
         let cell_for_task = cell.clone();
 
@@ -1294,19 +1306,39 @@ impl TableEditor {
                         cursor_offset: 0,
                         selection: None,
                         timeout_ms: 30_000,
-                        result_limit: Some(page_size),
-                        result_offset: offset,
-                        result_total_rows: total_rows,
+                        result_limit: (!uses_keyset).then_some(page_size),
+                        result_offset: if uses_keyset { 0 } else { offset },
+                        result_total_rows: (!uses_keyset).then_some(total_rows).flatten(),
                     },
                     None,
                 )
                 .await
                 .map(|report| {
-                    report
+                    let mut result = report
                         .results
                         .into_iter()
                         .next()
-                        .unwrap_or_else(|| QueryResult::empty(""))
+                        .unwrap_or_else(|| QueryResult::empty(""));
+                    if uses_keyset {
+                        if reverse_rows {
+                            result.rows.reverse();
+                        }
+                        result.metadata.insert(
+                            QUERY_RESULT_METADATA_PAGE_LIMIT.to_string(),
+                            page_size.to_string(),
+                        );
+                        result.metadata.insert(
+                            QUERY_RESULT_METADATA_PAGE_OFFSET.to_string(),
+                            offset.to_string(),
+                        );
+                        if let Some(total_rows) = total_rows {
+                            result.metadata.insert(
+                                QUERY_RESULT_METADATA_TOTAL_ROWS.to_string(),
+                                total_rows.to_string(),
+                            );
+                        }
+                    }
+                    result
                 });
             *cell_for_task.lock().unwrap() = Some(result);
         });
@@ -2234,6 +2266,82 @@ impl TableEditor {
         Ok(output)
     }
 
+    fn ordered_table_query(&self) -> std::result::Result<String, String> {
+        let table = self.qualified_table_name()?;
+        let primary_keys = self
+            .columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| self.quote_identifier(&column.name))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if primary_keys.is_empty() {
+            Ok(format!("SELECT * FROM {table}"))
+        } else {
+            Ok(format!(
+                "SELECT * FROM {table} ORDER BY {}",
+                primary_keys.join(", ")
+            ))
+        }
+    }
+
+    fn keyset_page_query(&self, next_page: usize, page_size: u32) -> Option<(String, bool)> {
+        let (anchor, operator, direction, reverse_rows) = if next_page == self.page + 1 {
+            (self.result.rows.last()?, ">", "ASC", false)
+        } else if next_page + 1 == self.page {
+            (self.result.rows.first()?, "<", "DESC", true)
+        } else {
+            return None;
+        };
+
+        let keys = self
+            .columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| {
+                let result_index = self
+                    .result
+                    .columns
+                    .iter()
+                    .position(|result_column| result_column.name == column.name)?;
+                let value = anchor.values.get(result_index).and_then(keyset_literal)?;
+                Some((self.quote_identifier(&column.name).ok()?, value))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if keys.is_empty() {
+            return None;
+        }
+
+        let identifiers = keys
+            .iter()
+            .map(|(identifier, _)| identifier.as_str())
+            .collect::<Vec<_>>();
+        let values = keys
+            .iter()
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        let predicate = if keys.len() == 1 {
+            format!("{} {operator} {}", identifiers[0], values[0])
+        } else {
+            format!(
+                "({}) {operator} ({})",
+                identifiers.join(", "),
+                values.join(", ")
+            )
+        };
+        let order = identifiers
+            .iter()
+            .map(|identifier| format!("{identifier} {direction}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some((
+            format!(
+                "SELECT * FROM {} WHERE {predicate} ORDER BY {order} LIMIT {page_size}",
+                self.qualified_table_name().ok()?
+            ),
+            reverse_rows,
+        ))
+    }
+
     fn remote_page(&self) -> Option<RemotePage> {
         let limit = self
             .result
@@ -2371,6 +2479,25 @@ fn sql_literal_for_cell(value: &CellValue) -> String {
             format!("'{}'", value.replace('\'', "''"))
         }
         _ => sql_literal(&copy_cell_value(value)),
+    }
+}
+
+fn keyset_literal(value: &CellValue) -> Option<String> {
+    match value {
+        CellValue::Null | CellValue::Bytes(_) | CellValue::Json(_) => None,
+        CellValue::Bool(value) => Some(if *value { "TRUE" } else { "FALSE" }.to_string()),
+        CellValue::Int(value) => Some(value.to_string()),
+        CellValue::UInt(value) => Some(value.to_string()),
+        CellValue::Float(value) if value.is_finite() => Some(value.to_string()),
+        CellValue::Float(_) => None,
+        CellValue::Decimal(value) => Some(value.clone()),
+        CellValue::Text(value) => Some(format!("'{}'", value.replace('\'', "''"))),
+        CellValue::Date(_)
+        | CellValue::Time(_)
+        | CellValue::DateTime(_)
+        | CellValue::Timestamp(_) => {
+            Some(format!("'{}'", copy_cell_value(value).replace('\'', "''")))
+        }
     }
 }
 
@@ -2552,6 +2679,26 @@ mod tests {
     }
 
     #[test]
+    fn uses_primary_key_cursor_for_adjacent_pages() {
+        let mut editor = test_editor(true);
+        editor.page = 4;
+
+        let (next_sql, reverse_next) = editor.keyset_page_query(5, 500).unwrap();
+        assert_eq!(
+            next_sql,
+            "SELECT * FROM `main`.`customers` WHERE `id` > 2 ORDER BY `id` ASC LIMIT 500"
+        );
+        assert!(!reverse_next);
+
+        let (previous_sql, reverse_previous) = editor.keyset_page_query(3, 500).unwrap();
+        assert_eq!(
+            previous_sql,
+            "SELECT * FROM `main`.`customers` WHERE `id` < 1 ORDER BY `id` DESC LIMIT 500"
+        );
+        assert!(reverse_previous);
+    }
+
+    #[test]
     fn aligns_result_columns_with_row_values_when_metadata_order_differs() {
         let columns = vec![
             TableColumn {
@@ -2647,7 +2794,22 @@ mod tests {
         ];
         let result = QueryResult {
             statement: "select id, name from customers".to_string(),
-            columns: Vec::new(),
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    database_type: "BIGINT".to_string(),
+                    logical_type: LogicalType::Int,
+                    nullable: false,
+                    primary_key,
+                },
+                Column {
+                    name: "name".to_string(),
+                    database_type: "VARCHAR".to_string(),
+                    logical_type: LogicalType::Text,
+                    nullable: true,
+                    primary_key: false,
+                },
+            ],
             rows: vec![
                 Row::new(vec![
                     CellValue::Int(1),

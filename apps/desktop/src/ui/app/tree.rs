@@ -1,6 +1,6 @@
 use super::{
     export_sql::qualified_table_label,
-    payloads::{DropTableRequest, ImportTableRequest, TableExportRequest},
+    payloads::{ClearRequest, DropTableRequest, ImportTableRequest, TableExportRequest},
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
@@ -182,6 +182,34 @@ impl DesktopApp {
                     });
                     self.state
                         .set_status(format!("Confirm drop table: {}", table_name));
+                }
+                ObjectTreeAction::ClearTable {
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                } => {
+                    let table_name =
+                        qualified_table_label(schema.as_deref().or(database.as_deref()), &table);
+                    self.clear_request = Some(ClearRequest::Table {
+                        connection_id,
+                        database,
+                        schema,
+                        table,
+                    });
+                    self.state
+                        .set_status(format!("Confirm clear table: {table_name}"));
+                }
+                ObjectTreeAction::ClearRedisDatabase {
+                    connection_id,
+                    database,
+                } => {
+                    self.clear_request = Some(ClearRequest::RedisDatabase {
+                        connection_id,
+                        database,
+                    });
+                    self.state
+                        .set_status(format!("Confirm clear Redis DB {database}"));
                 }
                 ObjectTreeAction::ExportDatabase {
                     connection_id,

@@ -4,9 +4,9 @@ use super::{
         qualified_table_label, qualified_table_sql,
     },
     payloads::{
-        AlterTablePayload, DatabaseExportPayload, DropTablePayload, DropTableRequest,
-        IndexCreatePayload, PendingTask, TableDataPayload, TableExportPayload, TableExportRequest,
-        TableStructurePayload,
+        AlterTablePayload, ClearPayload, ClearRequest, DatabaseExportPayload, DropTablePayload,
+        DropTableRequest, IndexCreatePayload, PendingTask, TableDataPayload, TableExportPayload,
+        TableExportRequest, TableStructurePayload,
     },
     ActivePanel, DesktopApp,
 };
@@ -17,11 +17,10 @@ use crate::ui::{
     },
 };
 use db_common::{
-    dialect::{BacktickDialect, DoubleQuoteDialect},
     AppError, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest, QueryId,
     QueryResult,
 };
-use import_export::{export_query_result_to_file, ExportFormat};
+use import_export::{ExportFormat, QueryResultFileWriter};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -133,9 +132,10 @@ impl DesktopApp {
                                 ExportFormat::ExcelCompatible => "Excel",
                             };
                             self.state.set_status(format!(
-                                "{} export completed: {} -> {}",
+                                "{} export completed: {} ({} rows) -> {}",
                                 format_label,
                                 payload.table_name,
+                                payload.row_count,
                                 payload.path.display()
                             ));
                         }
@@ -256,6 +256,66 @@ impl DesktopApp {
             }
         }
 
+        let clear_cell = self.pending_clear.take();
+        if let Some(cell) = clear_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            self.object_tree.reload_root();
+                            match payload.request {
+                                ClearRequest::Table {
+                                    connection_id,
+                                    database,
+                                    schema,
+                                    table,
+                                } => {
+                                    let table_name = qualified_table_label(
+                                        schema.as_deref().or(database.as_deref()),
+                                        &table,
+                                    );
+                                    let is_open = self
+                                        .table_editor
+                                        .as_ref()
+                                        .is_some_and(|editor| editor.table_name() == table_name);
+                                    if is_open {
+                                        self.spawn_table_data_load(
+                                            connection_id,
+                                            database,
+                                            schema,
+                                            table,
+                                        );
+                                        self.active_panel = ActivePanel::TableEditor;
+                                    }
+                                    self.state
+                                        .set_status(format!("Cleared table: {table_name}"));
+                                }
+                                ClearRequest::RedisDatabase {
+                                    connection_id,
+                                    database,
+                                } => {
+                                    if let Some(browser) = &mut self.redis_browser {
+                                        browser.refresh_database(connection_id, database);
+                                    }
+                                    self.state
+                                        .set_status(format!("Cleared Redis DB {database}"));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("Clear failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_clear = Some(cell);
+            }
+        }
+
         let alter_cell = self.pending_alter_table.take();
         if let Some(cell) = alter_cell {
             let mut done = false;
@@ -308,85 +368,71 @@ impl DesktopApp {
         let tbl = table.clone();
 
         runtime.spawn(async move {
-            let kind = connection_manager
-                .get_profile(connection_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|profile| profile.kind)
-                .unwrap_or(DataSourceKind::PostgreSql);
-            let dialect: Box<dyn Dialect> = match kind {
-                DataSourceKind::MySql => Box::new(BacktickDialect),
-                _ => Box::new(DoubleQuoteDialect),
-            };
+            let result = async {
+                let profile = connection_manager
+                    .get_profile(connection_id)
+                    .await?
+                    .ok_or_else(|| AppError::validation("connection profile not found"))?;
+                let kind = profile.kind;
+                let dialect = dialect_for_kind(kind);
+                let qualified = qualified_table_sql(
+                    dialect.as_ref(),
+                    kind,
+                    db.as_deref(),
+                    sch.as_deref(),
+                    &tbl,
+                )?;
 
-            let qualified = match &sch {
-                Some(s) if !s.is_empty() => {
-                    format!(
-                        "{}.{}",
-                        dialect.quote_identifier(&db_common::Identifier::new(s.as_str()).unwrap()),
-                        dialect
-                            .quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
+                // DuckDB opens the same file for metadata and data. Finish the metadata
+                // connection first so table activation cannot race a second file handle.
+                let columns = metadata_service
+                    .table_columns(connection_id, db.as_deref(), sch.as_deref(), &tbl, None)
+                    .await?;
+                let sql = ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
+                let report = query_service
+                    .execute(
+                        QueryExecutionRequest {
+                            tab_id: QueryId::new(),
+                            connection_id,
+                            database: db.clone(),
+                            schema: sch.clone(),
+                            sql,
+                            mode: QueryExecutionMode::All,
+                            cursor_offset: 0,
+                            selection: None,
+                            timeout_ms: 30_000,
+                            result_limit: Some(500),
+                            result_offset: 0,
+                            result_total_rows: None,
+                        },
+                        None,
                     )
-                }
-                _ => dialect.quote_identifier(&db_common::Identifier::new(tbl.as_str()).unwrap()),
-            };
-            let sql = format!("SELECT * FROM {}", qualified);
-
-            let columns_future = metadata_service.table_columns(
-                connection_id,
-                db.as_deref(),
-                sch.as_deref(),
-                &tbl,
-                None,
-            );
-            let request = QueryExecutionRequest {
-                tab_id: QueryId::new(),
-                connection_id,
-                database: db.clone(),
-                schema: sch.clone(),
-                sql,
-                mode: QueryExecutionMode::All,
-                cursor_offset: 0,
-                selection: None,
-                timeout_ms: 30000,
-                result_limit: Some(500),
-                result_offset: 0,
-                result_total_rows: None,
-            };
-            let query_future = query_service.execute(request, None);
-
-            let (columns_result, query_result) = tokio::join!(columns_future, query_future);
-
-            let result = match (columns_result, query_result) {
-                (Ok(columns), Ok(report)) => {
-                    let data = report
-                        .results
-                        .into_iter()
-                        .next()
-                        .unwrap_or_else(|| QueryResult {
-                            statement: String::new(),
-                            columns: Vec::new(),
-                            rows: Vec::new(),
-                            affected_rows: 0,
-                            execution_time_ms: 0,
-                            notices: Vec::new(),
-                            metadata: Default::default(),
-                        });
-                    Ok(TableDataPayload {
-                        connection_id,
-                        kind,
-                        database: db,
-                        schema: sch,
-                        table: tbl,
-                        columns,
-                        result: data,
-                        dialect,
-                    })
-                }
-                (Err(e), _) => Err(e),
-                (_, Err(e)) => Err(e),
-            };
+                    .await?;
+                let data = report
+                    .results
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| QueryResult {
+                        statement: String::new(),
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        affected_rows: 0,
+                        execution_time_ms: 0,
+                        notices: Vec::new(),
+                        metadata: Default::default(),
+                    });
+                Ok(TableDataPayload {
+                    connection_id,
+                    kind,
+                    database: db,
+                    schema: sch,
+                    table: tbl,
+                    columns,
+                    result: data,
+                    dialect,
+                })
+            }
+            .await;
 
             *cell.lock().unwrap() = Some(result);
         });
@@ -480,6 +526,9 @@ impl DesktopApp {
     }
 
     pub(super) fn spawn_table_export(&mut self, request: TableExportRequest, path: PathBuf) {
+        const EXPORT_PAGE_SIZE: u32 = 5_000;
+
+        let metadata_service = self.metadata_service.clone();
         let query_service = self.query_service.clone();
         let connection_manager = self.connection_manager.clone();
         let runtime = self.runtime.clone();
@@ -487,86 +536,92 @@ impl DesktopApp {
         self.pending_table_export = Some(cell.clone());
 
         runtime.spawn(async move {
-            let profile_kind = connection_manager
-                .get_profile(request.connection_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|profile| profile.kind);
-            let dialect: Box<dyn Dialect> = match profile_kind {
-                Some(DataSourceKind::MySql) => Box::new(BacktickDialect),
-                _ => Box::new(DoubleQuoteDialect),
-            };
+            let result = async {
+                let profile = connection_manager
+                    .get_profile(request.connection_id)
+                    .await?
+                    .ok_or_else(|| AppError::validation("connection profile not found"))?;
+                let dialect = dialect_for_kind(profile.kind);
+                let qualified = qualified_table_sql(
+                    dialect.as_ref(),
+                    profile.kind,
+                    request.database.as_deref(),
+                    request.schema.as_deref(),
+                    &request.table,
+                )?;
+                let columns = metadata_service
+                    .table_columns(
+                        request.connection_id,
+                        request.database.as_deref(),
+                        request.schema.as_deref(),
+                        &request.table,
+                        None,
+                    )
+                    .await?;
+                let sql = ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
+                let headers = columns.iter().map(|column| column.name.clone()).collect();
+                let mut writer = QueryResultFileWriter::create(request.format, &path, headers)?;
+                let mut offset = 0u64;
+                let mut total_rows = None;
 
-            let qualifier = request
-                .schema
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .or_else(|| {
-                    matches!(profile_kind, Some(DataSourceKind::MySql))
-                        .then_some(request.database.as_deref())
-                        .flatten()
-                        .filter(|value| !value.is_empty())
-                });
-            let qualified = match qualifier {
-                Some(schema) => format!(
-                    "{}.{}",
-                    dialect.quote_identifier(&db_common::Identifier::new(schema).unwrap()),
-                    dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap()),
-                ),
-                None => {
-                    dialect.quote_identifier(&db_common::Identifier::new(&request.table).unwrap())
-                }
-            };
-            let sql = format!("SELECT * FROM {}", qualified);
-            let execute_result = query_service
-                .execute(
-                    QueryExecutionRequest {
-                        tab_id: QueryId::new(),
-                        connection_id: request.connection_id,
-                        database: request.database.clone(),
-                        schema: request.schema.clone(),
-                        sql,
-                        mode: QueryExecutionMode::All,
-                        cursor_offset: 0,
-                        selection: None,
-                        timeout_ms: 60_000,
-                        result_limit: None,
-                        result_offset: 0,
-                        result_total_rows: None,
-                    },
-                    None,
-                )
-                .await;
-
-            let result = match execute_result {
-                Ok(report) => {
-                    let result = report
+                loop {
+                    let report = query_service
+                        .execute(
+                            QueryExecutionRequest {
+                                tab_id: QueryId::new(),
+                                connection_id: request.connection_id,
+                                database: request.database.clone(),
+                                schema: request.schema.clone(),
+                                sql: sql.clone(),
+                                mode: QueryExecutionMode::All,
+                                cursor_offset: 0,
+                                selection: None,
+                                timeout_ms: 300_000,
+                                result_limit: Some(EXPORT_PAGE_SIZE),
+                                result_offset: offset,
+                                result_total_rows: total_rows,
+                            },
+                            None,
+                        )
+                        .await?;
+                    let page = report
                         .results
                         .into_iter()
                         .next()
                         .unwrap_or_else(|| QueryResult::empty(""));
-                    let path_for_write = path.clone();
-                    let format = request.format;
-                    let table_name = qualified_table_label(qualifier, &request.table);
-                    let write_result = tokio::task::spawn_blocking(move || {
-                        export_query_result_to_file(&result, format, &path_for_write).map(|_| {
-                            TableExportPayload {
-                                table_name,
-                                path,
-                                format,
-                            }
-                        })
-                    })
-                    .await;
-
-                    match write_result {
-                        Ok(payload) => payload,
-                        Err(error) => Err(AppError::internal(error.to_string())),
+                    total_rows = total_rows.or_else(|| {
+                        page.metadata
+                            .get(db_common::QUERY_RESULT_METADATA_TOTAL_ROWS)
+                            .and_then(|value| value.parse::<u64>().ok())
+                    });
+                    let page_rows = writer.write_page(&page)?;
+                    offset = offset.saturating_add(page_rows as u64);
+                    if page_rows < EXPORT_PAGE_SIZE as usize
+                        || total_rows.is_some_and(|total| offset >= total)
+                    {
+                        break;
                     }
                 }
-                Err(error) => Err(error),
-            };
+
+                let row_count = writer.finish()?;
+                let qualifier = request
+                    .schema
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        request
+                            .database
+                            .as_deref()
+                            .filter(|value| !value.is_empty())
+                    });
+                Ok(TableExportPayload {
+                    table_name: qualified_table_label(qualifier, &request.table),
+                    path,
+                    format: request.format,
+                    row_count,
+                })
+            }
+            .await;
 
             *cell.lock().unwrap() = Some(result);
         });
@@ -709,6 +764,74 @@ impl DesktopApp {
         self.state.set_status("Dropping table...");
     }
 
+    pub(super) fn spawn_clear(&mut self, request: ClearRequest) {
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let redis_service = self.redis_service.clone();
+        let runtime = self.runtime.clone();
+        let cell: PendingTask<ClearPayload> = Arc::new(Mutex::new(None));
+        self.pending_clear = Some(cell.clone());
+
+        runtime.spawn(async move {
+            let result = async {
+                match &request {
+                    ClearRequest::Table {
+                        connection_id,
+                        database,
+                        schema,
+                        table,
+                    } => {
+                        let profile = connection_manager
+                            .get_profile(*connection_id)
+                            .await?
+                            .ok_or_else(|| AppError::validation("connection profile not found"))?;
+                        let dialect = dialect_for_kind(profile.kind);
+                        let table_sql = qualified_table_sql(
+                            dialect.as_ref(),
+                            profile.kind,
+                            database.as_deref(),
+                            schema.as_deref(),
+                            table,
+                        )?;
+                        let sql = clear_table_sql(profile.kind, &table_sql);
+                        query_service
+                            .execute(
+                                QueryExecutionRequest {
+                                    tab_id: QueryId::new(),
+                                    connection_id: *connection_id,
+                                    database: database.clone(),
+                                    schema: schema.clone(),
+                                    sql,
+                                    mode: QueryExecutionMode::All,
+                                    cursor_offset: 0,
+                                    selection: None,
+                                    timeout_ms: 300_000,
+                                    result_limit: None,
+                                    result_offset: 0,
+                                    result_total_rows: None,
+                                },
+                                None,
+                            )
+                            .await?;
+                    }
+                    ClearRequest::RedisDatabase {
+                        connection_id,
+                        database,
+                    } => {
+                        redis_service
+                            .execute_command(*connection_id, *database, "FLUSHDB")
+                            .await?;
+                    }
+                }
+                Ok(ClearPayload { request })
+            }
+            .await;
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status("Clearing data...");
+    }
+
     /// Spawn an async task to execute an ALTER TABLE request.
     pub(super) fn spawn_alter_table(&mut self, request: AlterTableRequest) {
         let query_service = self.query_service.clone();
@@ -780,5 +903,74 @@ impl DesktopApp {
         });
 
         self.state.set_status("Altering table...");
+    }
+}
+
+fn clear_table_sql(kind: DataSourceKind, table_sql: &str) -> String {
+    match kind {
+        DataSourceKind::Sqlite => format!("DELETE FROM {table_sql}"),
+        DataSourceKind::MySql | DataSourceKind::PostgreSql | DataSourceKind::DuckDb => {
+            format!("TRUNCATE TABLE {table_sql}")
+        }
+        DataSourceKind::Redis => unreachable!("Redis databases are cleared with FLUSHDB"),
+    }
+}
+
+fn ordered_table_select_sql(
+    dialect: &dyn Dialect,
+    table_sql: &str,
+    columns: &[db_common::TableColumn],
+) -> Result<String, AppError> {
+    let primary_keys = columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .map(|column| {
+            db_common::Identifier::new(&column.name)
+                .map(|identifier| dialect.quote_identifier(&identifier))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let order = if primary_keys.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", primary_keys.join(", "))
+    };
+    Ok(format!("SELECT * FROM {table_sql}{order}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db_common::dialect::DoubleQuoteDialect;
+
+    #[test]
+    fn builds_clear_sql_for_relational_engines() {
+        assert_eq!(
+            clear_table_sql(DataSourceKind::Sqlite, "\"users\""),
+            "DELETE FROM \"users\""
+        );
+        assert_eq!(
+            clear_table_sql(DataSourceKind::DuckDb, "\"main\".\"users\""),
+            "TRUNCATE TABLE \"main\".\"users\""
+        );
+        assert_eq!(
+            clear_table_sql(DataSourceKind::MySql, "`app`.`users`"),
+            "TRUNCATE TABLE `app`.`users`"
+        );
+    }
+
+    #[test]
+    fn orders_table_reads_by_primary_key() {
+        let columns = vec![db_common::TableColumn {
+            name: "id".to_string(),
+            database_type: "INTEGER".to_string(),
+            nullable: false,
+            default_value: None,
+            primary_key: true,
+            comment: None,
+        }];
+        assert_eq!(
+            ordered_table_select_sql(&DoubleQuoteDialect, "\"main\".\"users\"", &columns).unwrap(),
+            "SELECT * FROM \"main\".\"users\" ORDER BY \"id\""
+        );
     }
 }

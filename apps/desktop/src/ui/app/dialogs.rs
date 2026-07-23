@@ -1,5 +1,6 @@
 use super::{
     export_sql::{database_export_mode_label, qualified_table_label},
+    payloads::ClearRequest,
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
@@ -273,6 +274,74 @@ impl DesktopApp {
 
         if cancel || !open {
             self.drop_table_request = None;
+        }
+    }
+
+    pub(super) fn clear_window(&mut self, ctx: &Context) {
+        let Some(request) = self.clear_request.as_ref() else {
+            return;
+        };
+
+        let (title, target, warning, confirm_label) = match request {
+            ClearRequest::Table {
+                database,
+                schema,
+                table,
+                ..
+            } => (
+                "Clear Table",
+                qualified_table_label(
+                    schema
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| database.as_deref().filter(|value| !value.is_empty())),
+                    table,
+                ),
+                "All rows will be removed while the table structure is kept. This cannot be undone here.",
+                "Clear Table",
+            ),
+            ClearRequest::RedisDatabase { database, .. } => (
+                "Clear Redis Database",
+                format!("Redis DB {database}"),
+                "FLUSHDB will permanently remove every key in this Redis database only.",
+                "Clear Database",
+            ),
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+
+        Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Clear this target?").strong());
+                ui.add_space(8.0);
+                ui.label(RichText::new(target).monospace());
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(warning)
+                        .small()
+                        .color(ui.visuals().warn_fg_color),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button(confirm_label).clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if confirm {
+            if let Some(request) = self.clear_request.take() {
+                self.spawn_clear(request);
+            }
+        } else if cancel || !open {
+            self.clear_request = None;
         }
     }
 

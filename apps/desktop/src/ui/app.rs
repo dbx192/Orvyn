@@ -9,9 +9,9 @@ mod tasks;
 mod tree;
 
 use self::payloads::{
-    AlterTablePayload, DatabaseExportPayload, DropTablePayload, DropTableRequest,
-    ImportTableRequest, IndexCreatePayload, PendingTask, TableDataPayload, TableExportPayload,
-    TableExportRequest, TableStructurePayload,
+    AlterTablePayload, ClearPayload, ClearRequest, DatabaseExportPayload, DropTablePayload,
+    DropTableRequest, ImportTableRequest, IndexCreatePayload, PendingTask, TableDataPayload,
+    TableExportPayload, TableExportRequest, TableStructurePayload,
 };
 use crate::ui::{
     connection_manager::ConnectionManagerUi,
@@ -53,10 +53,12 @@ pub struct DesktopApp {
     pending_database_export: Option<PendingTask<DatabaseExportPayload>>,
     pending_index_create: Option<PendingTask<IndexCreatePayload>>,
     pending_table_drop: Option<PendingTask<DropTablePayload>>,
+    pending_clear: Option<PendingTask<ClearPayload>>,
     pending_alter_table: Option<PendingTask<AlterTablePayload>>,
     export_request: Option<TableExportRequest>,
     import_table_request: Option<ImportTableRequest>,
     drop_table_request: Option<DropTableRequest>,
+    clear_request: Option<ClearRequest>,
     // Cloned service handles for spawning async loads.
     connection_manager: ConnectionManager,
     metadata_service: MetadataService,
@@ -119,10 +121,12 @@ impl DesktopApp {
             pending_database_export: None,
             pending_index_create: None,
             pending_table_drop: None,
+            pending_clear: None,
             pending_alter_table: None,
             export_request: None,
             import_table_request: None,
             drop_table_request: None,
+            clear_request: None,
             connection_manager: cm,
             metadata_service: ms,
             query_service: qs,
