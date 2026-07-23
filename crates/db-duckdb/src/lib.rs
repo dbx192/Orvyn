@@ -39,12 +39,13 @@ impl DuckDbQueryExecutor {
         profile: &ConnectionProfile,
         config: ConnectionPoolConfig,
     ) -> Result<Arc<BlockingDuckDbPool>> {
-        if let Some(pool) = self.pools.lock().await.get(&profile.id).cloned() {
+        let mut pools = self.pools.lock().await;
+        if let Some(pool) = pools.get(&profile.id).cloned() {
             return Ok(pool);
         }
 
         let pool = Arc::new(BlockingDuckDbPool::new(profile, config)?);
-        self.pools.lock().await.insert(profile.id, pool.clone());
+        pools.insert(profile.id, pool.clone());
         Ok(pool)
     }
 }
@@ -52,7 +53,6 @@ impl DuckDbQueryExecutor {
 #[derive(Debug)]
 struct BlockingDuckDbPool {
     connection_id: ConnectionId,
-    path: PathBuf,
     config: ConnectionPoolConfig,
     state: Mutex<BlockingPoolState>,
     available: Condvar,
@@ -60,17 +60,23 @@ struct BlockingDuckDbPool {
 
 #[derive(Debug)]
 struct BlockingPoolState {
+    // DuckDB file handles must share the same underlying database instance.
+    // Worker connections are cheap clones of this handle, which avoids races
+    // when several table loads start at the same time.
+    source: duckdb::Connection,
     idle: Vec<duckdb::Connection>,
     size: u32,
 }
 
 impl BlockingDuckDbPool {
     fn new(profile: &ConnectionProfile, config: ConnectionPoolConfig) -> Result<Self> {
+        let path = PathBuf::from(profile.required_file_path()?);
+        let source = duckdb_connection(path)?;
         Ok(Self {
             connection_id: profile.id,
-            path: PathBuf::from(profile.required_file_path()?),
             config,
             state: Mutex::new(BlockingPoolState {
+                source,
                 idle: Vec::new(),
                 size: 0,
             }),
@@ -95,8 +101,20 @@ impl BlockingDuckDbPool {
 
             if state.size < self.config.max_connections.max(1) {
                 state.size += 1;
-                drop(state);
-                let conn = duckdb_connection(self.path.clone())?;
+                let conn = match state.source.try_clone() {
+                    Ok(conn) => conn,
+                    Err(error) => {
+                        // A failed clone must not permanently consume a pool
+                        // slot; otherwise later requests only report a timeout.
+                        state.size = state.size.saturating_sub(1);
+                        self.available.notify_one();
+                        return Err(AppError::new(
+                            ErrorKind::Connection,
+                            "failed to clone DuckDB connection",
+                        )
+                        .with_detail(error.to_string()));
+                    }
+                };
                 return Ok(PooledDuckDbConnection {
                     pool: self.clone(),
                     conn: Some(conn),
@@ -1007,5 +1025,83 @@ mod tests {
         let columns = duckdb_columns(database.0.clone(), "main", "users").expect("load columns");
         assert!(columns[0].primary_key);
         assert!(!columns[1].primary_key);
+    }
+
+    #[test]
+    fn pool_workers_clone_one_shared_database_handle() {
+        let database = TempDatabase::new();
+        let conn = duckdb::Connection::open(&database.0).expect("open temporary DuckDB database");
+        conn.execute_batch("CREATE TABLE users (id INTEGER, name VARCHAR)")
+            .expect("create table");
+        drop(conn);
+
+        let profile = ConnectionProfile::builder(DataSourceKind::DuckDb, "pool test")
+            .file_path(database.0.to_string_lossy())
+            .build()
+            .expect("build profile");
+        let pool = Arc::new(
+            BlockingDuckDbPool::new(&profile, ConnectionPoolConfig::default())
+                .expect("create pool"),
+        );
+        // Metadata readers use short-lived direct connections and must remain
+        // compatible with the long-lived pool handle.
+        assert_eq!(
+            duckdb_columns(database.0.clone(), "main", "users")
+                .unwrap()
+                .len(),
+            2
+        );
+        let first = pool.acquire().expect("acquire first worker");
+        let second = pool.acquire().expect("acquire second worker");
+
+        first
+            .connection()
+            .expect("first connection")
+            .execute("INSERT INTO users VALUES (1, 'one')", [])
+            .expect("insert row");
+        let count: i64 = second
+            .connection()
+            .expect("second connection")
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+            .expect("count rows");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_pool_requests_share_one_pool() {
+        let database = TempDatabase::new();
+        let conn = duckdb::Connection::open(&database.0).expect("open temporary DuckDB database");
+        drop(conn);
+
+        let profile = Arc::new(
+            ConnectionProfile::builder(DataSourceKind::DuckDb, "concurrent pool test")
+                .file_path(database.0.to_string_lossy())
+                .build()
+                .expect("build profile"),
+        );
+        let executor = DuckDbQueryExecutor::new();
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let executor = executor.clone();
+            let profile = profile.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                executor
+                    .pool_for(&profile, ConnectionPoolConfig::default())
+                    .await
+                    .expect("get pool")
+            }));
+        }
+
+        let mut pools = Vec::new();
+        for task in tasks {
+            pools.push(task.await.expect("join pool task"));
+        }
+        assert!(pools
+            .iter()
+            .skip(1)
+            .all(|pool| Arc::ptr_eq(&pools[0], pool)));
     }
 }

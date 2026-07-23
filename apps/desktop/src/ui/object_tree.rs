@@ -495,7 +495,7 @@ impl ObjectTree {
             if !is_leaf && (clicked_in_arrow(&response, depth) || double_clicked) {
                 self.toggle_node(node_clone.clone());
             }
-            if should_activate_leaf(is_leaf, double_clicked) {
+            if should_activate_leaf(node.kind, is_leaf, response.clicked(), double_clicked) {
                 self.activate_node(&node_clone, message, actions);
             } else {
                 *message = Some(format!("Selected: {}", node.label));
@@ -1604,8 +1604,23 @@ impl ObjectTree {
     }
 }
 
-fn should_activate_leaf(is_leaf: bool, double_clicked: bool) -> bool {
-    is_leaf && double_clicked
+fn should_activate_leaf(
+    kind: MetadataNodeKind,
+    is_leaf: bool,
+    clicked: bool,
+    double_clicked: bool,
+) -> bool {
+    if !is_leaf {
+        return false;
+    }
+
+    if matches!(kind, MetadataNodeKind::Table | MetadataNodeKind::View) {
+        // The first click of a double-click already opened the table. Do not
+        // start a duplicate load when the second click is reported.
+        return clicked && !double_clicked;
+    }
+
+    double_clicked
 }
 
 struct TreeRowSpec<'a> {
@@ -2073,13 +2088,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn single_click_only_selects_leaf_nodes() {
-        assert!(!should_activate_leaf(true, false));
+    fn tables_and_views_activate_on_single_click() {
+        assert!(should_activate_leaf(
+            MetadataNodeKind::Table,
+            true,
+            true,
+            false
+        ));
+        assert!(should_activate_leaf(
+            MetadataNodeKind::View,
+            true,
+            true,
+            false
+        ));
     }
 
     #[test]
-    fn double_click_always_activates_leaf_nodes() {
-        assert!(should_activate_leaf(true, true));
-        assert!(!should_activate_leaf(false, true));
+    fn table_double_click_does_not_start_a_duplicate_load() {
+        assert!(!should_activate_leaf(
+            MetadataNodeKind::Table,
+            true,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn other_leaf_nodes_still_require_double_click() {
+        assert!(!should_activate_leaf(
+            MetadataNodeKind::Query,
+            true,
+            true,
+            false
+        ));
+        assert!(should_activate_leaf(
+            MetadataNodeKind::Query,
+            true,
+            true,
+            true
+        ));
+        assert!(!should_activate_leaf(
+            MetadataNodeKind::Table,
+            false,
+            true,
+            false
+        ));
     }
 }
