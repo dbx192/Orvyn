@@ -1104,4 +1104,52 @@ mod tests {
             .skip(1)
             .all(|pool| Arc::ptr_eq(&pools[0], pool)));
     }
+
+    #[tokio::test]
+    async fn closing_pool_allows_loading_metadata_and_another_table() {
+        let database = TempDatabase::new();
+        let conn = duckdb::Connection::open(&database.0).expect("open temporary DuckDB database");
+        conn.execute_batch(
+            "CREATE TABLE first_table (id INTEGER); \
+             CREATE TABLE second_table (id INTEGER, name VARCHAR); \
+             INSERT INTO first_table VALUES (1); \
+             INSERT INTO second_table VALUES (2, '中文');",
+        )
+        .expect("seed tables");
+        drop(conn);
+
+        let profile = ConnectionProfile::builder(DataSourceKind::DuckDb, "switch table test")
+            .file_path(database.0.to_string_lossy())
+            .build()
+            .expect("build profile");
+        let executor = DuckDbQueryExecutor::new();
+        let first = executor
+            .execute(
+                &profile,
+                None,
+                &["SELECT * FROM first_table".to_string()],
+                ConnectionPoolConfig::default(),
+            )
+            .await
+            .expect("load first table");
+        assert_eq!(first[0].rows.len(), 1);
+
+        executor
+            .close_pool(profile.id)
+            .await
+            .expect("close first table pool");
+        let columns = duckdb_columns(database.0.clone(), "main", "second_table")
+            .expect("load second table metadata");
+        assert_eq!(columns.len(), 2);
+        let second = executor
+            .execute(
+                &profile,
+                None,
+                &["SELECT * FROM second_table".to_string()],
+                ConnectionPoolConfig::default(),
+            )
+            .await
+            .expect("load second table");
+        assert_eq!(second[0].rows[0].values[1], CellValue::Text("中文".into()));
+    }
 }

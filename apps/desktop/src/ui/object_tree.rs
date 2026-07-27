@@ -385,6 +385,7 @@ impl ObjectTree {
         let response = tree_row(
             ui,
             TreeRowSpec {
+                id_source: &key_str,
                 depth: 0,
                 kind: node.kind,
                 label: &node.label,
@@ -462,6 +463,7 @@ impl ObjectTree {
         let response = tree_row(
             ui,
             TreeRowSpec {
+                id_source: &key_str,
                 depth,
                 kind: node.kind,
                 label: &node.label,
@@ -495,7 +497,7 @@ impl ObjectTree {
             if !is_leaf && (clicked_in_arrow(&response, depth) || double_clicked) {
                 self.toggle_node(node_clone.clone());
             }
-            if should_activate_leaf(node.kind, is_leaf, response.clicked(), double_clicked) {
+            if should_activate_leaf(is_leaf, double_clicked) {
                 self.activate_node(&node_clone, message, actions);
             } else {
                 *message = Some(format!("Selected: {}", node.label));
@@ -1604,26 +1606,12 @@ impl ObjectTree {
     }
 }
 
-fn should_activate_leaf(
-    kind: MetadataNodeKind,
-    is_leaf: bool,
-    clicked: bool,
-    double_clicked: bool,
-) -> bool {
-    if !is_leaf {
-        return false;
-    }
-
-    if matches!(kind, MetadataNodeKind::Table | MetadataNodeKind::View) {
-        // The first click of a double-click already opened the table. Do not
-        // start a duplicate load when the second click is reported.
-        return clicked && !double_clicked;
-    }
-
-    double_clicked
+fn should_activate_leaf(is_leaf: bool, double_clicked: bool) -> bool {
+    is_leaf && double_clicked
 }
 
 struct TreeRowSpec<'a> {
+    id_source: &'a str,
     depth: usize,
     kind: MetadataNodeKind,
     label: &'a str,
@@ -1638,8 +1626,12 @@ struct TreeRowSpec<'a> {
 
 fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
     let width = ui.available_width().max(1.0);
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(width, TREE_ROW_HEIGHT), Sense::click());
+    let (_, rect) = ui.allocate_space(Vec2::new(width, TREE_ROW_HEIGHT));
+    let response = ui.interact(
+        rect,
+        ui.id().with(("object_tree_row", spec.id_source)),
+        Sense::click(),
+    );
     let painter = ui.painter();
 
     let bg_fill = if spec.selected {
@@ -2088,50 +2080,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tables_and_views_activate_on_single_click() {
-        assert!(should_activate_leaf(
-            MetadataNodeKind::Table,
-            true,
-            true,
-            false
-        ));
-        assert!(should_activate_leaf(
-            MetadataNodeKind::View,
-            true,
-            true,
-            false
-        ));
+    fn leaf_nodes_do_not_activate_on_single_click() {
+        assert!(!should_activate_leaf(true, false));
     }
 
     #[test]
-    fn table_double_click_does_not_start_a_duplicate_load() {
-        assert!(!should_activate_leaf(
-            MetadataNodeKind::Table,
-            true,
-            true,
-            true
-        ));
+    fn tables_and_views_activate_on_double_click() {
+        assert!(should_activate_leaf(true, true));
     }
 
     #[test]
     fn other_leaf_nodes_still_require_double_click() {
-        assert!(!should_activate_leaf(
-            MetadataNodeKind::Query,
-            true,
-            true,
-            false
-        ));
-        assert!(should_activate_leaf(
-            MetadataNodeKind::Query,
-            true,
-            true,
-            true
-        ));
-        assert!(!should_activate_leaf(
-            MetadataNodeKind::Table,
-            false,
-            true,
-            false
-        ));
+        assert!(!should_activate_leaf(true, false));
+        assert!(should_activate_leaf(true, true));
+        assert!(!should_activate_leaf(false, true));
     }
 }

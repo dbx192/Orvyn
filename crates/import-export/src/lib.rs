@@ -29,10 +29,16 @@ impl QueryResultFileWriter {
                 } else {
                     b'\t'
                 };
+                let mut file = File::create(path).map_err(db_common::AppError::from)?;
+                // Excel and many Windows tools otherwise interpret an UTF-8 CSV using the
+                // current ANSI code page, which corrupts Chinese text.
+                if format == ExportFormat::Csv {
+                    file.write_all(b"\xEF\xBB\xBF")
+                        .map_err(db_common::AppError::from)?;
+                }
                 let mut writer = csv::WriterBuilder::new()
                     .delimiter(delimiter)
-                    .from_path(path)
-                    .map_err(|error| db_common::AppError::internal(error.to_string()))?;
+                    .from_writer(file);
                 writer
                     .write_record(columns.iter().map(String::as_str))
                     .map_err(|error| db_common::AppError::internal(error.to_string()))?;
@@ -330,7 +336,7 @@ mod tests {
             ],
             rows: vec![Row::new(vec![
                 CellValue::Int(1),
-                CellValue::Text("alice".to_string()),
+                CellValue::Text("中文姓名".to_string()),
             ])],
             affected_rows: 0,
             execution_time_ms: 1,
@@ -342,8 +348,11 @@ mod tests {
         export_query_result_to_file(&result, ExportFormat::Csv, &path).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
+        let preview = import_csv::parse_csv_preview(&path, &Default::default()).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert_eq!(content, "id,name\n1,alice\n");
+        assert_eq!(content, "\u{feff}id,name\n1,中文姓名\n");
+        assert_eq!(preview.encoding, "UTF-8 BOM");
+        assert_eq!(preview.sample_rows[0][1], "中文姓名");
     }
 
     #[test]
@@ -374,7 +383,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert_eq!(content, "id,name\n1,alice\n2,bob\n");
+        assert_eq!(content, "\u{feff}id,name\n1,alice\n2,bob\n");
     }
 
     fn typed_column(name: &str, logical_type: LogicalType) -> Column {

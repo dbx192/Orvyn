@@ -383,8 +383,12 @@ impl DesktopApp {
                     &tbl,
                 )?;
 
-                // DuckDB opens the same file for metadata and data. Finish the metadata
-                // connection first so table activation cannot race a second file handle.
+                // DuckDB metadata readers open a short-lived direct connection. Release the
+                // previous table query pool first, otherwise opening a second table can race
+                // the pool's persistent file handle (notably on Windows).
+                if kind == DataSourceKind::DuckDb {
+                    query_service.close_pool(connection_id).await?;
+                }
                 let columns = metadata_service
                     .table_columns(connection_id, db.as_deref(), sch.as_deref(), &tbl, None)
                     .await?;
@@ -549,6 +553,9 @@ impl DesktopApp {
                     request.schema.as_deref(),
                     &request.table,
                 )?;
+                if profile.kind == DataSourceKind::DuckDb {
+                    query_service.close_pool(request.connection_id).await?;
+                }
                 let columns = metadata_service
                     .table_columns(
                         request.connection_id,

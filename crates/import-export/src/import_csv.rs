@@ -1,6 +1,7 @@
 //! CSV import: parse, preview, field mapping, type validation, and batch INSERT generation.
 
 use db_common::{Dialect, Identifier, Result, TableColumn};
+use encoding_rs::{GB18030, UTF_16BE, UTF_16LE};
 use std::path::Path;
 
 /// Preview of a CSV file after parsing the header and first N rows.
@@ -18,6 +19,8 @@ pub struct CsvPreview {
     pub delimiter: u8,
     /// Full file path.
     pub file_path: String,
+    /// Character encoding used to decode the file.
+    pub encoding: String,
 }
 
 /// Field mapping: which CSV column maps to which target table column.
@@ -63,12 +66,14 @@ impl Default for CsvImportOptions {
 
 /// Parse a CSV file and return a preview with the first `sample_limit` data rows.
 pub fn parse_csv_preview(path: &Path, options: &CsvImportOptions) -> Result<CsvPreview> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| db_common::AppError::validation(format!("Failed to open CSV: {e}")))?;
+    let (text, encoding) = decode_csv_text(&bytes)?;
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(options.delimiter)
         .has_headers(false)
         .flexible(true)
-        .from_path(path)
-        .map_err(|e| db_common::AppError::validation(format!("Failed to open CSV: {e}")))?;
+        .from_reader(text.as_bytes());
 
     let mut all_records: Vec<Vec<String>> = Vec::new();
     for result in reader.records() {
@@ -115,7 +120,47 @@ pub fn parse_csv_preview(path: &Path, options: &CsvImportOptions) -> Result<CsvP
         has_header: options.has_header,
         delimiter: options.delimiter,
         file_path: path.display().to_string(),
+        encoding: encoding.to_string(),
     })
+}
+
+fn decode_csv_text(bytes: &[u8]) -> Result<(String, &'static str)> {
+    if let Some(content) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
+        return std::str::from_utf8(content)
+            .map(|text| (text.to_string(), "UTF-8 BOM"))
+            .map_err(|error| {
+                db_common::AppError::validation(format!(
+                    "CSV has an invalid UTF-8 byte sequence: {error}"
+                ))
+            });
+    }
+
+    if let Some(content) = bytes.strip_prefix(b"\xFF\xFE") {
+        return decode_legacy_csv(content, UTF_16LE, "UTF-16 LE");
+    }
+    if let Some(content) = bytes.strip_prefix(b"\xFE\xFF") {
+        return decode_legacy_csv(content, UTF_16BE, "UTF-16 BE");
+    }
+
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Ok((text.to_string(), "UTF-8"));
+    }
+
+    decode_legacy_csv(bytes, GB18030, "GB18030/GBK")
+}
+
+fn decode_legacy_csv(
+    bytes: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+    label: &'static str,
+) -> Result<(String, &'static str)> {
+    let (text, had_errors) = encoding.decode_without_bom_handling(bytes);
+    if had_errors {
+        return Err(db_common::AppError::validation(
+            "CSV is not valid UTF-8, UTF-16, or GB18030 near an invalid byte sequence",
+        ));
+    }
+    Ok((text.into_owned(), label))
 }
 
 /// Auto-map CSV headers to table columns by case-insensitive name matching.
@@ -345,7 +390,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    fn make_csv(content: &str) -> std::path::PathBuf {
+    fn make_csv_bytes(content: &[u8]) -> std::path::PathBuf {
         let dir = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -353,8 +398,12 @@ mod tests {
             .as_nanos();
         let path = dir.join(format!("test_import_{}-{}.csv", std::process::id(), nanos));
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(content.as_bytes()).unwrap();
+        f.write_all(content).unwrap();
         path
+    }
+
+    fn make_csv(content: &str) -> std::path::PathBuf {
+        make_csv_bytes(content.as_bytes())
     }
 
     #[test]
@@ -366,6 +415,29 @@ mod tests {
         assert_eq!(preview.sample_rows.len(), 2);
         assert_eq!(preview.sample_rows[0][0], "Alice");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn parses_gb18030_chinese_csv() {
+        let (encoded, _, had_errors) = GB18030.encode("姓名,城市\n张三,上海\n");
+        assert!(!had_errors);
+        let path = make_csv_bytes(encoded.as_ref());
+        let preview = parse_csv_preview(&path, &Default::default()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(preview.encoding, "GB18030/GBK");
+        assert_eq!(preview.headers, vec!["姓名", "城市"]);
+        assert_eq!(preview.sample_rows[0], vec!["张三", "上海"]);
+    }
+
+    #[test]
+    fn strips_utf8_bom_from_first_header() {
+        let path = make_csv_bytes(b"\xEF\xBB\xBFname,city\nAlice,Shanghai\n");
+        let preview = parse_csv_preview(&path, &Default::default()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(preview.encoding, "UTF-8 BOM");
+        assert_eq!(preview.headers[0], "name");
     }
 
     #[test]

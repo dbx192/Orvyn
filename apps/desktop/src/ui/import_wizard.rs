@@ -3,10 +3,10 @@
 //! CSV import wizard: step-by-step guide to import CSV data into a database table.
 
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
-use db_common::dialect::DoubleQuoteDialect;
+use db_common::dialect::{BacktickDialect, DoubleQuoteDialect};
 use db_common::{
-    ConnectionId, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest, QueryId, Result,
-    TableColumn,
+    ConnectionId, DataSourceKind, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest,
+    QueryId, Result, TableColumn,
 };
 use eframe::egui::{Button, Color32, ComboBox, Frame, RichText, ScrollArea, Ui};
 use import_export::import_csv::{
@@ -67,6 +67,7 @@ pub struct ImportWizard {
     // Services
     metadata_service: MetadataService,
     query_service: QueryService,
+    connection_manager: ConnectionManager,
     runtime: Handle,
 
     // Async pending
@@ -88,7 +89,7 @@ impl ImportWizard {
         table: String,
         metadata_service: MetadataService,
         query_service: QueryService,
-        _connection_manager: ConnectionManager,
+        connection_manager: ConnectionManager,
         runtime: Handle,
     ) -> Self {
         Self {
@@ -108,6 +109,7 @@ impl ImportWizard {
             import_result: None,
             metadata_service,
             query_service,
+            connection_manager,
             runtime,
             pending_preview: None,
             pending_validation: None,
@@ -282,10 +284,11 @@ impl ImportWizard {
     fn step_preview(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
         if let Some(ref preview) = self.preview {
             ui.label(format!(
-                "Found {} columns, ~{} data rows in {}",
+                "Found {} columns, ~{} data rows in {} ({})",
                 preview.headers.len(),
                 preview.estimated_total_rows,
                 preview.file_path,
+                preview.encoding,
             ));
 
             ui.add_space(8.0);
@@ -331,6 +334,8 @@ impl ImportWizard {
     fn load_table_columns(&mut self) {
         // Load columns synchronously by spawning and awaiting.
         let ms = self.metadata_service.clone();
+        let qs = self.query_service.clone();
+        let cm = self.connection_manager.clone();
         let conn_id = self.connection_id;
         let db = self.database.clone();
         let sch = self.schema.clone();
@@ -342,9 +347,17 @@ impl ImportWizard {
         self.loading = true;
 
         rt.spawn(async move {
-            let result = ms
-                .table_columns(conn_id, db.as_deref(), sch.as_deref(), &tbl, None)
-                .await;
+            let result = async {
+                let profile = cm.get_profile(conn_id).await?.ok_or_else(|| {
+                    db_common::AppError::validation("connection profile not found")
+                })?;
+                if profile.kind == DataSourceKind::DuckDb {
+                    qs.close_pool(conn_id).await?;
+                }
+                ms.table_columns(conn_id, db.as_deref(), sch.as_deref(), &tbl, None)
+                    .await
+            }
+            .await;
             *cell_clone.lock().unwrap() = Some(result);
         });
 
@@ -663,14 +676,14 @@ impl ImportWizard {
         };
         let table_columns = self.table_columns.clone();
 
-        let dialect: Box<dyn Dialect> = self.get_dialect();
-        let qualified = self.qualified_table_name(&*dialect);
         let batch_size = self.batch_size;
         let stop_on_error = self.stop_on_error;
         let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
         let connection_id = self.connection_id;
         let database = self.database.clone();
         let schema = self.schema.clone();
+        let table = self.table.clone();
         let rt = self.runtime.clone();
 
         self.loading = true;
@@ -679,101 +692,95 @@ impl ImportWizard {
         self.pending_import = Some(cell.clone());
 
         rt.spawn(async move {
-            let start = std::time::Instant::now();
-            let total = preview.sample_rows.len();
-            let mut success = 0usize;
-            let mut failed = 0usize;
-            let mut errors = Vec::new();
+            let result = async {
+                let start = std::time::Instant::now();
+                let profile = connection_manager
+                    .get_profile(connection_id)
+                    .await?
+                    .ok_or_else(|| {
+                        db_common::AppError::validation("connection profile not found")
+                    })?;
+                let dialect = import_dialect(profile.kind);
+                let qualified = qualified_import_table_name(
+                    profile.kind,
+                    database.as_deref(),
+                    schema.as_deref(),
+                    &table,
+                    dialect.as_ref(),
+                )?;
+                let total = preview.sample_rows.len();
+                let mut success = 0usize;
+                let mut failed = 0usize;
+                let mut errors = Vec::new();
+                let batches = generate_insert_batches(
+                    &preview.sample_rows,
+                    &preview.headers,
+                    &table_columns,
+                    &mapping,
+                    &qualified,
+                    dialect.as_ref(),
+                    batch_size,
+                )?;
 
-            match generate_insert_batches(
-                &preview.sample_rows,
-                &preview.headers,
-                &table_columns,
-                &mapping,
-                &qualified,
-                &*dialect,
-                batch_size,
-            ) {
-                Ok(batches) => {
-                    for (i, batch_sql) in batches.iter().enumerate() {
-                        match query_service
-                            .execute(
-                                QueryExecutionRequest {
-                                    tab_id: QueryId::new(),
-                                    connection_id,
-                                    database: database.clone(),
-                                    schema: schema.clone(),
-                                    sql: batch_sql.clone(),
-                                    mode: QueryExecutionMode::All,
-                                    cursor_offset: 0,
-                                    selection: None,
-                                    timeout_ms: 60000,
-                                    result_limit: None,
-                                    result_offset: 0,
-                                    result_total_rows: None,
-                                },
-                                None,
-                            )
-                            .await
-                        {
-                            Ok(report) => {
-                                let affected: u64 =
-                                    report.results.iter().map(|r| r.affected_rows).sum();
-                                success += affected as usize;
-                                if report.results.iter().any(|r| r.affected_rows == 0) {
-                                    errors.push(format!(
-                                        "Batch {}: some rows may not have been inserted",
-                                        i + 1
-                                    ));
-                                }
+                for (i, batch_sql) in batches.iter().enumerate() {
+                    match query_service
+                        .execute(
+                            QueryExecutionRequest {
+                                tab_id: QueryId::new(),
+                                connection_id,
+                                database: database.clone(),
+                                schema: schema.clone(),
+                                sql: batch_sql.clone(),
+                                mode: QueryExecutionMode::All,
+                                cursor_offset: 0,
+                                selection: None,
+                                timeout_ms: 60000,
+                                result_limit: None,
+                                result_offset: 0,
+                                result_total_rows: None,
+                            },
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(report) => {
+                            let affected: u64 =
+                                report.results.iter().map(|r| r.affected_rows).sum();
+                            success += affected as usize;
+                            if report.results.iter().any(|r| r.affected_rows == 0) {
+                                errors.push(format!(
+                                    "Batch {}: some rows may not have been inserted",
+                                    i + 1
+                                ));
                             }
-                            Err(e) => {
-                                let batch_rows = batch_size.min(total - i * batch_size);
-                                failed += batch_rows;
-                                errors.push(format!("Batch {}: {}", i + 1, e.message));
-                                if stop_on_error {
-                                    break;
-                                }
+                        }
+                        Err(error) => {
+                            let batch_rows = batch_size.min(total - i * batch_size);
+                            failed += batch_rows;
+                            let detail = error
+                                .detail
+                                .as_deref()
+                                .map(|detail| format!(": {detail}"))
+                                .unwrap_or_default();
+                            errors.push(format!("Batch {}: {}{}", i + 1, error.message, detail));
+                            if stop_on_error {
+                                break;
                             }
                         }
                     }
                 }
-                Err(e) => {
-                    errors.push(format!("SQL generation failed: {}", e.message));
-                    failed = total;
-                }
-            }
 
-            let result = ImportResult {
-                total_rows: total,
-                success_rows: success,
-                failed_rows: failed,
-                errors,
-                elapsed_secs: start.elapsed().as_secs_f64(),
-            };
-            *cell.lock().unwrap() = Some(Ok(result));
+                Ok(ImportResult {
+                    total_rows: total,
+                    success_rows: success,
+                    failed_rows: failed,
+                    errors,
+                    elapsed_secs: start.elapsed().as_secs_f64(),
+                })
+            }
+            .await;
+            *cell.lock().unwrap() = Some(result);
         });
-    }
-
-    fn get_dialect(&self) -> Box<dyn Dialect> {
-        // Default to DoubleQuoteDialect; in practice the connection profile would determine this.
-        Box::new(DoubleQuoteDialect)
-    }
-
-    fn qualified_table_name(&self, dialect: &dyn Dialect) -> String {
-        let table_ident = Identifier::new(self.table.as_str()).unwrap();
-        let quoted_table = dialect.quote_identifier(&table_ident);
-        match self.schema.as_deref().filter(|s| !s.is_empty()) {
-            Some(schema) => {
-                let schema_ident = Identifier::new(schema).unwrap();
-                format!(
-                    "{}.{}",
-                    dialect.quote_identifier(&schema_ident),
-                    quoted_table
-                )
-            }
-            None => quoted_table,
-        }
     }
 
     // ── Polling ──
@@ -845,5 +852,68 @@ impl ImportWizard {
                 self.pending_import = Some(cell);
             }
         }
+    }
+}
+
+fn import_dialect(kind: DataSourceKind) -> Box<dyn Dialect> {
+    match kind {
+        DataSourceKind::MySql => Box::new(BacktickDialect),
+        _ => Box::new(DoubleQuoteDialect),
+    }
+}
+
+fn qualified_import_table_name(
+    kind: DataSourceKind,
+    database: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+    dialect: &dyn Dialect,
+) -> Result<String> {
+    let quoted_table = dialect.quote_identifier(&Identifier::new(table)?);
+    let qualifier = match kind {
+        DataSourceKind::MySql => database.or(schema),
+        _ => schema,
+    };
+    match qualifier.filter(|value| !value.is_empty()) {
+        Some(qualifier) => Ok(format!(
+            "{}.{}",
+            dialect.quote_identifier(&Identifier::new(qualifier)?),
+            quoted_table
+        )),
+        None => Ok(quoted_table),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_table_uses_database_specific_quoting() {
+        let mysql = import_dialect(DataSourceKind::MySql);
+        assert_eq!(
+            qualified_import_table_name(
+                DataSourceKind::MySql,
+                Some("app"),
+                None,
+                "用户",
+                mysql.as_ref(),
+            )
+            .unwrap(),
+            "`app`.`用户`"
+        );
+
+        let duckdb = import_dialect(DataSourceKind::DuckDb);
+        assert_eq!(
+            qualified_import_table_name(
+                DataSourceKind::DuckDb,
+                None,
+                Some("main"),
+                "用户",
+                duckdb.as_ref(),
+            )
+            .unwrap(),
+            "\"main\".\"用户\""
+        );
     }
 }
