@@ -334,8 +334,6 @@ impl ImportWizard {
     fn load_table_columns(&mut self) {
         // Load columns synchronously by spawning and awaiting.
         let ms = self.metadata_service.clone();
-        let qs = self.query_service.clone();
-        let cm = self.connection_manager.clone();
         let conn_id = self.connection_id;
         let db = self.database.clone();
         let sch = self.schema.clone();
@@ -347,17 +345,9 @@ impl ImportWizard {
         self.loading = true;
 
         rt.spawn(async move {
-            let result = async {
-                let profile = cm.get_profile(conn_id).await?.ok_or_else(|| {
-                    db_common::AppError::validation("connection profile not found")
-                })?;
-                if profile.kind == DataSourceKind::DuckDb {
-                    qs.close_pool(conn_id).await?;
-                }
-                ms.table_columns(conn_id, db.as_deref(), sch.as_deref(), &tbl, None)
-                    .await
-            }
-            .await;
+            let result = ms
+                .table_columns(conn_id, db.as_deref(), sch.as_deref(), &tbl, None)
+                .await;
             *cell_clone.lock().unwrap() = Some(result);
         });
 

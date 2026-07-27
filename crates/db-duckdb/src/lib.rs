@@ -10,8 +10,9 @@ use db_common::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-    sync::{Arc, Condvar, Mutex},
+    ops::Deref,
+    path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex, OnceLock, Weak},
     time::Instant,
 };
 
@@ -60,23 +61,55 @@ struct BlockingDuckDbPool {
 
 #[derive(Debug)]
 struct BlockingPoolState {
-    // DuckDB file handles must share the same underlying database instance.
-    // Worker connections are cheap clones of this handle, which avoids races
-    // when several table loads start at the same time.
-    source: duckdb::Connection,
+    database: Arc<SharedDuckDbDatabase>,
     idle: Vec<duckdb::Connection>,
     size: u32,
 }
 
+#[derive(Debug)]
+struct SharedDuckDbDatabase {
+    source: Mutex<duckdb::Connection>,
+}
+
+impl SharedDuckDbDatabase {
+    fn connect(&self) -> Result<duckdb::Connection> {
+        self.source
+            .lock()
+            .map_err(|_| AppError::internal("DuckDB database registry lock poisoned"))?
+            .try_clone()
+            .map_err(|error| {
+                AppError::new(ErrorKind::Connection, "failed to clone DuckDB connection")
+                    .with_detail(error.to_string())
+            })
+    }
+}
+
+#[derive(Debug)]
+struct SharedDuckDbConnection {
+    connection: duckdb::Connection,
+    _database: Arc<SharedDuckDbDatabase>,
+}
+
+impl Deref for SharedDuckDbConnection {
+    type Target = duckdb::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+static DUCKDB_DATABASES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<SharedDuckDbDatabase>>>> =
+    OnceLock::new();
+
 impl BlockingDuckDbPool {
     fn new(profile: &ConnectionProfile, config: ConnectionPoolConfig) -> Result<Self> {
         let path = PathBuf::from(profile.required_file_path()?);
-        let source = duckdb_connection(path)?;
+        let database = shared_duckdb_database(&path)?;
         Ok(Self {
             connection_id: profile.id,
             config,
             state: Mutex::new(BlockingPoolState {
-                source,
+                database,
                 idle: Vec::new(),
                 size: 0,
             }),
@@ -101,18 +134,14 @@ impl BlockingDuckDbPool {
 
             if state.size < self.config.max_connections.max(1) {
                 state.size += 1;
-                let conn = match state.source.try_clone() {
+                let conn = match state.database.connect() {
                     Ok(conn) => conn,
                     Err(error) => {
                         // A failed clone must not permanently consume a pool
                         // slot; otherwise later requests only report a timeout.
                         state.size = state.size.saturating_sub(1);
                         self.available.notify_one();
-                        return Err(AppError::new(
-                            ErrorKind::Connection,
-                            "failed to clone DuckDB connection",
-                        )
-                        .with_detail(error.to_string()));
+                        return Err(error);
                     }
                 };
                 return Ok(PooledDuckDbConnection {
@@ -522,17 +551,7 @@ fn execute_duckdb_statements(
 }
 
 fn duckdb_version(path: PathBuf) -> Result<String> {
-    if !path.exists() {
-        return Err(AppError::new(
-            ErrorKind::Validation,
-            "DuckDB database file does not exist",
-        ));
-    }
-
-    let conn = duckdb::Connection::open(path).map_err(|error| {
-        AppError::new(ErrorKind::Connection, "failed to open DuckDB database")
-            .with_detail(error.to_string())
-    })?;
+    let conn = duckdb_connection(path)?;
 
     conn.query_row("SELECT version()", [], |row| row.get(0))
         .map_err(|error| {
@@ -849,7 +868,7 @@ fn duckdb_create_table_sql(path: PathBuf, schema: &str, table: &str) -> Result<S
     Ok(ddl)
 }
 
-fn duckdb_connection(path: PathBuf) -> Result<duckdb::Connection> {
+fn shared_duckdb_database(path: &Path) -> Result<Arc<SharedDuckDbDatabase>> {
     if !path.exists() {
         return Err(AppError::new(
             ErrorKind::Validation,
@@ -857,9 +876,38 @@ fn duckdb_connection(path: PathBuf) -> Result<duckdb::Connection> {
         ));
     }
 
-    duckdb::Connection::open(path).map_err(|error| {
+    let key = path.canonicalize().map_err(|error| {
+        AppError::new(
+            ErrorKind::Connection,
+            "failed to resolve DuckDB database path",
+        )
+        .with_detail(error.to_string())
+    })?;
+    let registry = DUCKDB_DATABASES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut databases = registry
+        .lock()
+        .map_err(|_| AppError::internal("DuckDB database registry lock poisoned"))?;
+    if let Some(database) = databases.get(&key).and_then(Weak::upgrade) {
+        return Ok(database);
+    }
+
+    let source = duckdb::Connection::open(path).map_err(|error| {
         AppError::new(ErrorKind::Connection, "failed to open DuckDB database")
             .with_detail(error.to_string())
+    })?;
+    let database = Arc::new(SharedDuckDbDatabase {
+        source: Mutex::new(source),
+    });
+    databases.insert(key, Arc::downgrade(&database));
+    Ok(database)
+}
+
+fn duckdb_connection(path: PathBuf) -> Result<SharedDuckDbConnection> {
+    let database = shared_duckdb_database(&path)?;
+    let connection = database.connect()?;
+    Ok(SharedDuckDbConnection {
+        connection,
+        _database: database,
     })
 }
 
@@ -1151,5 +1199,42 @@ mod tests {
             .await
             .expect("load second table");
         assert_eq!(second[0].rows[0].values[1], CellValue::Text("中文".into()));
+    }
+
+    #[tokio::test]
+    async fn replacement_pool_and_metadata_reuse_database_while_old_query_is_held() {
+        let database = TempDatabase::new();
+        let conn = duckdb::Connection::open(&database.0).expect("open temporary DuckDB database");
+        conn.execute_batch("CREATE TABLE users (id INTEGER, name VARCHAR)")
+            .expect("create table");
+        drop(conn);
+
+        let profile = ConnectionProfile::builder(DataSourceKind::DuckDb, "pool race test")
+            .file_path(database.0.to_string_lossy())
+            .build()
+            .expect("build profile");
+        let executor = DuckDbQueryExecutor::new();
+        let old_pool = executor
+            .pool_for(&profile, ConnectionPoolConfig::default())
+            .await
+            .expect("create old pool");
+        let held_query = old_pool.acquire().expect("hold old query connection");
+
+        executor
+            .close_pool(profile.id)
+            .await
+            .expect("remove old pool");
+        let columns = duckdb_columns(database.0.clone(), "main", "users")
+            .expect("metadata must share the held database instance");
+        assert_eq!(columns.len(), 2);
+        let new_pool = executor
+            .pool_for(&profile, ConnectionPoolConfig::default())
+            .await
+            .expect("create replacement pool");
+        let old_database = old_pool.state.lock().unwrap().database.clone();
+        let new_database = new_pool.state.lock().unwrap().database.clone();
+        assert!(Arc::ptr_eq(&old_database, &new_database));
+
+        drop(held_query);
     }
 }

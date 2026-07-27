@@ -177,7 +177,12 @@ pub fn auto_map_fields(csv_headers: &[String], table_columns: &[TableColumn]) ->
 }
 
 /// Validate that CSV values can be reasonably inserted into the target columns.
-/// Checks: non-nullable columns with empty values, numeric columns with non-numeric strings.
+///
+/// An empty CSV field is an empty string, not SQL `NULL`.  This distinction is
+/// important for `NOT NULL` character columns, where `''` is a valid value.  A
+/// literal `NULL` is treated as SQL `NULL` and is rejected for non-nullable
+/// columns.  Empty values in nullable columns are converted to SQL `NULL` when
+/// the INSERT statement is generated (see [`generate_insert_batches`]).
 pub fn validate_types(
     rows: &[Vec<String>],
     _headers: &[String],
@@ -195,8 +200,28 @@ pub fn validate_types(
 
             let value = row.get(csv_col).map(|s| s.as_str()).unwrap_or("");
 
-            // Check non-nullable columns with empty values
-            if !col.nullable && value.trim().is_empty() {
+            let trimmed = value.trim();
+            let db_type = col.database_type.to_lowercase();
+
+            // The exporter writes NULL as a literal marker.  Do not let it
+            // reach the database as a quoted string, and report it clearly
+            // when the destination column is NOT NULL.
+            if is_null_marker(trimmed) {
+                if !col.nullable {
+                    issues.push(TypeIssue {
+                        row: row_idx + 1,
+                        column: col.name.clone(),
+                        value: value.to_string(),
+                        reason: "Column is NOT NULL but value is NULL".to_string(),
+                    });
+                }
+                continue;
+            }
+
+            // Empty strings are valid for character columns even when they
+            // are NOT NULL.  For non-character columns an empty field cannot
+            // provide a value, so retain the useful validation error.
+            if !col.nullable && trimmed.is_empty() && !is_character_type(&db_type) {
                 issues.push(TypeIssue {
                     row: row_idx + 1,
                     column: col.name.clone(),
@@ -207,12 +232,11 @@ pub fn validate_types(
             }
 
             // Skip further validation for empty nullable values
-            if value.trim().is_empty() {
+            if trimmed.is_empty() {
                 continue;
             }
 
             // Basic type checks based on database_type hints
-            let db_type = col.database_type.to_lowercase();
             if db_type.contains("int") || db_type.contains("bigint") || db_type.contains("smallint")
             {
                 if value.trim().parse::<i64>().is_err() {
@@ -361,6 +385,17 @@ fn sql_literal_for_column(value: &str, column: &TableColumn) -> String {
     sql_literal(value)
 }
 
+fn is_null_marker(value: &str) -> bool {
+    value.eq_ignore_ascii_case("NULL")
+}
+
+fn is_character_type(db_type: &str) -> bool {
+    db_type.contains("char")
+        || db_type.contains("text")
+        || db_type.contains("clob")
+        || db_type.contains("string")
+}
+
 fn is_integer_type(db_type: &str) -> bool {
     db_type.contains("bigint")
         || db_type.contains("smallint")
@@ -494,6 +529,54 @@ mod tests {
         ];
         let report = validate_types(&rows, &headers, &columns, &mapping);
         assert_eq!(report.issues.len(), 2);
+    }
+
+    #[test]
+    fn allows_empty_string_for_not_null_text_column() {
+        let headers = vec!["name".to_string()];
+        let columns = vec![TableColumn {
+            name: "name".into(),
+            database_type: "VARCHAR".into(),
+            nullable: false,
+            default_value: None,
+            primary_key: false,
+            comment: None,
+        }];
+        let mapping = auto_map_fields(&headers, &columns);
+        let report = validate_types(&[vec![String::new()]], &headers, &columns, &mapping);
+        assert!(report.issues.is_empty());
+
+        let batches = generate_insert_batches(
+            &[vec![String::new()]],
+            &headers,
+            &columns,
+            &mapping,
+            "\"users\"",
+            &DoubleQuoteDialect,
+            100,
+        )
+        .unwrap();
+        assert!(batches[0].contains("VALUES\n('')"));
+    }
+
+    #[test]
+    fn rejects_explicit_null_for_not_null_column() {
+        let headers = vec!["id".to_string()];
+        let columns = vec![TableColumn {
+            name: "id".into(),
+            database_type: "INTEGER".into(),
+            nullable: false,
+            default_value: None,
+            primary_key: false,
+            comment: None,
+        }];
+        let mapping = auto_map_fields(&headers, &columns);
+        let report = validate_types(&[vec![" NULL ".to_string()]], &headers, &columns, &mapping);
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(
+            report.issues[0].reason,
+            "Column is NOT NULL but value is NULL"
+        );
     }
 
     #[test]
