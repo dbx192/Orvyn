@@ -38,6 +38,16 @@ impl DesktopApp {
     fn handle_tree_actions(&mut self, actions: Vec<ObjectTreeAction>) {
         for action in actions {
             match action {
+                ObjectTreeAction::ImportConnections => {
+                    self.connection_manager_ui.choose_import_file();
+                }
+                ObjectTreeAction::ExportConnections {
+                    connection_ids,
+                    include_passwords,
+                } => {
+                    self.connection_manager_ui
+                        .choose_export_file(connection_ids, include_passwords);
+                }
                 ObjectTreeAction::OpenTableData {
                     connection_id,
                     database,

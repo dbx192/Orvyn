@@ -111,6 +111,11 @@ pub enum DatabaseExportMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectTreeAction {
+    ImportConnections,
+    ExportConnections {
+        connection_ids: Option<Vec<ConnectionId>>,
+        include_passwords: bool,
+    },
     OpenTableData {
         connection_id: ConnectionId,
         database: Option<String>,
@@ -200,6 +205,8 @@ pub struct ObjectTree {
     expanded: BTreeSet<String>,
     search_query: String,
     selected_node: Option<NodeKey>,
+    selected_connections: BTreeSet<ConnectionId>,
+    export_include_passwords: bool,
     status: String,
     redis_pattern: BTreeMap<NodeKey, String>,
     last_status_poll_ms: u64,
@@ -230,6 +237,8 @@ impl ObjectTree {
             expanded: BTreeSet::new(),
             search_query: String::new(),
             selected_node: None,
+            selected_connections: BTreeSet::new(),
+            export_include_passwords: false,
             status: String::new(),
             redis_pattern: BTreeMap::new(),
             last_status_poll_ms: 0,
@@ -253,10 +262,10 @@ impl ObjectTree {
         }
 
         ui.spacing_mut().item_spacing.y = 4.0;
-        self.search_bar(ui);
-
         let mut message = None;
         let mut actions = Vec::new();
+        self.connection_transfer_bar(ui, &mut message, &mut actions);
+        self.search_bar(ui);
 
         let tree_width = ui.available_width();
         ScrollArea::vertical()
@@ -270,6 +279,53 @@ impl ObjectTree {
             });
 
         (message, actions)
+    }
+
+    fn connection_transfer_bar(
+        &mut self,
+        ui: &mut Ui,
+        message: &mut Option<String>,
+        actions: &mut Vec<ObjectTreeAction>,
+    ) {
+        ui.horizontal(|ui| {
+            if ui.button("Import...").clicked() {
+                actions.push(ObjectTreeAction::ImportConnections);
+                *message = Some("Choose a connection backup to import".to_string());
+            }
+
+            let selected_count = self.selected_connections.len();
+            ui.menu_button("Export", |ui| {
+                ui.checkbox(
+                    &mut self.export_include_passwords,
+                    "Include saved passwords",
+                )
+                .on_hover_text("Passwords are written as plain text in the backup file");
+                ui.separator();
+                if ui.button("Export All...").clicked() {
+                    actions.push(ObjectTreeAction::ExportConnections {
+                        connection_ids: None,
+                        include_passwords: self.export_include_passwords,
+                    });
+                    *message = Some("Export all connections".to_string());
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        selected_count > 0,
+                        Button::new(format!("Export Selected ({selected_count})...")),
+                    )
+                    .clicked()
+                {
+                    actions.push(ObjectTreeAction::ExportConnections {
+                        connection_ids: Some(self.selected_connections.iter().copied().collect()),
+                        include_passwords: self.export_include_passwords,
+                    });
+                    *message = Some(format!("Export {selected_count} selected connections"));
+                    ui.close_menu();
+                }
+            });
+        });
+        ui.separator();
     }
 
     pub fn reload_root(&mut self) {
@@ -379,7 +435,7 @@ impl ObjectTree {
         let status_label = connection_status_label(&status);
 
         let node = tree_node.node.clone();
-        let is_selected = self.selected_node == Some(key.clone());
+        let is_selected = self.selected_connections.contains(&connection_id);
         let matched = self.node_matches_search(&node);
 
         let response = tree_row(
@@ -406,8 +462,25 @@ impl ObjectTree {
         });
 
         if response.clicked() && !show_menu {
-            self.selected_node = Some(key.clone());
-            self.toggle_connection(connection_id);
+            let multi_select = ui.input(|input| input.modifiers.ctrl || input.modifiers.command);
+            if multi_select {
+                if !self.selected_connections.insert(connection_id) {
+                    self.selected_connections.remove(&connection_id);
+                }
+                self.selected_node = self
+                    .selected_connections
+                    .contains(&connection_id)
+                    .then_some(key.clone());
+                *message = Some(format!(
+                    "Selected {} connection(s)",
+                    self.selected_connections.len()
+                ));
+            } else {
+                self.selected_connections.clear();
+                self.selected_connections.insert(connection_id);
+                self.selected_node = Some(key.clone());
+                self.toggle_connection(connection_id);
+            }
         }
 
         if expanded {
@@ -493,6 +566,7 @@ impl ObjectTree {
 
         let double_clicked = response.double_clicked();
         if (response.clicked() || double_clicked) && !show_menu {
+            self.selected_connections.clear();
             self.selected_node = Some(key.clone());
             if !is_leaf && (clicked_in_arrow(&response, depth) || double_clicked) {
                 self.toggle_node(node_clone.clone());
@@ -1400,6 +1474,8 @@ impl ObjectTree {
                                 (n.path.connection_id, (TreeNode::new(n), status))
                             })
                             .collect();
+                        self.selected_connections
+                            .retain(|id| self.connections.contains_key(id));
                         self.status = format!("Loaded {} connections", self.connections.len());
                     }
                     Err(error) => {

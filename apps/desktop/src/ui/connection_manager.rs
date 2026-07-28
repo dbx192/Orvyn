@@ -8,7 +8,7 @@ use eframe::egui::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     mem,
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
@@ -140,8 +140,9 @@ enum ConnectionEvent {
     Saved(Result<ConnectionProfile, AppError>),
     Deleted(Result<ConnectionId, AppError>),
     Tested(Result<ConnectionTestReport, AppError>),
-    Exported(Result<PathBuf, AppError>),
-    Imported(Result<Vec<ConnectionId>, AppError>),
+    Exported(Result<(PathBuf, usize), AppError>),
+    ImportInspected(Result<PendingConnectionImport, AppError>),
+    Imported(Result<ConnectionImportResult, AppError>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +167,7 @@ pub struct ConnectionManagerUi {
     confirm_delete: Option<ConnectionId>,
     window_open: bool,
     pending_changes: Vec<ConnectionChange>,
-    export_include_passwords: bool,
+    pending_import: Option<PendingConnectionImport>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,6 +181,25 @@ struct ConnectionExportEntry {
     profile: ConnectionProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,
+}
+
+#[derive(Debug)]
+struct PendingConnectionImport {
+    file: ConnectionExportFile,
+    conflicting_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ImportConflictPolicy {
+    Overwrite,
+    Rename,
+}
+
+#[derive(Debug)]
+struct ConnectionImportResult {
+    ids: Vec<ConnectionId>,
+    overwritten: usize,
+    renamed: usize,
 }
 
 impl ConnectionManagerUi {
@@ -201,7 +221,7 @@ impl ConnectionManagerUi {
             confirm_delete: None,
             window_open: false,
             pending_changes: Vec::new(),
-            export_include_passwords: false,
+            pending_import: None,
         };
         ui.load_profiles();
         ui
@@ -226,34 +246,66 @@ impl ConnectionManagerUi {
         self.confirm_delete = Some(id);
     }
 
+    pub fn choose_import_file(&mut self) {
+        if self.busy || self.pending_import.is_some() {
+            return;
+        }
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Import Connections")
+            .add_filter("Connection JSON", &["json"])
+            .pick_file()
+        {
+            self.inspect_import(path);
+        }
+    }
+
+    pub fn choose_export_file(
+        &mut self,
+        connection_ids: Option<Vec<ConnectionId>>,
+        include_passwords: bool,
+    ) {
+        if self.busy || connection_ids.as_ref().is_some_and(Vec::is_empty) {
+            return;
+        }
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Export Connections")
+            .set_file_name("orvyn-connections.json")
+            .add_filter("Connection JSON", &["json"])
+            .save_file()
+        {
+            self.export_connections(path, connection_ids, include_passwords);
+        }
+    }
+
     pub fn ui_window(&mut self, ctx: &eframe::egui::Context) -> Option<String> {
         self.drain_events();
-        if !self.window_open {
-            return None;
-        }
-
-        let mut open = true;
         let mut message = None;
-        let title = match self.form.mode {
-            EditorMode::New => "New Connection",
-            EditorMode::Edit(_) => "Edit Connection",
-        };
 
-        Window::new(title)
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(560.0)
-            .show(ctx, |ui| {
-                self.editor_panel(ui, &mut message, true);
-            });
+        if self.window_open {
+            let mut open = true;
+            let title = match self.form.mode {
+                EditorMode::New => "New Connection",
+                EditorMode::Edit(_) => "Edit Connection",
+            };
 
-        if !open {
-            self.window_open = false;
-            self.confirm_delete = None;
-            self.error = None;
-            self.test_report = None;
+            Window::new(title)
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .default_width(560.0)
+                .show(ctx, |ui| {
+                    self.editor_panel(ui, &mut message, true);
+                });
+
+            if !open {
+                self.window_open = false;
+                self.confirm_delete = None;
+                self.error = None;
+                self.test_report = None;
+            }
         }
+
+        self.import_conflict_window(ctx, &mut message);
 
         message.or_else(|| (!self.status.is_empty()).then(|| self.status.clone()))
     }
@@ -476,40 +528,6 @@ impl ConnectionManagerUi {
             }
         });
 
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.add(Checkbox::new(
-                &mut self.export_include_passwords,
-                "Include saved passwords",
-            ))
-            .on_hover_text("Writes saved passwords into the exported JSON file");
-            if ui
-                .add_enabled(!self.busy, Button::new("Import Connections"))
-                .clicked()
-            {
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Import Connections")
-                    .add_filter("Connection JSON", &["json"])
-                    .pick_file()
-                {
-                    self.import_connections(path);
-                }
-            }
-            if ui
-                .add_enabled(!self.busy, Button::new("Export Connections"))
-                .clicked()
-            {
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Export Connections")
-                    .set_file_name("connections.json")
-                    .add_filter("Connection JSON", &["json"])
-                    .save_file()
-                {
-                    self.export_connections(path, self.export_include_passwords);
-                }
-            }
-        });
-
         if let Some(id) = self.confirm_delete {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -551,6 +569,59 @@ impl ConnectionManagerUi {
             ui.add_space(8.0);
             ui.label(&self.status);
             *message = Some(self.status.clone());
+        }
+    }
+
+    fn import_conflict_window(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        message: &mut Option<String>,
+    ) {
+        let Some(pending) = self.pending_import.as_ref() else {
+            return;
+        };
+        let names = pending.conflicting_names.clone();
+        let total = pending.file.profiles.len();
+        let mut action = None;
+        let mut open = true;
+        let mut cancel = false;
+
+        Window::new("Connection Name Conflicts")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{} of {total} imported connection name(s) are already in use:",
+                    names.len()
+                ));
+                ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                    for name in &names {
+                        ui.label(format!("- {name}"));
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Overwrite Existing").clicked() {
+                        action = Some(ImportConflictPolicy::Overwrite);
+                    }
+                    if ui.button("Keep Both and Rename").clicked() {
+                        action = Some(ImportConflictPolicy::Rename);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if let Some(policy) = action {
+            let pending = self.pending_import.take().expect("pending import");
+            self.start_import(pending.file, policy);
+            *message = Some("Importing connections...".to_string());
+        } else if !open || cancel {
+            self.pending_import = None;
+            self.status = "Connection import cancelled".to_string();
         }
     }
 
@@ -625,7 +696,12 @@ impl ConnectionManagerUi {
         });
     }
 
-    fn export_connections(&mut self, path: PathBuf, include_passwords: bool) {
+    fn export_connections(
+        &mut self,
+        path: PathBuf,
+        connection_ids: Option<Vec<ConnectionId>>,
+        include_passwords: bool,
+    ) {
         self.busy = true;
         self.error = None;
         self.status = "Exporting connections...".to_string();
@@ -633,14 +709,32 @@ impl ConnectionManagerUi {
         let manager = self.manager.clone();
 
         self.runtime.spawn(async move {
-            let result = export_connections_to_file(manager, path.clone(), include_passwords)
-                .await
-                .map(|_| path);
+            let result = export_connections_to_file(
+                manager,
+                path.clone(),
+                connection_ids,
+                include_passwords,
+            )
+            .await
+            .map(|count| (path, count));
             let _ = tx.send(ConnectionEvent::Exported(result));
         });
     }
 
-    fn import_connections(&mut self, path: PathBuf) {
+    fn inspect_import(&mut self, path: PathBuf) {
+        self.busy = true;
+        self.error = None;
+        self.status = "Checking connection backup...".to_string();
+        let tx = self.tx.clone();
+        let manager = self.manager.clone();
+
+        self.runtime.spawn(async move {
+            let result = inspect_connections_file(manager, path).await;
+            let _ = tx.send(ConnectionEvent::ImportInspected(result));
+        });
+    }
+
+    fn start_import(&mut self, file: ConnectionExportFile, policy: ImportConflictPolicy) {
         self.busy = true;
         self.error = None;
         self.status = "Importing connections...".to_string();
@@ -648,7 +742,7 @@ impl ConnectionManagerUi {
         let manager = self.manager.clone();
 
         self.runtime.spawn(async move {
-            let result = import_connections_from_file(manager, path).await;
+            let result = import_connections(manager, file, policy).await;
             let _ = tx.send(ConnectionEvent::Imported(result));
         });
     }
@@ -728,8 +822,8 @@ impl ConnectionManagerUi {
                     }
                 },
                 ConnectionEvent::Exported(result) => match result {
-                    Ok(path) => {
-                        self.status = format!("Connections exported: {}", path.display());
+                    Ok((path, count)) => {
+                        self.status = format!("Exported {count} connection(s): {}", path.display());
                     }
                     Err(error) => {
                         self.error = Some(actionable_error(
@@ -739,11 +833,36 @@ impl ConnectionManagerUi {
                         ));
                     }
                 },
+                ConnectionEvent::ImportInspected(result) => match result {
+                    Ok(pending) if pending.conflicting_names.is_empty() => {
+                        self.start_import(pending.file, ImportConflictPolicy::Rename);
+                    }
+                    Ok(pending) => {
+                        self.status = format!(
+                            "{} connection name conflict(s) require a choice",
+                            pending.conflicting_names.len()
+                        );
+                        self.pending_import = Some(pending);
+                    }
+                    Err(error) => {
+                        self.error = Some(actionable_error(
+                            "Import connections failed",
+                            error,
+                            &self.form.password,
+                        ));
+                    }
+                },
                 ConnectionEvent::Imported(result) => match result {
-                    Ok(ids) => {
-                        self.status = format!("Imported {} connection(s)", ids.len());
-                        self.pending_changes
-                            .extend(ids.into_iter().map(ConnectionChange::Saved));
+                    Ok(result) => {
+                        self.status = format!(
+                            "Imported {} connection(s), overwrote {}, renamed {}",
+                            result.ids.len(),
+                            result.overwritten,
+                            result.renamed
+                        );
+                        if let Some(id) = result.ids.first().copied() {
+                            self.pending_changes.push(ConnectionChange::Saved(id));
+                        }
                         self.load_profiles();
                     }
                     Err(error) => {
@@ -806,9 +925,17 @@ fn upsert_profile(profiles: &mut Vec<ConnectionProfile>, profile: ConnectionProf
 async fn export_connections_to_file(
     manager: ConnectionManager,
     path: PathBuf,
+    connection_ids: Option<Vec<ConnectionId>>,
     include_passwords: bool,
-) -> Result<(), AppError> {
-    let profiles = manager.list_profiles().await?;
+) -> Result<usize, AppError> {
+    let mut profiles = manager.list_profiles().await?;
+    if let Some(connection_ids) = connection_ids {
+        let selected = connection_ids.into_iter().collect::<BTreeSet<_>>();
+        profiles.retain(|profile| selected.contains(&profile.id));
+    }
+    if profiles.is_empty() {
+        return Err(AppError::validation("no connections selected for export"));
+    }
     let mut entries = Vec::with_capacity(profiles.len());
 
     for mut profile in profiles {
@@ -835,13 +962,13 @@ async fn export_connections_to_file(
     };
     let bytes = serde_json::to_vec_pretty(&file)?;
     tokio::fs::write(path, bytes).await?;
-    Ok(())
+    Ok(file.profiles.len())
 }
 
-async fn import_connections_from_file(
+async fn inspect_connections_file(
     manager: ConnectionManager,
     path: PathBuf,
-) -> Result<Vec<ConnectionId>, AppError> {
+) -> Result<PendingConnectionImport, AppError> {
     let bytes = tokio::fs::read(path).await?;
     let file: ConnectionExportFile = serde_json::from_slice(&bytes)?;
     if file.version != 1 {
@@ -851,29 +978,119 @@ async fn import_connections_from_file(
         )));
     }
 
+    let existing = manager.list_profiles().await?;
+    let mut used_names = existing
+        .iter()
+        .map(|profile| normalized_connection_name(&profile.name))
+        .collect::<BTreeSet<_>>();
+    let mut conflicts = BTreeSet::new();
+    for entry in &file.profiles {
+        let key = normalized_connection_name(&entry.profile.name);
+        if !used_names.insert(key) {
+            conflicts.insert(entry.profile.name.clone());
+        }
+    }
+
+    Ok(PendingConnectionImport {
+        file,
+        conflicting_names: conflicts.into_iter().collect(),
+    })
+}
+
+async fn import_connections(
+    manager: ConnectionManager,
+    file: ConnectionExportFile,
+    policy: ImportConflictPolicy,
+) -> Result<ConnectionImportResult, AppError> {
+    let mut existing = manager.list_profiles().await?;
+    let mut used_names = existing
+        .iter()
+        .map(|profile| normalized_connection_name(&profile.name))
+        .collect::<BTreeSet<_>>();
+    let mut used_ids = existing
+        .iter()
+        .map(|profile| profile.id)
+        .collect::<BTreeSet<_>>();
+
     let mut imported = Vec::with_capacity(file.profiles.len());
+    let mut overwritten = 0;
+    let mut renamed = 0;
     for entry in file.profiles {
         let mut profile = entry.profile;
         profile.password_ref = None;
         let password = entry.password.unwrap_or_default();
-        let password_update = if password.is_empty() {
-            profile.security.save_password = false;
-            PasswordUpdate::Clear
-        } else {
-            profile.security.save_password = true;
-            PasswordUpdate::Replace(password)
-        };
-        let id = profile.id;
+        let name_key = normalized_connection_name(&profile.name);
+        let name_match = existing
+            .iter()
+            .position(|item| normalized_connection_name(&item.name) == name_key);
 
-        if manager.get_profile(id).await?.is_some() {
+        if let (Some(index), ImportConflictPolicy::Overwrite) = (name_match, policy) {
+            let previous = existing[index].clone();
+            profile.id = previous.id;
+            let password_update = if password.is_empty() {
+                profile.security.save_password = previous.security.save_password;
+                PasswordUpdate::Keep
+            } else {
+                profile.security.save_password = true;
+                PasswordUpdate::Replace(password)
+            };
+            let id = profile.id;
             manager.update_profile(profile, password_update).await?;
+            existing[index] = manager
+                .get_profile(id)
+                .await?
+                .expect("updated connection profile");
+            imported.push(id);
+            overwritten += 1;
         } else {
+            if name_match.is_some() {
+                profile.name = unique_import_name(&profile.name, &used_names);
+                renamed += 1;
+            }
+            if used_ids.contains(&profile.id) {
+                profile.id = ConnectionId::new();
+            }
+            let password_update = if password.is_empty() {
+                profile.security.save_password = false;
+                PasswordUpdate::Clear
+            } else {
+                profile.security.save_password = true;
+                PasswordUpdate::Replace(password)
+            };
+            let id = profile.id;
             manager.create_profile(profile, password_update).await?;
+            let created = manager
+                .get_profile(id)
+                .await?
+                .expect("created connection profile");
+            used_names.insert(normalized_connection_name(&created.name));
+            used_ids.insert(id);
+            existing.push(created);
+            imported.push(id);
         }
-        imported.push(id);
     }
 
-    Ok(imported)
+    Ok(ConnectionImportResult {
+        ids: imported,
+        overwritten,
+        renamed,
+    })
+}
+
+fn normalized_connection_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+fn unique_import_name(name: &str, used_names: &BTreeSet<String>) -> String {
+    let base = name.trim();
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base} ({suffix})");
+        if !used_names.contains(&normalized_connection_name(&candidate)) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 fn non_empty(value: &str) -> Option<String> {
@@ -901,4 +1118,167 @@ fn redact_ui_text(value: &str, password: &str) -> String {
         text = text.replace(password, "********");
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use app_core::storage::MemoryConnectionProfileStore;
+    use secure_store::EncryptedFileStore;
+    use std::sync::Arc;
+
+    fn profile(name: &str) -> ConnectionProfile {
+        ConnectionProfile::builder(DataSourceKind::PostgreSql, name)
+            .host("localhost")
+            .username("postgres")
+            .build()
+            .expect("valid profile")
+    }
+
+    fn manager() -> (ConnectionManager, PathBuf) {
+        let secrets_path = std::env::temp_dir().join(format!(
+            "orvyn-connection-import-test-{}.json",
+            ConnectionId::new()
+        ));
+        let manager = ConnectionManager::new(
+            Arc::new(MemoryConnectionProfileStore::default()),
+            Arc::new(EncryptedFileStore::new(&secrets_path, "test-key")),
+            Vec::new(),
+        );
+        (manager, secrets_path)
+    }
+
+    #[test]
+    fn import_names_are_made_unique_case_insensitively() {
+        let used = ["production".to_string(), "production (2)".to_string()]
+            .into_iter()
+            .collect();
+
+        assert_eq!(unique_import_name("Production", &used), "Production (3)");
+    }
+
+    #[tokio::test]
+    async fn overwrite_by_name_keeps_existing_password_when_backup_omits_it() {
+        let (manager, secrets_path) = manager();
+        let mut existing = profile("Production");
+        existing.security.save_password = true;
+        let existing_id = existing.id;
+        manager
+            .create_profile(existing, PasswordUpdate::Replace("secret".to_string()))
+            .await
+            .expect("existing profile");
+
+        let mut imported = profile("production");
+        imported.host = Some("db.example.com".to_string());
+        let file = ConnectionExportFile {
+            version: 1,
+            profiles: vec![ConnectionExportEntry {
+                profile: imported,
+                password: None,
+            }],
+        };
+
+        let result = import_connections(manager.clone(), file, ImportConflictPolicy::Overwrite)
+            .await
+            .expect("import");
+        let (saved, password) = manager
+            .profile_with_password(existing_id, None)
+            .await
+            .expect("saved profile");
+
+        assert_eq!(result.overwritten, 1);
+        assert_eq!(saved.host.as_deref(), Some("db.example.com"));
+        assert_eq!(password.as_deref(), Some("secret"));
+        let _ = std::fs::remove_file(secrets_path);
+    }
+
+    #[tokio::test]
+    async fn rename_policy_keeps_both_connections() {
+        let (manager, secrets_path) = manager();
+        manager
+            .create_profile(profile("Local"), PasswordUpdate::Clear)
+            .await
+            .expect("existing profile");
+        let file = ConnectionExportFile {
+            version: 1,
+            profiles: vec![ConnectionExportEntry {
+                profile: profile("local"),
+                password: None,
+            }],
+        };
+
+        let result = import_connections(manager.clone(), file, ImportConflictPolicy::Rename)
+            .await
+            .expect("import");
+        let profiles = manager.list_profiles().await.expect("profiles");
+
+        assert_eq!(result.renamed, 1);
+        assert_eq!(profiles.len(), 2);
+        assert!(profiles.iter().any(|profile| profile.name == "local (2)"));
+        let _ = std::fs::remove_file(secrets_path);
+    }
+
+    #[tokio::test]
+    async fn inspection_reports_existing_connection_names() {
+        let (manager, secrets_path) = manager();
+        manager
+            .create_profile(profile("Production"), PasswordUpdate::Clear)
+            .await
+            .expect("existing profile");
+        let import_path = std::env::temp_dir().join(format!(
+            "orvyn-connection-import-source-{}.json",
+            ConnectionId::new()
+        ));
+        let file = ConnectionExportFile {
+            version: 1,
+            profiles: vec![ConnectionExportEntry {
+                profile: profile("production"),
+                password: None,
+            }],
+        };
+        std::fs::write(&import_path, serde_json::to_vec(&file).expect("json"))
+            .expect("write import");
+
+        let pending = inspect_connections_file(manager, import_path.clone())
+            .await
+            .expect("inspect");
+
+        assert_eq!(pending.conflicting_names, vec!["production"]);
+        let _ = std::fs::remove_file(import_path);
+        let _ = std::fs::remove_file(secrets_path);
+    }
+
+    #[tokio::test]
+    async fn export_can_be_limited_to_selected_connections() {
+        let (manager, secrets_path) = manager();
+        let selected = manager
+            .create_profile(profile("Selected"), PasswordUpdate::Clear)
+            .await
+            .expect("selected profile");
+        manager
+            .create_profile(profile("Other"), PasswordUpdate::Clear)
+            .await
+            .expect("other profile");
+        let export_path = std::env::temp_dir().join(format!(
+            "orvyn-connection-export-selected-{}.json",
+            ConnectionId::new()
+        ));
+
+        let count = export_connections_to_file(
+            manager,
+            export_path.clone(),
+            Some(vec![selected.id]),
+            false,
+        )
+        .await
+        .expect("export");
+        let bytes = std::fs::read(&export_path).expect("read export");
+        let file: ConnectionExportFile = serde_json::from_slice(&bytes).expect("export json");
+
+        assert_eq!(count, 1);
+        assert_eq!(file.profiles.len(), 1);
+        assert_eq!(file.profiles[0].profile.id, selected.id);
+        let _ = std::fs::remove_file(export_path);
+        let _ = std::fs::remove_file(secrets_path);
+    }
 }
