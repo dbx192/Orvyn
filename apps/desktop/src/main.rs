@@ -74,7 +74,6 @@ fn bootstrap_connection_manager(config_dir: PathBuf) -> ConnectionManager {
     let profiles_path = config_dir.join("connections.json");
     let secrets_path = config_dir.join("secrets.json");
     let master_key = std::env::var("ORVYN_MASTER_KEY")
-        .or_else(|_| std::env::var("RUST_DB_CLIENT_MASTER_KEY"))
         .unwrap_or_else(|_| "development-master-key-change-me".to_string());
 
     ConnectionManager::with_default_testers(
@@ -85,15 +84,6 @@ fn bootstrap_connection_manager(config_dir: PathBuf) -> ConnectionManager {
 
 fn default_config_dir() -> PathBuf {
     std::env::var_os("ORVYN_CONFIG_DIR")
-        .or_else(|| std::env::var_os("RUST_DB_CLIENT_CONFIG_DIR"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let config_dir = PathBuf::from(".orvyn");
-            let legacy_config_dir = PathBuf::from(".rust-db-client");
-            if !config_dir.exists() && legacy_config_dir.exists() {
-                legacy_config_dir
-            } else {
-                config_dir
-            }
-        })
+        .unwrap_or_else(|| PathBuf::from(".orvyn"))
 }

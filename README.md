@@ -155,8 +155,6 @@ ORVYN_CONFIG_DIR=.orvyn
 ORVYN_MASTER_KEY=change-this-master-key
 ```
 
-为兼容改名前的数据，若 `.orvyn` 尚不存在但检测到 `.rust-db-client`，Orvyn 会继续读取旧目录；旧的 `RUST_DB_CLIENT_CONFIG_DIR` 和 `RUST_DB_CLIENT_MASTER_KEY` 也仍可作为后备配置使用。
-
 ## DuckDB 本地库
 
 当前仓库默认让 `libduckdb-sys` 直接链接本地 DuckDB 运行库，不触发在线下载。
