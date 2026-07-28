@@ -1,6 +1,6 @@
-# Rust DB Client
+# Orvyn
 
-Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQLite、PostgreSQL 的跨平台数据库客户端。
+Orvyn 是一个使用 Rust 编写、统一联通 Redis、MySQL、DuckDB、SQLite、PostgreSQL 的跨平台数据库客户端。
 
 当前仓库已经具备可构建、可测试的 workspace，以及可运行的桌面端主流程：
 
@@ -151,9 +151,11 @@ Rust DB Client 是一个使用 Rust 编写、面向 Redis、MySQL、DuckDB、SQL
 可选环境变量：
 
 ```bash
-RUST_DB_CLIENT_CONFIG_DIR=.rust-db-client
-RUST_DB_CLIENT_MASTER_KEY=change-this-master-key
+ORVYN_CONFIG_DIR=.orvyn
+ORVYN_MASTER_KEY=change-this-master-key
 ```
+
+为兼容改名前的数据，若 `.orvyn` 尚不存在但检测到 `.rust-db-client`，Orvyn 会继续读取旧目录；旧的 `RUST_DB_CLIENT_CONFIG_DIR` 和 `RUST_DB_CLIENT_MASTER_KEY` 也仍可作为后备配置使用。
 
 ## DuckDB 本地库
 
@@ -180,13 +182,13 @@ RUST_DB_CLIENT_MASTER_KEY=change-this-master-key
 ```powershell
 rustup target add x86_64-pc-windows-msvc
 D:\ProjectsRust
-cargo build -p desktop --release --target x86_64-pc-windows-msvc
-D:\ProjectsRust\target\x86_64-pc-windows-msvc\release\desktop.exe
+cargo build -p orvyn --release --target x86_64-pc-windows-msvc
+D:\ProjectsRust\target\x86_64-pc-windows-msvc\release\orvyn.exe
 ```
 
 生成产物：
 
-- `target/x86_64-pc-windows-msvc/release/desktop.exe`
+- `target/x86_64-pc-windows-msvc/release/orvyn.exe`
 
 当前 `.cargo/config.toml` 固定指向统一本地库目录。为 Windows 目标构建前，需要确认 Windows x64 的 DuckDB 本地库已经放到：
 

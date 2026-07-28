@@ -1546,7 +1546,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "desktop"
+name = "orvyn"
 version = "0.1.0"
 dependencies = [
  "app-core",

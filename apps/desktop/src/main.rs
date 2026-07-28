@@ -22,7 +22,8 @@ fn main() -> eframe::Result<()> {
     let runtime = Arc::new(
         Runtime::new().expect("failed to create background async runtime for desktop app"),
     );
-    let connection_manager = bootstrap_connection_manager(default_config_dir());
+    let config_dir = default_config_dir();
+    let connection_manager = bootstrap_connection_manager(config_dir.clone());
     let session_manager = SessionManager::with_default_testers(connection_manager.clone());
     let metadata_service = MetadataService::with_default_readers(connection_manager.clone());
     let query_service = QueryService::with_stores(
@@ -36,10 +37,10 @@ fn main() -> eframe::Result<()> {
         db_common::ConnectionPoolConfig::default(),
         app_core::task::TaskManager::default(),
         Arc::new(FileQueryHistoryStore::new(
-            default_config_dir().join("query-history.json"),
+            config_dir.join("query-history.json"),
         )),
         Arc::new(FileFavoriteQueryStore::new(
-            default_config_dir().join("favorite-queries.json"),
+            config_dir.join("favorite-queries.json"),
         )),
     );
     let redis_service = RedisService::new(connection_manager.clone());
@@ -72,7 +73,8 @@ fn main() -> eframe::Result<()> {
 fn bootstrap_connection_manager(config_dir: PathBuf) -> ConnectionManager {
     let profiles_path = config_dir.join("connections.json");
     let secrets_path = config_dir.join("secrets.json");
-    let master_key = std::env::var("RUST_DB_CLIENT_MASTER_KEY")
+    let master_key = std::env::var("ORVYN_MASTER_KEY")
+        .or_else(|_| std::env::var("RUST_DB_CLIENT_MASTER_KEY"))
         .unwrap_or_else(|_| "development-master-key-change-me".to_string());
 
     ConnectionManager::with_default_testers(
@@ -82,7 +84,16 @@ fn bootstrap_connection_manager(config_dir: PathBuf) -> ConnectionManager {
 }
 
 fn default_config_dir() -> PathBuf {
-    std::env::var_os("RUST_DB_CLIENT_CONFIG_DIR")
+    std::env::var_os("ORVYN_CONFIG_DIR")
+        .or_else(|| std::env::var_os("RUST_DB_CLIENT_CONFIG_DIR"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".rust-db-client"))
+        .unwrap_or_else(|| {
+            let config_dir = PathBuf::from(".orvyn");
+            let legacy_config_dir = PathBuf::from(".rust-db-client");
+            if !config_dir.exists() && legacy_config_dir.exists() {
+                legacy_config_dir
+            } else {
+                config_dir
+            }
+        })
 }

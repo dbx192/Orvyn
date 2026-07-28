@@ -44,7 +44,7 @@ pub(super) async fn export_database_sql(
     let mut output = String::new();
     let _ = writeln!(
         &mut output,
-        "-- rust-db-client {} export\n-- connection: {}\n",
+        "-- Orvyn {} export\n-- connection: {}\n",
         database_export_mode_label(mode),
         profile.name
     );
@@ -416,10 +416,8 @@ mod tests {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .expect("system clock")
                 .as_nanos();
-            let base = std::env::temp_dir().join(format!(
-                "rust-db-client-export-{}-{nonce}",
-                std::process::id()
-            ));
+            let base =
+                std::env::temp_dir().join(format!("orvyn-export-{}-{nonce}", std::process::id()));
             Self {
                 database: base.with_extension("duckdb"),
                 output: base.with_extension("sql"),

@@ -277,7 +277,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "rust-db-client-export-{}-{}.{}",
+            "orvyn-export-{}-{}.{}",
             std::process::id(),
             nanos,
             extension

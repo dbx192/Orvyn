@@ -1,6 +1,6 @@
-# Rust DB Client 跨平台发布说明
+# Orvyn 跨平台发布说明
 
-本文按当前仓库的实际结构编写：Rust workspace、`eframe/egui` 桌面程序、二进制 crate 为 `desktop`，并动态链接 DuckDB 1.5.4。
+本文按当前仓库的实际结构编写：Rust workspace、`eframe/egui` 桌面程序、二进制 crate 为 `orvyn`，并动态链接 DuckDB 1.5.4。
 
 ## 1. 推荐发布产物
 
@@ -10,8 +10,8 @@
 
 | 平台 | 架构 | 便携版 | 安装包 |
 | --- | --- | --- | --- |
-| Linux | x86_64 | `rust-db-client-0.1.0-linux-x86_64.tar.gz` | `.AppImage`，可选 `.deb` |
-| Windows 10/11 | x86_64 | `rust-db-client-0.1.0-windows-x86_64.zip` | Inno Setup 生成的 `.exe` |
+| Linux | x86_64 | `orvyn-0.1.0-linux-x86_64.tar.gz` | `.AppImage`，可选 `.deb` |
+| Windows 10/11 | x86_64 | `orvyn-0.1.0-windows-x86_64.zip` | Inno Setup 生成的 `.exe` |
 | macOS Apple Silicon | arm64 | `.app` | `.dmg` |
 | macOS Intel（仍需支持时） | x86_64 | `.app` | `.dmg` |
 
@@ -55,17 +55,17 @@ packaging/icons/AppIcon.icns   # macOS
 
 ### 2.3 修正配置目录和主密钥
 
-当前 `apps/desktop/src/main.rs` 默认把数据写到相对目录 `.rust-db-client`。安装后，工作目录可能是 `Program Files`、`/usr/bin` 或其他不可写/不可预测目录。正式发布前应改为系统用户数据目录，例如：
+当前 `apps/desktop/src/main.rs` 默认把数据写到相对目录 `.orvyn`。安装后，工作目录可能是 `Program Files`、`/usr/bin` 或其他不可写/不可预测目录。正式发布前应改为系统用户数据目录，例如：
 
 | 平台 | 建议目录 |
 | --- | --- |
-| Linux | `$XDG_CONFIG_HOME/rust-db-client` 或 `~/.config/rust-db-client` |
-| Windows | `%APPDATA%\Rust DB Client` |
-| macOS | `~/Library/Application Support/Rust DB Client` |
+| Linux | `$XDG_CONFIG_HOME/orvyn` 或 `~/.config/orvyn` |
+| Windows | `%APPDATA%\Orvyn` |
+| macOS | `~/Library/Application Support/Orvyn` |
 
-可使用 Rust 的 `directories` crate 获取这些目录，同时继续保留 `RUST_DB_CLIENT_CONFIG_DIR` 作为覆盖项。
+可使用 Rust 的 `directories` crate 获取这些目录，同时继续保留 `ORVYN_CONFIG_DIR` 作为覆盖项。
 
-另外，当前未设置 `RUST_DB_CLIENT_MASTER_KEY` 时会使用固定的开发密钥 `development-master-key-change-me`。正式版不可继续使用该默认值。至少要在首次运行时生成随机本机密钥并限制文件权限；更好的做法是使用 Windows Credential Manager、macOS Keychain 和 Linux Secret Service 保存密钥。
+另外，当前未设置 `ORVYN_MASTER_KEY` 时会使用固定的开发密钥 `development-master-key-change-me`。正式版不可继续使用该默认值。至少要在首次运行时生成随机本机密钥并限制文件权限；更好的做法是使用 Windows Credential Manager、macOS Keychain 和 Linux Secret Service 保存密钥。
 
 ### 2.4 Windows 隐藏控制台窗口
 
@@ -117,15 +117,15 @@ rustup default stable
 
 ```bash
 cargo test --workspace --locked
-cargo build -p desktop --release --locked
+cargo build -p orvyn --release --locked
 ```
 
-原始二进制位于 `target/release/desktop`。检查它确实动态依赖 DuckDB：
+原始二进制位于 `target/release/orvyn`。检查它确实动态依赖 DuckDB：
 
 ```bash
-readelf -d target/release/desktop | grep NEEDED
+readelf -d target/release/orvyn | grep NEEDED
 LD_LIBRARY_PATH="$PWD/target/duckdb-download/local/1.5.4" \
-  ldd target/release/desktop
+  ldd target/release/orvyn
 ```
 
 `ldd` 中不得出现 `not found`。
@@ -135,34 +135,34 @@ LD_LIBRARY_PATH="$PWD/target/duckdb-download/local/1.5.4" \
 ```bash
 VERSION=0.1.0
 ROOT="$PWD"
-OUT="$ROOT/dist/linux/rust-db-client-$VERSION-linux-x86_64"
+OUT="$ROOT/dist/linux/orvyn-$VERSION-linux-x86_64"
 
 rm -rf "$ROOT/dist/linux"
 mkdir -p "$OUT/lib"
-install -m 755 target/release/desktop "$OUT/rust-db-client-bin"
+install -m 755 target/release/orvyn "$OUT/orvyn-bin"
 install -m 755 target/duckdb-download/local/1.5.4/libduckdb.so "$OUT/lib/libduckdb.so"
 ```
 
-在 `$OUT/rust-db-client` 创建启动脚本：
+在 `$OUT/orvyn` 创建启动脚本：
 
 ```bash
 #!/bin/sh
 set -eu
 APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export LD_LIBRARY_PATH="$APP_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$APP_DIR/rust-db-client-bin" "$@"
+exec "$APP_DIR/orvyn-bin" "$@"
 ```
 
 然后执行：
 
 ```bash
-chmod 755 "$OUT/rust-db-client"
+chmod 755 "$OUT/orvyn"
 tar -C "$ROOT/dist/linux" -czf \
-  "$ROOT/dist/linux/rust-db-client-$VERSION-linux-x86_64.tar.gz" \
-  "rust-db-client-$VERSION-linux-x86_64"
+  "$ROOT/dist/linux/orvyn-$VERSION-linux-x86_64.tar.gz" \
+  "orvyn-$VERSION-linux-x86_64"
 ```
 
-解压到一个临时目录并运行 `./rust-db-client` 做一次真实验收。
+解压到一个临时目录并运行 `./orvyn` 做一次真实验收。
 
 ### 3.3 生成 AppImage
 
@@ -173,21 +173,21 @@ VERSION=0.1.0
 APPDIR="$PWD/dist/linux/AppDir"
 
 rm -rf "$APPDIR"
-mkdir -p "$APPDIR/usr/lib/rust-db-client" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/512x512/apps"
-install -m 755 target/release/desktop "$APPDIR/usr/lib/rust-db-client/rust-db-client"
-install -m 755 target/duckdb-download/local/1.5.4/libduckdb.so "$APPDIR/usr/lib/rust-db-client/libduckdb.so"
-install -m 644 packaging/icons/icon.png "$APPDIR/usr/share/icons/hicolor/512x512/apps/rust-db-client.png"
-patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/rust-db-client/rust-db-client"
+mkdir -p "$APPDIR/usr/lib/orvyn" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/512x512/apps"
+install -m 755 target/release/orvyn "$APPDIR/usr/lib/orvyn/orvyn"
+install -m 755 target/duckdb-download/local/1.5.4/libduckdb.so "$APPDIR/usr/lib/orvyn/libduckdb.so"
+install -m 644 packaging/icons/icon.png "$APPDIR/usr/share/icons/hicolor/512x512/apps/orvyn.png"
+patchelf --set-rpath '$ORIGIN' "$APPDIR/usr/lib/orvyn/orvyn"
 ```
 
-创建 `dist/linux/rust-db-client.desktop`：
+创建 `dist/linux/orvyn.desktop`：
 
 ```ini
 [Desktop Entry]
 Type=Application
-Name=Rust DB Client
-Exec=rust-db-client
-Icon=rust-db-client
+Name=Orvyn
+Exec=orvyn
+Icon=orvyn
 Categories=Development;Database;
 Terminal=false
 ```
@@ -195,16 +195,16 @@ Terminal=false
 让 `linuxdeploy` 收集需要随包携带的库并生成 AppImage：
 
 ```bash
-export LD_LIBRARY_PATH="$APPDIR/usr/lib/rust-db-client"
+export LD_LIBRARY_PATH="$APPDIR/usr/lib/orvyn"
 ./linuxdeploy-x86_64.AppImage \
   --appdir "$APPDIR" \
-  --executable "$APPDIR/usr/lib/rust-db-client/rust-db-client" \
-  --desktop-file dist/linux/rust-db-client.desktop \
+  --executable "$APPDIR/usr/lib/orvyn/orvyn" \
+  --desktop-file dist/linux/orvyn.desktop \
   --icon-file packaging/icons/icon.png \
   --output appimage
 
-mv Rust_DB_Client-x86_64.AppImage \
-  "dist/linux/rust-db-client-$VERSION-linux-x86_64.AppImage"
+mv Orvyn-x86_64.AppImage \
+  "dist/linux/orvyn-$VERSION-linux-x86_64.AppImage"
 ```
 
 `linuxdeploy` 实际生成的文件名可能随版本略有不同，先用 `ls *.AppImage` 确认再重命名。在 Ubuntu 22.04 和至少一个较新发行版上测试启动、文件选择框、中文字体、SQLite/DuckDB 打开和远程数据库连接。
@@ -216,17 +216,17 @@ mv Rust_DB_Client-x86_64.AppImage \
 ```text
 deb-root/
   DEBIAN/control
-  usr/bin/rust-db-client
-  usr/lib/rust-db-client/rust-db-client-bin
-  usr/lib/rust-db-client/libduckdb.so
-  usr/share/applications/rust-db-client.desktop
-  usr/share/icons/hicolor/512x512/apps/rust-db-client.png
+  usr/bin/orvyn
+  usr/lib/orvyn/orvyn-bin
+  usr/lib/orvyn/libduckdb.so
+  usr/share/applications/orvyn.desktop
+  usr/share/icons/hicolor/512x512/apps/orvyn.png
 ```
 
 `DEBIAN/control` 示例：
 
 ```text
-Package: rust-db-client
+Package: orvyn
 Version: 0.1.0
 Section: devel
 Priority: optional
@@ -235,24 +235,24 @@ Maintainer: YOUR NAME <you@example.com>
 Description: Cross-platform database client written in Rust
 ```
 
-`usr/bin/rust-db-client` 内容：
+`usr/bin/orvyn` 内容：
 
 ```bash
 #!/bin/sh
-export LD_LIBRARY_PATH="/usr/lib/rust-db-client${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec /usr/lib/rust-db-client/rust-db-client-bin "$@"
+export LD_LIBRARY_PATH="/usr/lib/orvyn${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /usr/lib/orvyn/orvyn-bin "$@"
 ```
 
 设置权限并打包：
 
 ```bash
-chmod 755 deb-root/usr/bin/rust-db-client
-chmod 755 deb-root/usr/lib/rust-db-client/rust-db-client-bin
+chmod 755 deb-root/usr/bin/orvyn
+chmod 755 deb-root/usr/lib/orvyn/orvyn-bin
 dpkg-deb --build --root-owner-group deb-root \
-  dist/linux/rust-db-client_0.1.0_amd64.deb
+  dist/linux/orvyn_0.1.0_amd64.deb
 ```
 
-在干净的 Ubuntu 虚拟机中用 `sudo apt install ./rust-db-client_0.1.0_amd64.deb` 安装并卸载测试。
+在干净的 Ubuntu 虚拟机中用 `sudo apt install ./orvyn_0.1.0_amd64.deb` 安装并卸载测试。
 
 ## 4. Windows 10/11 x64
 
@@ -273,32 +273,32 @@ rustup target add x86_64-pc-windows-msvc
 Get-ChildItem .\target\duckdb-download\local\1.5.4
 
 cargo test --workspace --locked
-cargo build -p desktop --release --locked --target x86_64-pc-windows-msvc
+cargo build -p orvyn --release --locked --target x86_64-pc-windows-msvc
 ```
 
 产物为：
 
 ```text
-target\x86_64-pc-windows-msvc\release\desktop.exe
+target\x86_64-pc-windows-msvc\release\orvyn.exe
 ```
 
 ### 4.1 生成便携 zip
 
 ```powershell
 $Version = "0.1.0"
-$Out = ".\dist\windows\rust-db-client-$Version-windows-x86_64"
+$Out = ".\dist\windows\orvyn-$Version-windows-x86_64"
 Remove-Item .\dist\windows -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $Out -ItemType Directory -Force | Out-Null
 
-Copy-Item .\target\x86_64-pc-windows-msvc\release\desktop.exe "$Out\RustDBClient.exe"
+Copy-Item .\target\x86_64-pc-windows-msvc\release\orvyn.exe "$Out\Orvyn.exe"
 Copy-Item .\target\duckdb-download\local\1.5.4\duckdb.dll "$Out\duckdb.dll"
 Compress-Archive -Path "$Out\*" -DestinationPath "$Out.zip" -Force
 ```
 
-`duckdb.dll` 必须和 `RustDBClient.exe` 位于同一目录。可用下面的命令检查依赖：
+`duckdb.dll` 必须和 `Orvyn.exe` 位于同一目录。可用下面的命令检查依赖：
 
 ```powershell
-dumpbin /DEPENDENTS "$Out\RustDBClient.exe"
+dumpbin /DEPENDENTS "$Out\Orvyn.exe"
 dumpbin /DEPENDENTS "$Out\duckdb.dll"
 ```
 
@@ -309,18 +309,18 @@ dumpbin /DEPENDENTS "$Out\duckdb.dll"
 创建 `packaging/windows/installer.iss`：
 
 ```iss
-#define MyAppName "Rust DB Client"
+#define MyAppName "Orvyn"
 #define MyAppVersion "0.1.0"
-#define MyAppExeName "RustDBClient.exe"
+#define MyAppExeName "Orvyn.exe"
 
 [Setup]
 AppId={{7E8D9E1F-38E0-4D79-908C-F5B5A7A74A31}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-DefaultDirName={localappdata}\Programs\RustDBClient
+DefaultDirName={localappdata}\Programs\Orvyn
 DefaultGroupName={#MyAppName}
 OutputDir=..\..\dist\windows
-OutputBaseFilename=rust-db-client-{#MyAppVersion}-windows-x86_64-setup
+OutputBaseFilename=orvyn-{#MyAppVersion}-windows-x86_64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -331,7 +331,7 @@ SetupIconFile=..\icons\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
-Source: "..\..\target\x86_64-pc-windows-msvc\release\desktop.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
+Source: "..\..\target\x86_64-pc-windows-msvc\release\orvyn.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 Source: "..\..\target\duckdb-download\local\1.5.4\duckdb.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -380,7 +380,7 @@ Apple Silicon 构建：
 rustup target add aarch64-apple-darwin
 # 将 arm64 的 libduckdb.dylib 和 duckdb.h 放入 target/duckdb-download/local/1.5.4
 cargo test --workspace --locked
-cargo build -p desktop --release --locked --target aarch64-apple-darwin
+cargo build -p orvyn --release --locked --target aarch64-apple-darwin
 ```
 
 Intel 构建：
@@ -388,15 +388,15 @@ Intel 构建：
 ```bash
 rustup target add x86_64-apple-darwin
 # 换成 x86_64 的 libduckdb.dylib 和 duckdb.h；不能继续使用 arm64 版本
-cargo build -p desktop --release --locked --target x86_64-apple-darwin
+cargo build -p orvyn --release --locked --target x86_64-apple-darwin
 ```
 
 分别检查架构与依赖：
 
 ```bash
-file target/aarch64-apple-darwin/release/desktop
+file target/aarch64-apple-darwin/release/orvyn
 file target/duckdb-download/local/1.5.4/libduckdb.dylib
-otool -L target/aarch64-apple-darwin/release/desktop
+otool -L target/aarch64-apple-darwin/release/orvyn
 ```
 
 ### 5.2 创建 `.app`
@@ -405,11 +405,11 @@ otool -L target/aarch64-apple-darwin/release/desktop
 
 ```bash
 VERSION=0.1.0
-APP="$PWD/dist/macos/Rust DB Client.app"
+APP="$PWD/dist/macos/Orvyn.app"
 
 rm -rf "$PWD/dist/macos"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
-install -m 755 target/aarch64-apple-darwin/release/desktop "$APP/Contents/MacOS/RustDBClient"
+install -m 755 target/aarch64-apple-darwin/release/orvyn "$APP/Contents/MacOS/Orvyn"
 install -m 755 target/duckdb-download/local/1.5.4/libduckdb.dylib "$APP/Contents/Frameworks/libduckdb.dylib"
 install -m 644 packaging/icons/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 ```
@@ -421,10 +421,10 @@ install -m 644 packaging/icons/AppIcon.icns "$APP/Contents/Resources/AppIcon.icn
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Rust DB Client</string>
-  <key>CFBundleDisplayName</key><string>Rust DB Client</string>
-  <key>CFBundleIdentifier</key><string>com.yourcompany.rustdbclient</string>
-  <key>CFBundleExecutable</key><string>RustDBClient</string>
+  <key>CFBundleName</key><string>Orvyn</string>
+  <key>CFBundleDisplayName</key><string>Orvyn</string>
+  <key>CFBundleIdentifier</key><string>com.yourcompany.orvyn</string>
+  <key>CFBundleExecutable</key><string>Orvyn</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
@@ -438,7 +438,7 @@ install -m 644 packaging/icons/AppIcon.icns "$APP/Contents/Resources/AppIcon.icn
 将二进制中的 DuckDB 引用改成应用包内路径：
 
 ```bash
-BIN="$APP/Contents/MacOS/RustDBClient"
+BIN="$APP/Contents/MacOS/Orvyn"
 DYLIB="$APP/Contents/Frameworks/libduckdb.dylib"
 OLD_DUCKDB_REF=$(otool -L "$BIN" | awk '/libduckdb\.dylib/{print $1; exit}')
 test -n "$OLD_DUCKDB_REF"
@@ -471,19 +471,19 @@ spctl --assess --type execute --verbose=4 "$APP"
 
 ```bash
 hdiutil create \
-  -volname "Rust DB Client" \
+  -volname "Orvyn" \
   -srcfolder "$APP" \
   -ov -format UDZO \
-  "$PWD/dist/macos/rust-db-client-0.1.0-macos-arm64.dmg"
+  "$PWD/dist/macos/orvyn-0.1.0-macos-arm64.dmg"
 
 codesign --force --timestamp --sign "$DEVELOPER_ID" \
-  "$PWD/dist/macos/rust-db-client-0.1.0-macos-arm64.dmg"
+  "$PWD/dist/macos/orvyn-0.1.0-macos-arm64.dmg"
 ```
 
 先创建一次公证凭据：
 
 ```bash
-xcrun notarytool store-credentials "rust-db-client-notary" \
+xcrun notarytool store-credentials "orvyn-notary" \
   --apple-id "YOUR_APPLE_ID" \
   --team-id "YOUR_TEAM_ID" \
   --password "APP_SPECIFIC_PASSWORD"
@@ -492,9 +492,9 @@ xcrun notarytool store-credentials "rust-db-client-notary" \
 提交并等待公证，成功后装订票据：
 
 ```bash
-DMG="$PWD/dist/macos/rust-db-client-0.1.0-macos-arm64.dmg"
+DMG="$PWD/dist/macos/orvyn-0.1.0-macos-arm64.dmg"
 xcrun notarytool submit "$DMG" \
-  --keychain-profile "rust-db-client-notary" --wait
+  --keychain-profile "orvyn-notary" --wait
 xcrun stapler staple "$DMG"
 xcrun stapler validate "$DMG"
 spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"

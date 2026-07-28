@@ -13,5 +13,5 @@ pub mod storage;
 pub mod task;
 
 pub const fn app_name() -> &'static str {
-    "Rust DB Client"
+    "Orvyn"
 }

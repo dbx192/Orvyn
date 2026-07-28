@@ -1015,7 +1015,7 @@ mod tests {
                 .expect("system clock")
                 .as_nanos();
             Self(std::env::temp_dir().join(format!(
-                "rust-db-client-duckdb-{}-{nonce}.duckdb",
+                "orvyn-duckdb-{}-{nonce}.duckdb",
                 std::process::id()
             )))
         }
