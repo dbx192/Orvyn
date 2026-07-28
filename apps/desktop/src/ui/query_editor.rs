@@ -172,7 +172,6 @@ pub struct QueryEditor {
     connections: Vec<ConnectionProfile>,
     history_entries: Vec<QueryHistoryEntry>,
     favorite_entries: Vec<FavoriteQuery>,
-    show_close_confirm: Option<QueryId>,
     show_execute_all: bool,
     pending_danger_confirm: Option<PendingDangerConfirm>,
     side_tab: QuerySideTab,
@@ -201,7 +200,6 @@ impl QueryEditor {
             connections: Vec::new(),
             history_entries: Vec::new(),
             favorite_entries: Vec::new(),
-            show_close_confirm: None,
             show_execute_all: false,
             pending_danger_confirm: None,
             side_tab: QuerySideTab::History,
@@ -221,23 +219,19 @@ impl QueryEditor {
         if self.tabs.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.vertical(|ui| {
-                    ui.label("No query tab open");
+                    ui.label("No SQL workspace open");
                     if ui.button("New Query").clicked() {
                         self.new_query();
                     }
                 });
             });
-            self.close_confirm_dialog(ctx);
             self.execute_all_dialog(ctx);
             return Some(self.status.clone());
         }
 
         self.toolbar(ui);
         ui.separator();
-        self.tabs_bar(ui);
-        ui.separator();
         self.active_tab_panel(ui);
-        self.close_confirm_dialog(ctx);
         self.execute_all_dialog(ctx);
         self.dangerous_sql_dialog(ctx);
 
@@ -267,17 +261,35 @@ impl QueryEditor {
     }
 
     pub fn new_query(&mut self) {
-        let profile = self
+        if let Some(tab_id) = self.active_tab {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                // The editor is a single workspace.  Starting a new query
+                // clears the SQL while keeping the connection/database
+                // selected in the toolbar.
+                tab.sql.clear();
+                tab.cursor_offset = 0;
+                tab.selection = None;
+                tab.dirty = false;
+                tab.results.clear();
+                tab.execution_report = None;
+                tab.execution_error = None;
+                tab.highlighted_sql.clear();
+                tab.completion = CompletionState::default();
+                self.status = "New query".to_string();
+            }
+            return;
+        }
+
+        let Some(profile) = self
             .connections
             .iter()
             .find(|profile| profile.kind.is_relational())
-            .cloned();
-
-        if let Some(profile) = profile {
-            self.open_new_tab(profile);
-        } else {
+            .cloned()
+        else {
             self.status = "No relational connections available".to_string();
-        }
+            return;
+        };
+        self.open_new_tab(profile);
     }
 
     pub fn show_history(&mut self) {
@@ -414,12 +426,41 @@ impl QueryEditor {
     }
 
     fn open_new_tab(&mut self, profile: ConnectionProfile) -> QueryId {
+        // There is intentionally only one visible SQL workspace. Reuse the
+        // existing query instead of creating another hidden tab whose
+        // connection can become stale when the tree selection changes.
+        if let Some(tab_id) = self.active_tab {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.connection_id = profile.id;
+                tab.title = "SQL".to_string();
+                tab.database = profile.database.clone();
+                tab.schema = None;
+                tab.sql.clear();
+                tab.cursor_offset = 0;
+                tab.selection = None;
+                tab.dirty = false;
+                tab.available_databases.clear();
+                tab.available_schemas.clear();
+                tab.available_tables.clear();
+                tab.columns_by_table.clear();
+                tab.pending_column_loads.clear();
+                tab.results.clear();
+                tab.execution_report = None;
+                tab.execution_error = None;
+                tab.highlighted_sql.clear();
+                tab.completion = CompletionState::default();
+                self.refresh_metadata_for_tab(tab_id);
+                self.status = "Query workspace reset".to_string();
+                return tab_id;
+            }
+        }
+
         let tab = QueryEditorTab::new(&profile);
         let tab_id = tab.id;
         self.tabs.insert(tab_id, tab);
         self.active_tab = Some(tab_id);
         self.refresh_metadata_for_tab(tab_id);
-        self.status = "New query tab created".to_string();
+        self.status = "SQL workspace ready".to_string();
         tab_id
     }
 
@@ -683,31 +724,6 @@ impl QueryEditor {
                     self.set_active_schema(schema);
                 }
             });
-    }
-
-    fn tabs_bar(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui| {
-            let mut close_tab = None;
-            for (id, tab) in &self.tabs {
-                let selected = self.active_tab == Some(*id);
-                let title = if tab.dirty {
-                    format!("{} *", tab.title)
-                } else {
-                    tab.title.clone()
-                };
-
-                if ui.selectable_label(selected, title).clicked() {
-                    self.active_tab = Some(*id);
-                }
-                if ui.small_button("x").clicked() {
-                    close_tab = Some(*id);
-                }
-            }
-
-            if let Some(tab_id) = close_tab {
-                self.close_tab_request(tab_id);
-            }
-        });
     }
 
     fn active_tab_panel(&mut self, ui: &mut Ui) {
@@ -974,24 +990,6 @@ impl QueryEditor {
         if let Some((result_index, statement, offset, page_size)) = page_request {
             self.execute_result_page(tab_id, result_index, statement, offset, page_size);
         }
-    }
-
-    fn close_tab_request(&mut self, tab_id: QueryId) {
-        if let Some(tab) = self.tabs.get(&tab_id) {
-            if tab.dirty {
-                self.show_close_confirm = Some(tab_id);
-            } else {
-                self.close_tab(tab_id);
-            }
-        }
-    }
-
-    fn close_tab(&mut self, tab_id: QueryId) {
-        self.tabs.remove(&tab_id);
-        if self.active_tab == Some(tab_id) {
-            self.active_tab = self.tabs.keys().next().copied();
-        }
-        self.status = "Tab closed".to_string();
     }
 
     fn execute_active(&mut self, mode: QueryExecutionMode) {
@@ -1696,39 +1694,6 @@ impl QueryEditor {
         }
     }
 
-    fn close_confirm_dialog(&mut self, ctx: &eframe::egui::Context) {
-        if let Some(tab_id) = self.show_close_confirm {
-            let title = self
-                .tabs
-                .get(&tab_id)
-                .map(|tab| tab.title.clone())
-                .unwrap_or_else(|| "Query".to_string());
-
-            let mut open = true;
-            Window::new("Confirm Close")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label(format!("'{}' has unsaved changes. Close anyway?", title));
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            self.show_close_confirm = None;
-                        }
-                        if ui.button("Close").clicked() {
-                            self.close_tab(tab_id);
-                            self.show_close_confirm = None;
-                        }
-                    });
-                });
-
-            if !open {
-                self.show_close_confirm = None;
-            }
-        }
-    }
-
     fn execute_all_dialog(&mut self, ctx: &eframe::egui::Context) {
         if self.show_execute_all {
             let mut open = true;
@@ -1737,7 +1702,7 @@ impl QueryEditor {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("This will execute every statement in the current tab.");
+                    ui.label("This will execute every statement in the current workspace.");
                     ui.label("Default execution runs only the current statement.");
                     if let Some(tab) = self.active_tab.and_then(|id| self.tabs.get(&id)) {
                         ui.label(
