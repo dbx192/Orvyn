@@ -25,3 +25,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 duckdb.workspace = true
+
+[build-dependencies]
+winres = "0.1"
