@@ -42,14 +42,14 @@ impl DesktopApp {
                             let table_name = payload.table.clone();
                             let conn_id = payload.connection_id;
                             self.object_tree.mark_connected(conn_id);
-                            self.table_structure = Some(TableStructureView::from_columns(
+                            let structure = TableStructureView::from_columns(
                                 conn_id,
                                 payload.kind,
                                 payload.database.clone(),
                                 payload.schema.clone(),
                                 payload.table.clone(),
                                 payload.columns.clone(),
-                            ));
+                            );
                             let editor = TableEditor::with_services(
                                 payload.schema.clone(),
                                 &payload.table,
@@ -70,8 +70,10 @@ impl DesktopApp {
                                 payload.schema.as_deref().unwrap_or_default(),
                                 payload.table.as_str(),
                             ));
+                            self.table_structures.insert(editor_id, structure);
                             self.table_editors.insert(editor_id, editor);
                             self.active_table_editor = Some(editor_id);
+                            self.active_structure = Some(editor_id);
                             self.state.set_status(format!(
                                 "Loaded table {} ({} rows)",
                                 table_name, row_count
@@ -106,6 +108,13 @@ impl DesktopApp {
                     match result {
                         Ok(payload) => {
                             self.object_tree.mark_connected(payload.connection_id);
+                            let structure_id = eframe::egui::Id::new((
+                                "table-editor",
+                                payload.connection_id.to_string(),
+                                payload.database.as_deref().unwrap_or_default(),
+                                payload.schema.as_deref().unwrap_or_default(),
+                                payload.table.as_str(),
+                            ));
                             let view = TableStructureView::new(
                                 payload.connection_id,
                                 payload.kind,
@@ -120,7 +129,8 @@ impl DesktopApp {
                                 payload.create_sql,
                             );
                             let table_name = view.table_name();
-                            self.table_structure = Some(view);
+                            self.table_structures.insert(structure_id, view);
+                            self.active_structure = Some(structure_id);
                             self.state
                                 .set_status(format!("Loaded structure for {}", table_name));
                         }
@@ -249,10 +259,20 @@ impl DesktopApp {
                                     }),
                                 &payload.table,
                             );
+                            let closed_editor_ids = self
+                                .table_editors
+                                .iter()
+                                .filter_map(|(id, editor)| {
+                                    (editor.table_name() == table_name).then_some(*id)
+                                })
+                                .collect::<Vec<_>>();
                             self.table_editors
-                                .retain(|_, editor| editor.table_name() != table_name);
+                                .retain(|id, _| !closed_editor_ids.contains(id));
+                            self.table_structures
+                                .retain(|id, _| !closed_editor_ids.contains(id));
                             if self.table_editors.is_empty() {
-                                self.table_structure = None;
+                                self.table_structures.clear();
+                                self.active_structure = None;
                                 self.active_panel = ActivePanel::QueryEditor;
                                 self.active_table_editor = None;
                             } else if self
@@ -261,6 +281,7 @@ impl DesktopApp {
                             {
                                 self.active_table_editor =
                                     self.table_editors.keys().next().copied();
+                                self.active_structure = self.active_table_editor;
                             }
                             self.object_tree.reload_root();
                             self.state

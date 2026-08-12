@@ -15,6 +15,7 @@
 check_log.txt
 todo.md
 /bugs/
+/dist/
 /.orvyn/
 connections.json
 orvyn-connections.json

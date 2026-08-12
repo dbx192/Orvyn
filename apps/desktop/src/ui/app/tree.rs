@@ -64,7 +64,6 @@ impl DesktopApp {
                         schema.as_deref().unwrap_or(""),
                         table
                     ));
-                    self.table_structure = None;
                     self.spawn_table_data_load(
                         connection_id,
                         database.clone(),
@@ -132,7 +131,6 @@ impl DesktopApp {
                         schema.as_deref().unwrap_or(""),
                         table
                     ));
-                    self.table_structure = None;
                     self.spawn_structure_load(connection_id, database, schema, table);
                     self.active_panel = ActivePanel::TableStructure;
                 }

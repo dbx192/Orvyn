@@ -52,6 +52,7 @@ impl DesktopApp {
                 if ui.selectable_label(selected, title).clicked() {
                     self.active_panel = ActivePanel::TableEditor;
                     self.active_table_editor = Some(id);
+                    self.active_structure = Some(id);
                 }
                 if ui
                     .add_enabled(!dirty, Button::new("x"))
@@ -67,8 +68,13 @@ impl DesktopApp {
             }
             if let Some(id) = close {
                 self.table_editors.remove(&id);
+                self.table_structures.remove(&id);
+                if self.active_structure == Some(id) {
+                    self.active_structure = self.active_table_editor.filter(|active| *active != id);
+                }
                 if self.active_table_editor == Some(id) {
                     self.active_table_editor = self.table_editors.keys().next().copied();
+                    self.active_structure = self.active_table_editor;
                     self.active_panel = if self.active_table_editor.is_some() {
                         ActivePanel::TableEditor
                     } else {
@@ -76,7 +82,7 @@ impl DesktopApp {
                     };
                 }
             }
-            if self.table_structure.is_some() || self.pending_structure_load.is_some() {
+            if self.active_structure.is_some() || self.pending_structure_load.is_some() {
                 self.workspace_tab(ui, ActivePanel::TableStructure, "Structure");
             }
             if self.import_wizard.is_some() {
@@ -107,7 +113,10 @@ impl DesktopApp {
         if self.pending_structure_load.is_some() {
             return;
         }
-        let Some(view) = self.table_structure.as_ref() else {
+        let Some(view) = self
+            .active_structure
+            .and_then(|id| self.table_structures.get(&id))
+        else {
             return;
         };
         if !view.needs_detail_load() {
@@ -178,7 +187,9 @@ impl DesktopApp {
                             });
                         }
                     },
-                    ActivePanel::TableStructure => match &mut self.table_structure {
+                    ActivePanel::TableStructure => match self
+                        .active_structure
+                        .and_then(|id| self.table_structures.get_mut(&id)) {
                         Some(view) => {
                             let message = view.ui(ui);
                             let create_index = view.take_create_index_request();

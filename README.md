@@ -171,30 +171,35 @@ ORVYN_MASTER_KEY=change-this-master-key
 
 ## Windows 11 x64 打包
 
-当前桌面端可以作为普通 Windows 桌面程序构建，目标三元组建议使用：
+Windows 安装包使用 `x86_64-pc-windows-msvc` 目标、DuckDB 动态库和 Inno Setup 6 生成。
 
-- `x86_64-pc-windows-msvc`
+打包前请确认：
 
-基础步骤：
+- 已安装 Rust MSVC 工具链和 `x86_64-pc-windows-msvc` 目标；
+- 已安装 Inno Setup 6，且 `ISCC.exe` 位于 `D:\Program Files (x86)\Inno Setup 6\ISCC.exe`，或标准的 Program Files 目录；
+- `target/duckdb-download/local/1.5.4` 包含 Windows x64 的 `duckdb.lib`、`duckdb.dll` 和 `duckdb.h`。
+
+在仓库根目录执行以下命令即可手动重新打包：
+
+```powershell
+.\packaging\windows\build-installer.ps1
+```
+
+该脚本等价于以下手动步骤：
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
-D:\ProjectsRust
-cargo build -p orvyn --release --target x86_64-pc-windows-msvc
-D:\ProjectsRust\target\x86_64-pc-windows-msvc\release\orvyn.exe
+cargo build -p orvyn --release --locked --target x86_64-pc-windows-msvc
+& 'D:\Program Files (x86)\Inno Setup 6\ISCC.exe' .\packaging\windows\installer.iss
 ```
 
 生成产物：
 
-- `target/x86_64-pc-windows-msvc/release/orvyn.exe`
+- 可执行文件：`target/x86_64-pc-windows-msvc/release/orvyn.exe`
+- DuckDB 运行库：`target/x86_64-pc-windows-msvc/release/duckdb.dll`
+- 安装包：`dist/windows/orvyn-0.1.0-windows-x86_64-setup.exe`
 
-当前 `.cargo/config.toml` 固定指向统一本地库目录。为 Windows 目标构建前，需要确认 Windows x64 的 DuckDB 本地库已经放到：
-
-- `target/duckdb-download/local/1.5.4`
-
-其中至少需要包含 `duckdb.lib`、`duckdb.dll` 和 `duckdb.h`。
-
-如果你要把程序拷贝到另一台 Windows 11 64 位机器使用，需要同时带上与目标构建匹配的 DuckDB 动态库文件。
+直接分发可执行文件时，必须同时分发同目录下的 `duckdb.dll`；推荐分发安装包。
 
 ## 常用命令
 
