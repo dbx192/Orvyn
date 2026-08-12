@@ -11,7 +11,7 @@ use crate::ui::grid::{
 use app_core::{metadata::MetadataService, query::QueryService};
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use db_common::{
-    CellValue, ConnectionId, Dialect, Identifier, LogicalType, QueryExecutionMode,
+    CellValue, ConnectionId, DataSourceKind, Dialect, Identifier, LogicalType, QueryExecutionMode,
     QueryExecutionRequest, QueryId, QueryResult, Result, Row, TableColumn,
     QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
     QUERY_RESULT_METADATA_TOTAL_ROWS,
@@ -146,6 +146,7 @@ pub struct TableEditor {
     query_service: Option<QueryService>,
     metadata_service: Option<MetadataService>,
     connection_id: Option<ConnectionId>,
+    data_source_kind: Option<DataSourceKind>,
     database: Option<String>,
     runtime: Option<Handle>,
     show_commit_dialog: bool,
@@ -196,6 +197,7 @@ impl TableEditor {
             query_service: None,
             metadata_service: None,
             connection_id: None,
+            data_source_kind: None,
             database: None,
             runtime: None,
             show_commit_dialog: false,
@@ -223,6 +225,7 @@ impl TableEditor {
         query_service: QueryService,
         metadata_service: MetadataService,
         connection_id: ConnectionId,
+        data_source_kind: DataSourceKind,
         database: Option<String>,
         runtime: Handle,
     ) -> Self {
@@ -237,6 +240,7 @@ impl TableEditor {
         editor.query_service = Some(query_service);
         editor.metadata_service = Some(metadata_service);
         editor.connection_id = Some(connection_id);
+        editor.data_source_kind = Some(data_source_kind);
         editor.database = database;
         editor.runtime = Some(runtime);
         editor
@@ -1280,9 +1284,20 @@ impl TableEditor {
         };
         let offset = (next_page as u64).saturating_mul(u64::from(page_size));
         let total_rows = self.remote_total_rows();
-        let keyset_page = self.keyset_page_query(next_page, page_size);
+        let keyset_page = (!matches!(self.data_source_kind, Some(DataSourceKind::DuckDb)))
+            .then(|| self.keyset_page_query(next_page, page_size))
+            .flatten();
         let (sql, reverse_rows, uses_keyset) = match keyset_page {
             Some((sql, reverse_rows)) => (sql, reverse_rows, true),
+            None if matches!(self.data_source_kind, Some(DataSourceKind::DuckDb)) => (
+                format!(
+                    "{} LIMIT {page_size} OFFSET {offset}",
+                    self.ordered_table_query()
+                        .unwrap_or_else(|_| format!("SELECT * FROM {table_sql}"))
+                ),
+                false,
+                true,
+            ),
             None => (
                 self.ordered_table_query()
                     .unwrap_or_else(|_| format!("SELECT * FROM {table_sql}")),

@@ -430,7 +430,33 @@ impl ConnectionManagerUi {
 
                 if self.form.kind.is_file_based() {
                     ui.label("File path");
-                    ui.add(TextEdit::singleline(&mut self.form.file_path).desired_width(360.0));
+                    ui.horizontal(|ui| {
+                        ui.add(TextEdit::singleline(&mut self.form.file_path).desired_width(290.0));
+                        if ui.button("Browse...").clicked() {
+                            let mut dialog =
+                                rfd::FileDialog::new().set_title(match self.form.kind {
+                                    DataSourceKind::DuckDb => "Select DuckDB database",
+                                    DataSourceKind::Sqlite => "Select SQLite database",
+                                    _ => "Select database file",
+                                });
+                            if matches!(self.form.kind, DataSourceKind::DuckDb) {
+                                dialog = dialog.add_filter("DuckDB database", &["duckdb", "db"]);
+                            } else if matches!(self.form.kind, DataSourceKind::Sqlite) {
+                                dialog = dialog
+                                    .add_filter("SQLite database", &["sqlite", "sqlite3", "db"]);
+                            }
+                            if let Some(path) = dialog.pick_file() {
+                                self.form.file_path = path.to_string_lossy().into_owned();
+                                if self.form.name.trim().is_empty() {
+                                    self.form.name = path
+                                        .file_stem()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or_default()
+                                        .to_string();
+                                }
+                            }
+                        }
+                    });
                     ui.end_row();
                 } else {
                     ui.label("Host");

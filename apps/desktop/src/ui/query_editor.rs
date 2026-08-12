@@ -2299,10 +2299,6 @@ fn update_completion_for_tab(tab: &mut QueryEditorTab) {
         .unwrap_or(cursor);
 
     let prefix = &before[word_start..];
-    if prefix.is_empty() {
-        tab.completion.visible = false;
-        return;
-    }
 
     // If we are right after a dot, offer columns of the preceding identifier.
     let dot_context = before[..word_start].ends_with('.').then(|| {
@@ -2358,7 +2354,7 @@ fn update_completion_for_tab(tab: &mut QueryEditorTab) {
         }
     }
 
-    if items.is_empty() {
+    if items.is_empty() && !prefix.is_empty() {
         tab.completion.visible = false;
         return;
     }
@@ -2372,7 +2368,7 @@ fn update_completion_for_tab(tab: &mut QueryEditorTab) {
     tab.completion.items = items;
     tab.completion.replacement = Some(replacement);
     tab.completion.visible = true;
-    tab.completion.waiting_for_metadata = false;
+    tab.completion.waiting_for_metadata = tab.completion.items.is_empty();
 }
 
 /// Return tables referenced by the current completion that have no loaded
@@ -2392,14 +2388,9 @@ fn missing_completion_columns(tab: &QueryEditorTab) -> Vec<String> {
         .last()
         .map(|(idx, _)| idx)
         .unwrap_or(cursor);
-    let prefix = &before[word_start..];
-
     let mut needed = Vec::new();
-    if prefix.is_empty() {
-        return needed;
-    }
-
-    // Detect "table." pattern and queue a column load.
+    // Detect "table." (with or without a partial column name) and queue a
+    // column load. This makes completion available immediately after typing '.'.
     let before_word = &before[..word_start];
     if let Some(stripped) = before_word.strip_suffix('.') {
         let id_end = stripped.len();
@@ -2444,11 +2435,14 @@ fn matches_prefix(candidate: &str, prefix: &str) -> bool {
 /// Render the completion popup and return the SQL with the selected item
 /// inserted if the user accepted a suggestion.
 fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab) -> Option<String> {
-    if !tab.completion.visible || tab.completion.items.is_empty() {
+    if !tab.completion.visible {
         return None;
     }
 
     Frame::popup(ui.style()).show(ui, |ui| {
+        if tab.completion.waiting_for_metadata {
+            ui.label("Loading column suggestions...");
+        }
         for (index, item) in tab.completion.items.iter().take(8).enumerate() {
             let selected = index == tab.completion.selected;
             let kind = match item.kind {
@@ -2488,6 +2482,9 @@ fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab) -> Option<String> {
     }
 
     let count = tab.completion.items.len();
+    if count == 0 {
+        return None;
+    }
     if down {
         tab.completion.selected = (tab.completion.selected + 1) % count;
     }

@@ -40,8 +40,13 @@ impl DesktopApp {
     fn workspace_tabs(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             self.workspace_tab(ui, ActivePanel::QueryEditor, "Query");
-            if self.table_editor.is_some() {
-                self.workspace_tab(ui, ActivePanel::TableEditor, "Data");
+            for (id, editor) in &self.table_editors {
+                let selected = self.active_panel == ActivePanel::TableEditor
+                    && self.active_table_editor == Some(*id);
+                if ui.selectable_label(selected, editor.table_name()).clicked() {
+                    self.active_panel = ActivePanel::TableEditor;
+                    self.active_table_editor = Some(*id);
+                }
             }
             if self.table_structure.is_some() || self.pending_structure_load.is_some() {
                 self.workspace_tab(ui, ActivePanel::TableStructure, "Structure");
@@ -121,7 +126,9 @@ impl DesktopApp {
                             }
                         }
                     }
-                    ActivePanel::TableEditor => match &mut self.table_editor {
+                    ActivePanel::TableEditor => match self
+                        .active_table_editor
+                        .and_then(|id| self.table_editors.get_mut(&id)) {
                         Some(editor) => {
                             let message = editor.ui(ui);
                             if let Some(msg) = message {

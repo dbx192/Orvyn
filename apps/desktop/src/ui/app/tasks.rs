@@ -18,7 +18,8 @@ use crate::ui::{
 };
 use db_common::{
     AppError, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest, QueryId,
-    QueryResult,
+    QueryResult, QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
+    QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use import_export::{ExportFormat, QueryResultFileWriter};
 use std::{
@@ -58,10 +59,19 @@ impl DesktopApp {
                                 self.query_service.clone(),
                                 self.metadata_service.clone(),
                                 conn_id,
-                                payload.database,
+                                payload.kind,
+                                payload.database.clone(),
                                 self.runtime.clone(),
                             );
-                            self.table_editor = Some(editor);
+                            let editor_id = eframe::egui::Id::new((
+                                "table-editor",
+                                conn_id.to_string(),
+                                payload.database.as_deref().unwrap_or_default(),
+                                payload.schema.as_deref().unwrap_or_default(),
+                                payload.table.as_str(),
+                            ));
+                            self.table_editors.insert(editor_id, editor);
+                            self.active_table_editor = Some(editor_id);
                             self.state.set_status(format!(
                                 "Loaded table {} ({} rows)",
                                 table_name, row_count
@@ -239,14 +249,18 @@ impl DesktopApp {
                                     }),
                                 &payload.table,
                             );
-                            if self
-                                .table_editor
-                                .as_ref()
-                                .is_some_and(|editor| editor.table_name() == table_name)
-                            {
-                                self.table_editor = None;
+                            self.table_editors
+                                .retain(|_, editor| editor.table_name() != table_name);
+                            if self.table_editors.is_empty() {
                                 self.table_structure = None;
                                 self.active_panel = ActivePanel::QueryEditor;
+                                self.active_table_editor = None;
+                            } else if self
+                                .active_table_editor
+                                .is_some_and(|id| !self.table_editors.contains_key(&id))
+                            {
+                                self.active_table_editor =
+                                    self.table_editors.keys().next().copied();
                             }
                             self.object_tree.reload_root();
                             self.state
@@ -285,9 +299,9 @@ impl DesktopApp {
                                         &table,
                                     );
                                     let is_open = self
-                                        .table_editor
-                                        .as_ref()
-                                        .is_some_and(|editor| editor.table_name() == table_name);
+                                        .table_editors
+                                        .values()
+                                        .any(|editor| editor.table_name() == table_name);
                                     if is_open {
                                         self.spawn_table_data_load(
                                             connection_id,
@@ -394,7 +408,12 @@ impl DesktopApp {
                 let columns = metadata_service
                     .table_columns(connection_id, db.as_deref(), sch.as_deref(), &tbl, None)
                     .await?;
-                let sql = ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
+                let base_sql = ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
+                let sql = if kind == DataSourceKind::DuckDb {
+                    format!("{base_sql} LIMIT 500 OFFSET 0")
+                } else {
+                    base_sql
+                };
                 let report = query_service
                     .execute(
                         QueryExecutionRequest {
@@ -407,14 +426,14 @@ impl DesktopApp {
                             cursor_offset: 0,
                             selection: None,
                             timeout_ms: 30_000,
-                            result_limit: Some(500),
+                            result_limit: (kind != DataSourceKind::DuckDb).then_some(500),
                             result_offset: 0,
                             result_total_rows: None,
                         },
                         None,
                     )
                     .await?;
-                let data = report
+                let mut data = report
                     .results
                     .into_iter()
                     .next()
@@ -427,6 +446,55 @@ impl DesktopApp {
                         notices: Vec::new(),
                         metadata: Default::default(),
                     });
+                // DuckDB's table viewer uses explicit paging instead of the
+                // generic SELECT wrapper. This guarantees consistent metadata
+                // for the UI and avoids planner-dependent wrapper behavior.
+                if kind == DataSourceKind::DuckDb {
+                    let count_report = query_service
+                        .execute(
+                            QueryExecutionRequest {
+                                tab_id: QueryId::new(),
+                                connection_id,
+                                database: db.clone(),
+                                schema: sch.clone(),
+                                sql: format!("SELECT COUNT(*) AS total_rows FROM {qualified}"),
+                                mode: QueryExecutionMode::All,
+                                cursor_offset: 0,
+                                selection: None,
+                                timeout_ms: 30_000,
+                                result_limit: None,
+                                result_offset: 0,
+                                result_total_rows: None,
+                            },
+                            None,
+                        )
+                        .await?;
+                    let total_rows = count_report
+                        .results
+                        .first()
+                        .and_then(|result| result.rows.first())
+                        .and_then(|row| row.values.first())
+                        .and_then(|value| match value {
+                            db_common::CellValue::Int(value) if *value >= 0 => Some(*value as u64),
+                            db_common::CellValue::UInt(value) => Some(*value),
+                            db_common::CellValue::Text(value)
+                            | db_common::CellValue::Decimal(value) => value.parse().ok(),
+                            _ => None,
+                        })
+                        .ok_or_else(|| AppError::internal("DuckDB table row count was invalid"))?;
+                    data.metadata.insert(
+                        QUERY_RESULT_METADATA_PAGE_LIMIT.to_string(),
+                        "500".to_string(),
+                    );
+                    data.metadata.insert(
+                        QUERY_RESULT_METADATA_PAGE_OFFSET.to_string(),
+                        "0".to_string(),
+                    );
+                    data.metadata.insert(
+                        QUERY_RESULT_METADATA_TOTAL_ROWS.to_string(),
+                        total_rows.to_string(),
+                    );
+                }
                 Ok(TableDataPayload {
                     connection_id,
                     kind,

@@ -28,7 +28,8 @@ use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
     redis_service::RedisService, session::SessionManager,
 };
-use eframe::egui::{Context, Key, Modifiers};
+use eframe::egui::{Context, Id, Key, Modifiers};
+use std::collections::HashMap;
 use tokio::runtime::Handle;
 
 pub struct DesktopApp {
@@ -37,7 +38,8 @@ pub struct DesktopApp {
     object_tree: ObjectTree,
     query_editor: QueryEditor,
     state: AppState,
-    table_editor: Option<TableEditor>,
+    table_editors: HashMap<Id, TableEditor>,
+    active_table_editor: Option<Id>,
     table_structure: Option<TableStructureView>,
     import_wizard: Option<ImportWizard>,
     redis_browser: Option<RedisBrowserUi>,
@@ -108,7 +110,8 @@ impl DesktopApp {
                 runtime,
             ),
             state: AppState::default(),
-            table_editor: None,
+            table_editors: HashMap::new(),
+            active_table_editor: None,
             table_structure: None,
             import_wizard: None,
             redis_browser: None,
