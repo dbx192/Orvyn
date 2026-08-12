@@ -1,232 +1,129 @@
 # Orvyn
 
-Orvyn 是一个使用 Rust 编写、统一联通 Redis、MySQL、DuckDB、SQLite、PostgreSQL 的跨平台数据库客户端。
+[English](README.en.md)
 
-当前仓库已经具备可构建、可测试的 workspace，以及可运行的桌面端主流程：
+Orvyn 是一个使用 Rust 构建的跨平台桌面数据库客户端，面向日常查询、数据浏览、轻量维护和 Redis key 管理。项目采用 `egui/eframe` 桌面界面与分层 Rust workspace 架构。
 
-- 项目文档：`PROJECT.md`（包含开发计划、编码规范、架构设计、里程碑）
-- Rust workspace
-- egui/eframe 桌面入口和 UI 模块：`apps/desktop`
-- 通用模型和全局工具：`crates/db-common`
-- 应用服务层：`crates/app-core`
-- 五类数据库适配 crate；
-- 安全存储与导入导出 crate
+## 支持的数据源
 
-## 第一阶段能力
+- MySQL
+- PostgreSQL
+- SQLite
+- DuckDB
+- Redis
 
-已实现连接管理后端基础能力：
+## 当前功能
 
-- 连接配置 CRUD 服务：`app_core::connection::ConnectionManager`
-- 连接配置文件持久化：`app_core::storage::FileConnectionProfileStore`
-- 本地加密凭据存储：`secure_store::EncryptedFileStore`（使用 ChaCha20-Poly1305 加密）
-- 五类数据源连接测试适配器：
-  - `db_mysql::MySqlConnectionTester`
-  - `db_postgres::PostgresConnectionTester`
-  - `db_sqlite::SqliteConnectionTester`
-  - `db_duckdb::DuckDbConnectionTester`
-  - `db_redis::RedisConnectionTester`
-- 密码保存策略：`PasswordUpdate::Keep`、`Clear`、`Replace`
-- 默认不保存密码，只有 `ConnectionSecurity.save_password = true` 时才写入安全存储。
+### 连接与安全
 
-## 第二阶段能力
+- 新建、编辑、测试、分组和删除连接。
+- 导入或导出全部或选中的连接；导入时可选择覆盖冲突项或自动重命名。
+- 可选地在本地加密保存密码，使用 ChaCha20-Poly1305；默认不保存密码。
+- 每个连接可设为只读。只读连接会拒绝写语句和启动事务。
+- 支持 MySQL、PostgreSQL、SQLite、DuckDB 和 Redis 的连接测试。
 
-已实现对象树和元数据后端基础能力：
+### 关系型数据库
 
-- 对象树服务：`app_core::metadata::MetadataService`
-- 统一对象树节点：`MetadataNode`、`MetadataPath`、`MetadataNodeKind`
-- 关系型数据库元数据读取：
-  - 数据库
-  - schema
-  - 表
-  - 视图
-  - 字段（支持列类型、是否可空、默认值、主键、注释）
-  - 索引（支持唯一、主键标识）
-  - 外键（支持 ON UPDATE/ON DELETE）
-  - 触发器
-  - 函数（支持返回类型、语言、类型）
-  - 获取 CREATE TABLE SQL
-- Redis 元数据读取：
-  - DB 编号列表
-  - DB key 数量
-  - 使用 `SCAN` 浏览 key
-  - key 类型和 TTL
-- 对象树采用懒加载接口：`MetadataService::children`
+- 浏览数据库、schema、表、视图及其元数据。
+- 查看列、索引、外键、触发器、函数和建表 SQL（实际可见对象取决于数据库适配器）。
+- 单 SQL 工作区：执行全部语句、当前语句或选中 SQL；可取消执行。
+- 查询历史、收藏查询、结果分页和列排序。
+- 表数据浏览、筛选、排序及新增、编辑、删除行；无主键表默认只读。
+- 表结构查看与编辑，包括列、索引和外键等操作；不同数据库的 DDL 能力存在差异。
+- 导出表或数据库的结构 SQL，或结构及数据 SQL。
 
-当前限制：
+### Redis
 
-- 元数据请求当前仍以短连接/短会话为主，长期会话与更细粒度缓存仍可继续优化。
-- Redis key 浏览默认每次扫描 500 个 key。
+- 浏览逻辑数据库，使用 `SCAN` 分页查找 key。
+- 查看 key 类型、TTL、大小和值。
+- 管理 String、Hash、List、Set、Sorted Set 等数据类型，并可执行 Redis 命令。
 
-## 第三阶段能力
+### 导入导出
 
-已实现 SQL 查询和结果集展示的基础能力：
+- 将查询结果导出为 CSV、JSON 或 Excel 兼容的制表符分隔文本。
+- CSV 文件使用 UTF-8 BOM，方便 Windows 上的 Excel 正确识别中文。
+- 支持 CSV 预览、字段自动映射、类型校验和批量插入 SQL 生成。
 
-- 查询执行服务：`app_core::query::QueryService`
-- MySQL、PostgreSQL、SQLite、DuckDB 查询执行适配器
-- 查询执行模式：全部执行、当前语句、选区执行
-- 查询取消：支持通过 `AbortHandle` 取消正在运行的查询
-- 查询历史：`QueryHistoryStore`，默认保留 500 条记录
-- 收藏查询：`FavoriteQueryStore`，支持 CRUD 操作
-- 连接池管理：`ConnectionPoolConfig`、`ConnectionPoolStats`
-- 分页查询：支持 LIMIT/OFFSET 分页和总行数统计
-- egui 结果集表格：
-  - 分页和虚拟滚动
-  - 列宽调整
-  - 复制单元格、复制行、复制带表头结果
-  - NULL、二进制、日期时间字段格式化展示
-  - 按列排序
-  - CSV、JSON、Excel 兼容格式导出到剪贴板
+## 从源码运行
 
-当前限制：
-
-- SQL 格式化与编辑体验仍是轻量实现，不是完整 SQL IDE。
-
-## 第四阶段能力
-
-已建立桌面前端模块架构：
-
-- `apps/desktop/src/main.rs`：启动、配置目录、服务注入
-- `apps/desktop/src/ui/app.rs`：egui 应用壳和视图切换
-- `apps/desktop/src/ui/result_grid.rs`：查询结果集展示
-- `apps/desktop/src/ui/table_editor.rs`：表数据查看和编辑
-- `apps/desktop/src/ui/format.rs`：单元格展示、复制、比较格式化
-
-已实现表数据查看和编辑：
-
-- 打开表数据视图
-- 分页浏览
-- 新增行
-- 编辑单元格
-- 删除行
-- 提交生成 SQL 预览
-- 回滚未提交变更
-- 根据主键生成 UPDATE/DELETE
-- 无主键表默认只读，可显式开启风险模式
-- 简单过滤和排序
-
-当前限制：
-
-- 表数据加载当前默认走 `SELECT * ... LIMIT 500`。
-- 更完整的事务控制、批量编辑保护和增量刷新仍可继续增强。
-
-## Redis 管理能力
-
-已实现 Redis 数据管理服务：
-
-- Redis 服务：`app_core::redis_service::RedisService`
-- 连接缓存：复用 `MultiplexedConnection` 减少连接开销
-- 支持的数据类型操作：
-  - String：get、set、TTL 更新
-  - Hash：hset、hdel
-  - List：lpush、rpush、lpop、rpop、lset、lrange
-  - Set：sadd、srem
-  - Sorted Set：zadd、zrem、zrange
-- 通用命令执行：`execute_command` 支持任意 Redis 命令
-- key 操作：删除、创建、获取信息、获取大小
-
-## 任务管理
-
-已实现异步任务管理：
-
-- 任务管理器：`app_core::task::TaskManager`
-- 任务类型：`TaskKind::Query`、`MetadataLoad`、`Import`、`Export`
-- 任务状态：Pending、Running、Completed、Failed、Cancelled、TimedOut
-- 任务控制：
-  - `spawn`：启动异步任务
-  - `spawn_blocking`：启动阻塞任务
-  - `spawn_blocking_with_timeout`：带超时的阻塞任务
-  - `cancel`：取消正在运行的任务
-- 任务查询：按连接 ID 过滤、活动任务计数、清理已完成任务
-
-## 导入导出
-
-已实现查询结果导出：
-
-- 导出格式：CSV、JSON、Excel 兼容（Tab 分隔）
-- 导出方式：
-  - `export_query_result`：导出到字符串
-  - `export_query_result_to_file`：导出到文件
-- CSV 导入：`import_csv::parse_csv_preview`、`auto_map_fields`、`validate_types`、`generate_insert_batches`
-
-可选环境变量：
-
-```bash
-ORVYN_CONFIG_DIR=.orvyn
-ORVYN_MASTER_KEY=change-this-master-key
-```
-
-## DuckDB 本地库
-
-当前仓库默认让 `libduckdb-sys` 直接链接本地 DuckDB 运行库，不触发在线下载。
-
-- 项目使用的统一本地库目录：`target/duckdb-download/local/1.5.4`
-- 项目级 Cargo 配置：`.cargo/config.toml`
-
-该目录需要包含当前构建目标对应的 DuckDB 库文件：
-
-- Linux x64：`libduckdb.so`、`duckdb.h`
-- Windows x64 MSVC：`duckdb.lib`、`duckdb.dll`、`duckdb.h`
-
-如果更换 DuckDB 版本、切换目标平台或删除了该目录，需要先把对应平台的 DuckDB 本地库放回去，再运行 `cargo check`/`cargo build`。
-
-## Windows 11 x64 打包
-
-Windows 安装包使用 `x86_64-pc-windows-msvc` 目标、DuckDB 动态库和 Inno Setup 6 生成。
-
-打包前请确认：
-
-- 已安装 Rust MSVC 工具链和 `x86_64-pc-windows-msvc` 目标；
-- 已安装 Inno Setup 6，且 `ISCC.exe` 位于 `D:\Program Files (x86)\Inno Setup 6\ISCC.exe`，或标准的 Program Files 目录；
-- `target/duckdb-download/local/1.5.4` 包含 Windows x64 的 `duckdb.lib`、`duckdb.dll` 和 `duckdb.h`。
-
-在仓库根目录执行以下命令即可手动重新打包：
+前提：安装 Rust `1.78` 或更高版本及当前平台的 C/C++ 构建工具链。
 
 ```powershell
-.\packaging\windows\build-installer.ps1
+cargo run -p orvyn
 ```
 
-该脚本等价于以下手动步骤：
+常用检查命令：
 
 ```powershell
-rustup target add x86_64-pc-windows-msvc
-cargo build -p orvyn --release --locked --target x86_64-pc-windows-msvc
-& 'D:\Program Files (x86)\Inno Setup 6\ISCC.exe' .\packaging\windows\installer.iss
-```
-
-生成产物：
-
-- 可执行文件：`target/x86_64-pc-windows-msvc/release/orvyn.exe`
-- DuckDB 运行库：`target/x86_64-pc-windows-msvc/release/duckdb.dll`
-- 安装包：`dist/windows/orvyn-0.1.0-windows-x86_64-setup.exe`
-
-直接分发可执行文件时，必须同时分发同目录下的 `duckdb.dll`；推荐分发安装包。
-
-## 常用命令
-
-```bash
-cargo fmt --all
+cargo fmt --all -- --check
 cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-当前已验证的本地基线：
+## 配置与凭据
 
-- `cargo check --workspace`
-- `cargo test --workspace`
-- `cargo clippy --workspace --all-targets -- -D warnings`
+默认配置位置：
 
-## 目录
+- Windows：`%APPDATA%\Orvyn`
+- 其他平台：`$XDG_CONFIG_HOME/orvyn`；未设置时使用当前目录下的 `orvyn`
+
+目录内包含连接配置、查询历史、收藏查询及加密密钥。可通过环境变量调整：
+
+```powershell
+$env:ORVYN_CONFIG_DIR = "D:\\path\\to\\orvyn-config"
+$env:ORVYN_MASTER_KEY = "replace-with-a-strong-private-key"
+```
+
+未设置 `ORVYN_MASTER_KEY` 时，应用会在配置目录创建并使用 `master.key`。请妥善保护配置目录和该密钥。
+
+## DuckDB 本地库
+
+项目通过 `libduckdb-sys` 链接本地 DuckDB 库，不在构建时自动下载。默认位置为：
 
 ```text
-apps/desktop           桌面应用入口
-crates/app-core        应用服务层（连接、会话、元数据、查询、Redis、任务）
-crates/db-common       通用模型、错误、trait、工具方法
+target/duckdb-download/local/1.5.4
+```
+
+该目录需要包含目标平台所需文件：
+
+- Linux x64：`libduckdb.so`、`duckdb.h`
+- Windows x64 MSVC：`duckdb.lib`、`duckdb.dll`、`duckdb.h`
+
+更换 DuckDB 版本、目标平台或清理该目录后，请重新放入对应的本地库文件再构建。
+
+## Windows x64 安装包
+
+安装 Rust MSVC 工具链、`x86_64-pc-windows-msvc` target、Windows DuckDB 本地库与 Inno Setup 6 后，在仓库根目录运行：
+
+```powershell
+.\packaging\windows\build-installer.ps1
+```
+
+脚本构建 `orvyn`，然后生成安装包：
+
+```text
+dist/windows/orvyn-0.1.0-windows-x86_64-setup.exe
+```
+
+若直接分发可执行文件，请同时分发同目录下的 `duckdb.dll`；通常建议分发安装包。
+
+## Workspace 结构
+
+```text
+apps/desktop           桌面应用入口和 egui 界面
+crates/app-core        连接、会话、元数据、查询、Redis 和任务服务
+crates/db-common       共享模型、trait、错误和工具
 crates/db-mysql        MySQL 适配器
 crates/db-postgres     PostgreSQL 适配器
 crates/db-sqlite       SQLite 适配器
 crates/db-duckdb       DuckDB 适配器
 crates/db-redis        Redis 适配器
-crates/secure-store    凭据安全存储（ChaCha20-Poly1305 加密）
-crates/import-export   导入导出（CSV/JSON）
+crates/import-export   CSV/JSON 导入导出能力
+crates/secure-store    加密凭据存储
+packaging/windows      Windows 安装包脚本和资源
 ```
+
+## 许可证
+
+本项目采用 [MIT OR Apache-2.0](Cargo.toml) 双许可证。
