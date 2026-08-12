@@ -349,6 +349,10 @@ impl TableEditor {
         }
     }
 
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.has_changes()
+    }
+
     /// Poll the async commit task. Returns a status message if the commit completed this frame.
     fn poll_commit(&mut self) -> Option<String> {
         // Take ownership of the current state to avoid borrowing conflicts.

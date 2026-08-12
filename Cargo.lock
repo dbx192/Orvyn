@@ -3523,6 +3523,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
  "winres",
 ]
 

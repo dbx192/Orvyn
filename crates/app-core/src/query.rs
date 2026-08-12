@@ -7,13 +7,13 @@ use crate::connection::ConnectionManager;
 use crate::storage::{FavoriteQueryStore, QueryHistoryStore};
 use crate::task::TaskManager;
 use db_common::{
-    count_result_page_statement, highlight_sql, page_result_statement, split_statements,
-    statement_at_offset, statement_summary, unsupported_kind, AppError, CellValue, ConnectionId,
-    ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind, FavoriteQuery, PageSize,
-    QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
-    QueryResult, QueryTab, RelationalQueryExecutor, Result, SqlHighlightToken, TextRange,
-    QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
-    QUERY_RESULT_METADATA_TOTAL_ROWS,
+    count_result_page_statement, highlight_sql, is_result_set_statement, page_result_statement,
+    split_statements, statement_at_offset, statement_summary, unsupported_kind, AppError,
+    CellValue, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind,
+    FavoriteQuery, PageSize, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
+    QueryHistoryEntry, QueryId, QueryResult, QueryTab, RelationalQueryExecutor, Result,
+    SqlHighlightToken, TextRange, QUERY_RESULT_METADATA_PAGE_LIMIT,
+    QUERY_RESULT_METADATA_PAGE_OFFSET, QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -297,6 +297,16 @@ impl QueryService {
             .connections
             .profile_with_password(request.connection_id, runtime_password)
             .await?;
+        if profile.security.read_only
+            && statements
+                .iter()
+                .any(|statement| !is_result_set_statement(statement))
+        {
+            return Err(AppError::new(
+                ErrorKind::Validation,
+                "this connection is read-only and cannot execute write statements",
+            ));
+        }
         if let Some(database) = request
             .database
             .as_deref()
@@ -470,6 +480,12 @@ impl QueryService {
             .connections
             .profile_with_password(connection_id, runtime_password)
             .await?;
+        if profile.security.read_only {
+            return Err(AppError::new(
+                ErrorKind::Validation,
+                "this connection is read-only and cannot start a transaction",
+            ));
+        }
         if let Some(database) = database.as_deref().filter(|value| !value.trim().is_empty()) {
             profile.database = Some(database.to_string());
         }

@@ -40,12 +40,40 @@ impl DesktopApp {
     fn workspace_tabs(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             self.workspace_tab(ui, ActivePanel::QueryEditor, "Query");
-            for (id, editor) in &self.table_editors {
+            let tabs = self
+                .table_editors
+                .iter()
+                .map(|(id, editor)| (*id, editor.table_name(), editor.has_unsaved_changes()))
+                .collect::<Vec<_>>();
+            let mut close = None;
+            for (id, title, dirty) in tabs {
                 let selected = self.active_panel == ActivePanel::TableEditor
-                    && self.active_table_editor == Some(*id);
-                if ui.selectable_label(selected, editor.table_name()).clicked() {
+                    && self.active_table_editor == Some(id);
+                if ui.selectable_label(selected, title).clicked() {
                     self.active_panel = ActivePanel::TableEditor;
-                    self.active_table_editor = Some(*id);
+                    self.active_table_editor = Some(id);
+                }
+                if ui
+                    .add_enabled(!dirty, Button::new("x"))
+                    .on_hover_text(if dirty {
+                        "Save or rollback changes before closing"
+                    } else {
+                        "Close table"
+                    })
+                    .clicked()
+                {
+                    close = Some(id);
+                }
+            }
+            if let Some(id) = close {
+                self.table_editors.remove(&id);
+                if self.active_table_editor == Some(id) {
+                    self.active_table_editor = self.table_editors.keys().next().copied();
+                    self.active_panel = if self.active_table_editor.is_some() {
+                        ActivePanel::TableEditor
+                    } else {
+                        ActivePanel::QueryEditor
+                    };
                 }
             }
             if self.table_structure.is_some() || self.pending_structure_load.is_some() {

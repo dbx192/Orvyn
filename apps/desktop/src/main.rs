@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod config;
 mod ui;
 
 use app_core::{
@@ -23,7 +24,7 @@ fn main() -> eframe::Result<()> {
     let runtime = Arc::new(
         Runtime::new().expect("failed to create background async runtime for desktop app"),
     );
-    let config_dir = default_config_dir();
+    let config_dir = config::data_dir();
     let connection_manager = bootstrap_connection_manager(config_dir.clone());
     let session_manager = SessionManager::with_default_testers(connection_manager.clone());
     let metadata_service = MetadataService::with_default_readers(connection_manager.clone());
@@ -74,17 +75,11 @@ fn main() -> eframe::Result<()> {
 fn bootstrap_connection_manager(config_dir: PathBuf) -> ConnectionManager {
     let profiles_path = config_dir.join("connections.json");
     let secrets_path = config_dir.join("secrets.json");
-    let master_key = std::env::var("ORVYN_MASTER_KEY")
-        .unwrap_or_else(|_| "development-master-key-change-me".to_string());
+    let master_key =
+        config::master_key(&config_dir).expect("failed to initialize Orvyn master key");
 
     ConnectionManager::with_default_testers(
         Arc::new(FileConnectionProfileStore::new(profiles_path)),
         Arc::new(EncryptedFileStore::new(secrets_path, master_key)),
     )
-}
-
-fn default_config_dir() -> PathBuf {
-    std::env::var_os("ORVYN_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".orvyn"))
 }

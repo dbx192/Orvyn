@@ -9,9 +9,7 @@ $IsccCandidates = @(
   (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
 )
 $Iscc = $IsccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not (Test-Path $Target) -or -not (Test-Path $DuckDb)) {
-  cargo build -p orvyn --release --locked --target x86_64-pc-windows-msvc
-}
+cargo build -p orvyn --release --locked --target x86_64-pc-windows-msvc
 if (-not $Iscc) {
   throw 'Inno Setup 6 is required. Install it from https://jrsoftware.org/isinfo.php and rerun this script.'
 }

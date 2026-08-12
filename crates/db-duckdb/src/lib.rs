@@ -8,6 +8,7 @@ use db_common::{
     QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
     TableForeignKey, TableIndex,
 };
+use duckdb::{AccessMode, Config};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Deref,
@@ -98,13 +99,13 @@ impl Deref for SharedDuckDbConnection {
     }
 }
 
-static DUCKDB_DATABASES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<SharedDuckDbDatabase>>>> =
+static DUCKDB_DATABASES: OnceLock<Mutex<BTreeMap<(PathBuf, bool), Weak<SharedDuckDbDatabase>>>> =
     OnceLock::new();
 
 impl BlockingDuckDbPool {
     fn new(profile: &ConnectionProfile, config: ConnectionPoolConfig) -> Result<Self> {
         let path = PathBuf::from(profile.required_file_path()?);
-        let database = shared_duckdb_database(&path)?;
+        let database = shared_duckdb_database(&path, profile.security.read_only)?;
         Ok(Self {
             connection_id: profile.id,
             config,
@@ -868,7 +869,7 @@ fn duckdb_create_table_sql(path: PathBuf, schema: &str, table: &str) -> Result<S
     Ok(ddl)
 }
 
-fn shared_duckdb_database(path: &Path) -> Result<Arc<SharedDuckDbDatabase>> {
+fn shared_duckdb_database(path: &Path, read_only: bool) -> Result<Arc<SharedDuckDbDatabase>> {
     if !path.exists() {
         return Err(AppError::new(
             ErrorKind::Validation,
@@ -876,13 +877,14 @@ fn shared_duckdb_database(path: &Path) -> Result<Arc<SharedDuckDbDatabase>> {
         ));
     }
 
-    let key = path.canonicalize().map_err(|error| {
+    let path = path.canonicalize().map_err(|error| {
         AppError::new(
             ErrorKind::Connection,
             "failed to resolve DuckDB database path",
         )
         .with_detail(error.to_string())
     })?;
+    let key = (path.clone(), read_only);
     let registry = DUCKDB_DATABASES.get_or_init(|| Mutex::new(BTreeMap::new()));
     let mut databases = registry
         .lock()
@@ -891,9 +893,23 @@ fn shared_duckdb_database(path: &Path) -> Result<Arc<SharedDuckDbDatabase>> {
         return Ok(database);
     }
 
-    let source = duckdb::Connection::open(path).map_err(|error| {
-        AppError::new(ErrorKind::Connection, "failed to open DuckDB database")
-            .with_detail(error.to_string())
+    let config = Config::default()
+        .access_mode(if read_only {
+            AccessMode::ReadOnly
+        } else {
+            AccessMode::ReadWrite
+        })
+        .map_err(|error| {
+            AppError::new(ErrorKind::Connection, "invalid DuckDB access mode")
+                .with_detail(error.to_string())
+        })?;
+    let source = duckdb::Connection::open_with_flags(&path, config).map_err(|error| {
+        let message = if error.to_string().to_ascii_lowercase().contains("lock") {
+            "DuckDB 文件正被其他程序以读写模式占用。请关闭占用程序，或在连接配置中勾选只读后重试"
+        } else {
+            "failed to open DuckDB database"
+        };
+        AppError::new(ErrorKind::Connection, message).with_detail(error.to_string())
     })?;
     let database = Arc::new(SharedDuckDbDatabase {
         source: Mutex::new(source),
@@ -903,7 +919,9 @@ fn shared_duckdb_database(path: &Path) -> Result<Arc<SharedDuckDbDatabase>> {
 }
 
 fn duckdb_connection(path: PathBuf) -> Result<SharedDuckDbConnection> {
-    let database = shared_duckdb_database(&path)?;
+    // Metadata operations must reuse the process-wide read-write handle. DuckDB
+    // cannot open an independent read-only handle while that writer is active.
+    let database = shared_duckdb_database(&path, false)?;
     let connection = database.connect()?;
     Ok(SharedDuckDbConnection {
         connection,
