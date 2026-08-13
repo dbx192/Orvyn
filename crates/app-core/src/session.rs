@@ -37,6 +37,8 @@ impl SessionManager {
             connections,
             vec![
                 Arc::new(db_mysql::MySqlConnectionTester),
+                Arc::new(db_mysql::OceanBaseConnectionTester),
+                Arc::new(db_mysql::DorisConnectionTester),
                 Arc::new(db_mysql::TiDbConnectionTester),
                 Arc::new(db_postgres::PostgresConnectionTester),
                 Arc::new(db_postgres::TimescaleDbConnectionTester),

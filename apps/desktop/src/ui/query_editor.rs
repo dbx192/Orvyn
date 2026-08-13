@@ -917,8 +917,8 @@ impl QueryEditor {
 
     fn history_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.side_tab, QuerySideTab::History, "History");
-            ui.selectable_value(&mut self.side_tab, QuerySideTab::Favorites, "Favorites");
+            ui.selectable_value(&mut self.side_tab, QuerySideTab::History, tr("History"));
+            ui.selectable_value(&mut self.side_tab, QuerySideTab::Favorites, tr("Favorites"));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.small_button("x").clicked() {
                     self.side_panel_open = false;

@@ -4,6 +4,7 @@ use super::{
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
+    i18n::text as tr,
     import_wizard::ImportWizard,
     object_tree::DatabaseExportMode,
     state::{TaskState, TaskStatus},
@@ -146,15 +147,15 @@ impl DesktopApp {
         let mut submit_export = None;
         let mut cancel_export = false;
 
-        Window::new("Export Table Data")
+        Window::new(tr("Export Table Data"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!("Table: {}", table_name));
+                ui.label(format!("{}: {}", tr("Table"), table_name));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.label("Format");
+                    ui.label(tr("Format"));
                     eframe::egui::ComboBox::from_id_source("table_export_format")
                         .selected_text(match request.format {
                             ExportFormat::Csv => "CSV",
@@ -168,16 +169,18 @@ impl DesktopApp {
                 });
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("Export runs in the background and writes directly to file.")
-                        .small()
-                        .color(Color32::GRAY),
+                    RichText::new(tr(
+                        "Export runs in the background and writes directly to file.",
+                    ))
+                    .small()
+                    .color(Color32::GRAY),
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel_export = true;
                     }
-                    if ui.button("Export").clicked() {
+                    if ui.button(tr("Export")).clicked() {
                         let format = request.format;
                         let ext = match format {
                             ExportFormat::Csv => "csv",
@@ -241,26 +244,28 @@ impl DesktopApp {
         let mut confirm = false;
         let mut cancel = false;
 
-        Window::new("Drop Table")
+        Window::new(tr("Drop Table"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(RichText::new("Drop this table?").strong());
+                ui.label(RichText::new(tr("Drop this table?")).strong());
                 ui.add_space(8.0);
                 ui.label(RichText::new(&table_name).monospace());
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("This will execute DROP TABLE and cannot be undone here.")
-                        .small()
-                        .color(ui.visuals().warn_fg_color),
+                    RichText::new(tr(
+                        "This will execute DROP TABLE and cannot be undone here.",
+                    ))
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button("Drop Table").clicked() {
+                    if ui.button(tr("Drop Table")).clicked() {
                         confirm = true;
                     }
                 });
@@ -289,7 +294,7 @@ impl DesktopApp {
                 table,
                 ..
             } => (
-                "Clear Table",
+                tr("Clear Table"),
                 qualified_table_label(
                     schema
                         .as_deref()
@@ -297,14 +302,14 @@ impl DesktopApp {
                         .or_else(|| database.as_deref().filter(|value| !value.is_empty())),
                     table,
                 ),
-                "All rows will be removed while the table structure is kept. This cannot be undone here.",
-                "Clear Table",
+                tr("All rows will be removed while the table structure is kept. This cannot be undone here."),
+                tr("Clear Table"),
             ),
             ClearRequest::RedisDatabase { database, .. } => (
-                "Clear Redis Database",
+                tr("Clear Redis Database"),
                 format!("Redis DB {database}"),
-                "FLUSHDB will permanently remove every key in this Redis database only.",
-                "Clear Database",
+                tr("FLUSHDB will permanently remove every key in this Redis database only."),
+                tr("Clear Database"),
             ),
         };
         let mut open = true;
@@ -316,7 +321,7 @@ impl DesktopApp {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(RichText::new("Clear this target?").strong());
+                ui.label(RichText::new(tr("Clear this target?")).strong());
                 ui.add_space(8.0);
                 ui.label(RichText::new(target).monospace());
                 ui.add_space(8.0);
@@ -327,7 +332,7 @@ impl DesktopApp {
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
                     if ui.button(confirm_label).clicked() {

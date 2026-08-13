@@ -715,7 +715,9 @@ impl QueryService {
 
     fn executor(&self, kind: DataSourceKind) -> Result<Arc<dyn RelationalQueryExecutor>> {
         let adapter_kind = match kind {
-            DataSourceKind::TiDb => DataSourceKind::MySql,
+            DataSourceKind::TiDb | DataSourceKind::OceanBase | DataSourceKind::Doris => {
+                DataSourceKind::MySql
+            }
             DataSourceKind::TimescaleDb => DataSourceKind::PostgreSql,
             other => other,
         };

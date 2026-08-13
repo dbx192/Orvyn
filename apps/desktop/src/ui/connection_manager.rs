@@ -412,6 +412,8 @@ impl ConnectionManagerUi {
                         for kind in [
                             DataSourceKind::Redis,
                             DataSourceKind::MySql,
+                            DataSourceKind::OceanBase,
+                            DataSourceKind::Doris,
                             DataSourceKind::TiDb,
                             DataSourceKind::PostgreSql,
                             DataSourceKind::TimescaleDb,
@@ -579,7 +581,7 @@ impl ConnectionManagerUi {
         if let Some(id) = self.confirm_delete {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.colored_label(ui.visuals().warn_fg_color, "Confirm delete connection?");
+                ui.colored_label(ui.visuals().warn_fg_color, tr("Confirm delete connection?"));
                 if ui.button(tr("Delete")).clicked() {
                     self.delete_connection(id);
                     self.confirm_delete = None;

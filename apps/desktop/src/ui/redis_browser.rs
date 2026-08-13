@@ -18,6 +18,7 @@
 //! - Refresh functionality
 //! - Full editing support for all Redis data types
 
+use crate::ui::i18n::text as tr;
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, redis_service::RedisService,
 };
@@ -597,13 +598,13 @@ impl RedisBrowserUi {
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
-                        .add_enabled(!self.is_loading, Button::new("+ Key"))
+                        .add_enabled(!self.is_loading, Button::new(format!("+ {}", tr("Key"))))
                         .clicked()
                     {
                         self.new_key_dialog = true;
                     }
                     if ui
-                        .add_enabled(!self.is_loading, Button::new("Refresh"))
+                        .add_enabled(!self.is_loading, Button::new(tr("Refresh")))
                         .clicked()
                     {
                         self.refresh();
@@ -621,7 +622,11 @@ impl RedisBrowserUi {
     fn redis_nav_tabs(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
         style.toolbar_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.active_tab, RedisBrowserTab::Browser, "Key Detail");
+                ui.selectable_value(
+                    &mut self.active_tab,
+                    RedisBrowserTab::Browser,
+                    tr("Key Detail"),
+                );
                 ui.selectable_value(&mut self.active_tab, RedisBrowserTab::Cli, "CLI");
             });
         });
@@ -1687,22 +1692,22 @@ impl RedisBrowserUi {
         };
 
         let mut open = true;
-        Window::new("Confirm Delete")
+        Window::new(tr("Confirm Delete"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!(
-                    "Are you sure you want to delete key \"{}\"?",
-                    key_name
-                ));
-                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.label(
+                    tr("Are you sure you want to delete key \"{key}\"?")
+                        .replace("{key}", &key_name),
+                );
+                ui.label(RichText::new(tr("This action cannot be undone.")).color(Color32::RED));
                 ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
+                    if ui.button(tr("Delete")).clicked() {
                         self.delete_key(key_name.clone());
                         self.confirm_delete = None;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.confirm_delete = None;
                     }
                 });
@@ -2760,16 +2765,16 @@ impl RedisBrowserUi {
         }
 
         let mut open = true;
-        Window::new("Create New Key")
+        Window::new(tr("Create New Key"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label("Key Name:");
+                ui.label(tr("Key Name:"));
                 ui.add(TextEdit::singleline(&mut self.new_key_name).desired_width(300.0));
 
-                ui.label("Type:");
+                ui.label(tr("Type:"));
                 ComboBox::from_id_source("new_key_type")
                     .selected_text(&self.new_key_type)
                     .show_ui(ui, |ui| {
@@ -2784,17 +2789,17 @@ impl RedisBrowserUi {
                         );
                     });
 
-                ui.label("Initial Value:");
+                ui.label(tr("Initial Value:"));
                 ui.add(TextEdit::singleline(&mut self.new_key_value).desired_width(300.0));
 
-                ui.label("TTL (seconds, empty = no expiry):");
+                ui.label(tr("TTL (seconds, empty = no expiry):"));
                 ui.add(TextEdit::singleline(&mut self.new_key_ttl).desired_width(300.0));
 
                 ui.horizontal(|ui| {
-                    if ui.button("Create").clicked() {
+                    if ui.button(tr("Create")).clicked() {
                         self.create_key();
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.new_key_dialog = false;
                         self.new_key_name.clear();
                         self.new_key_value.clear();
@@ -2816,22 +2821,23 @@ impl RedisBrowserUi {
         let key_name = self.selected_key.clone().unwrap_or_default();
 
         let mut open = true;
-        Window::new("Confirm Delete Hash Field")
+        Window::new(tr("Confirm Delete Hash Field"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!(
-                    "Delete field \"{}\" from hash \"{}\"?",
-                    field, key_name
-                ));
-                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.label(
+                    tr("Delete field \"{field}\" from hash \"{key}\"?")
+                        .replace("{field}", field)
+                        .replace("{key}", &key_name),
+                );
+                ui.label(RichText::new(tr("This action cannot be undone.")).color(Color32::RED));
                 ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
+                    if ui.button(tr("Delete")).clicked() {
                         self.delete_hash_field();
                         self.confirm_delete_hash_field = None;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.confirm_delete_hash_field = None;
                     }
                 });
@@ -2848,22 +2854,25 @@ impl RedisBrowserUi {
         };
 
         let mut open = true;
-        Window::new("Confirm Delete List Element")
+        Window::new(tr("Confirm Delete List Element"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!("Remove list element at index [{}]?", idx));
-                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.label(
+                    tr("Remove list element at index [{index}]?")
+                        .replace("{index}", &idx.to_string()),
+                );
+                ui.label(RichText::new(tr("This action cannot be undone.")).color(Color32::RED));
                 ui.horizontal(|ui| {
-                    if ui.button("Remove").clicked() {
+                    if ui.button(tr("Remove")).clicked() {
                         // Use LSET to empty or handle via refresh - for simplicity, just refresh
                         self.confirm_delete_list_index = None;
                         if let Some(ref key) = self.selected_key {
                             self.refresh_key(key.clone());
                         }
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.confirm_delete_list_index = None;
                     }
                 });
@@ -2880,18 +2889,18 @@ impl RedisBrowserUi {
         };
 
         let mut open = true;
-        Window::new("Confirm Delete Set Member")
+        Window::new(tr("Confirm Delete Set Member"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!("Remove member \"{}\" from set?", member));
-                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.label(tr("Remove member \"{member}\" from set?").replace("{member}", member));
+                ui.label(RichText::new(tr("This action cannot be undone.")).color(Color32::RED));
                 ui.horizontal(|ui| {
-                    if ui.button("Remove").clicked() {
+                    if ui.button(tr("Remove")).clicked() {
                         self.srem_member();
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.confirm_delete_set_member = None;
                     }
                 });
@@ -2908,18 +2917,20 @@ impl RedisBrowserUi {
         };
 
         let mut open = true;
-        Window::new("Confirm Delete ZSet Member")
+        Window::new(tr("Confirm Delete ZSet Member"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(format!("Remove member \"{}\" from sorted set?", member));
-                ui.label(RichText::new("This action cannot be undone.").color(Color32::RED));
+                ui.label(
+                    tr("Remove member \"{member}\" from sorted set?").replace("{member}", member),
+                );
+                ui.label(RichText::new(tr("This action cannot be undone.")).color(Color32::RED));
                 ui.horizontal(|ui| {
-                    if ui.button("Remove").clicked() {
+                    if ui.button(tr("Remove")).clicked() {
                         self.zrem_member();
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.confirm_delete_zset_member = None;
                     }
                 });

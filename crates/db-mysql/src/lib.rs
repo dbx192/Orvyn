@@ -28,6 +28,50 @@ pub struct MySqlConnectionTester;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TiDbConnectionTester;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DorisConnectionTester;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OceanBaseConnectionTester;
+
+#[async_trait]
+impl ConnectionTester for OceanBaseConnectionTester {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::OceanBase
+    }
+
+    async fn test_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<ConnectionTestReport> {
+        let mut report = MySqlConnectionTester
+            .test_connection(profile, password)
+            .await?;
+        report.kind = DataSourceKind::OceanBase;
+        Ok(report)
+    }
+}
+
+#[async_trait]
+impl ConnectionTester for DorisConnectionTester {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::Doris
+    }
+
+    async fn test_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<ConnectionTestReport> {
+        let mut report = MySqlConnectionTester
+            .test_connection(profile, password)
+            .await?;
+        report.kind = DataSourceKind::Doris;
+        Ok(report)
+    }
+}
+
 #[async_trait]
 impl ConnectionTester for TiDbConnectionTester {
     fn kind(&self) -> DataSourceKind {
@@ -234,27 +278,56 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
-        let rows = sqlx::query(
+        let rows = if profile.kind == DataSourceKind::Doris {
+            let sql = format!("SHOW COLUMNS FROM `{}`.`{}`", database, table);
+            sqlx::query(&sql)
+                .fetch_all(&pool)
+                .await
+                .map_err(mysql_query_error)?
+        } else {
+            sqlx::query(
             "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, COLUMN_COMMENT \
              FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
              ORDER BY ORDINAL_POSITION",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&pool)
-        .await
-        .map_err(mysql_query_error)?;
+            )
+            .bind(database)
+            .bind(table)
+            .fetch_all(&pool)
+            .await
+            .map_err(mysql_query_error)?
+        };
 
         let mut columns = Vec::new();
         for row in rows {
-            let comment = mysql_optional_string(&row, "COLUMN_COMMENT")?;
+            let (name, database_type, nullable, default_value, primary_key, comment) =
+                if profile.kind == DataSourceKind::Doris {
+                    let key = mysql_string_at(&row, 3)?;
+                    (
+                        mysql_string_at(&row, 0)?,
+                        mysql_string_at(&row, 1)?,
+                        mysql_string_at(&row, 2)?.eq_ignore_ascii_case("YES"),
+                        mysql_optional_string_at(&row, 5)?,
+                        key.eq_ignore_ascii_case("PRI"),
+                        None,
+                    )
+                } else {
+                    let comment = mysql_optional_string(&row, "COLUMN_COMMENT")?;
+                    (
+                        mysql_string(&row, "COLUMN_NAME")?,
+                        mysql_string(&row, "COLUMN_TYPE")?,
+                        mysql_string(&row, "IS_NULLABLE")?.eq_ignore_ascii_case("YES"),
+                        mysql_optional_string(&row, "COLUMN_DEFAULT")?,
+                        mysql_string(&row, "COLUMN_KEY")? == "PRI",
+                        comment.filter(|value| !value.is_empty()),
+                    )
+                };
             columns.push(TableColumn {
-                name: mysql_string(&row, "COLUMN_NAME")?,
-                database_type: mysql_string(&row, "COLUMN_TYPE")?,
-                nullable: mysql_string(&row, "IS_NULLABLE")?.eq_ignore_ascii_case("YES"),
-                default_value: mysql_optional_string(&row, "COLUMN_DEFAULT")?,
-                primary_key: mysql_string(&row, "COLUMN_KEY")? == "PRI",
+                name,
+                database_type,
+                nullable,
+                default_value,
+                primary_key,
                 comment: comment.filter(|value| !value.is_empty()),
             });
         }

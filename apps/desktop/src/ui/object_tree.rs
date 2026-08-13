@@ -723,7 +723,7 @@ impl ObjectTree {
                 }
             }
             ConnectionStatus::Failed => {
-                if ui.button("Retry Connect").clicked() {
+                if ui.button(tr("Retry Connect")).clicked() {
                     self.connect(connection_id);
                     *message = Some("Retrying connection".to_string());
                     ui.close_menu();
@@ -808,7 +808,7 @@ impl ObjectTree {
                 ui.separator();
             }
             MetadataNodeKind::Table => {
-                if ui.button("Open Table Data").clicked() {
+                if ui.button(tr("Open Table Data")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::OpenTableData {
@@ -821,7 +821,7 @@ impl ObjectTree {
                     );
                     ui.close_menu();
                 }
-                if ui.button("View Structure").clicked() {
+                if ui.button(tr("View Structure")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::ViewStructure {
@@ -834,7 +834,7 @@ impl ObjectTree {
                     );
                     ui.close_menu();
                 }
-                if ui.button("Export Data").clicked() {
+                if ui.button(tr("Export Data")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::ExportTableData {
@@ -847,7 +847,7 @@ impl ObjectTree {
                     );
                     ui.close_menu();
                 }
-                if ui.button("New Query on Table").clicked() {
+                if ui.button(tr("New Query on Table")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::OpenQuery {
@@ -860,7 +860,7 @@ impl ObjectTree {
                     );
                     ui.close_menu();
                 }
-                if ui.button("Import CSV...").clicked() {
+                if ui.button(tr("Import CSV...")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::ImportCsv {
@@ -874,7 +874,7 @@ impl ObjectTree {
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("Clear Table...").clicked() {
+                if ui.button(tr("Clear Table...")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::ClearTable {
@@ -887,7 +887,7 @@ impl ObjectTree {
                     );
                     ui.close_menu();
                 }
-                if ui.button("Drop Table...").clicked() {
+                if ui.button(tr("Drop Table...")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::DropTable {
@@ -902,7 +902,7 @@ impl ObjectTree {
                 }
             }
             MetadataNodeKind::View => {
-                if ui.button("Open View Data").clicked() {
+                if ui.button(tr("Open View Data")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::OpenTableData {
@@ -915,7 +915,7 @@ impl ObjectTree {
                     );
                     ui.close_menu();
                 }
-                if ui.button("View Structure").clicked() {
+                if ui.button(tr("View Structure")).clicked() {
                     self.emit_table_action(
                         node,
                         |conn_id, db, schema, table| ObjectTreeAction::ViewStructure {
@@ -931,7 +931,7 @@ impl ObjectTree {
                 ui.separator();
             }
             MetadataNodeKind::Query => {
-                if ui.button("Open Query").clicked() {
+                if ui.button(tr("Open Query")).clicked() {
                     self.emit_saved_query_action(node, actions);
                     *message = Some(format!("Opening query {}", node.label));
                     ui.close_menu();
@@ -942,10 +942,10 @@ impl ObjectTree {
                 let key = NodeKey::from(&node.path);
                 let current = self.redis_pattern.get(&key).cloned().unwrap_or_default();
                 let mut input = current.clone();
-                ui.label("Pattern (glob):");
+                ui.label(tr("Pattern (glob):"));
                 let resp = ui.add(
                     TextEdit::singleline(&mut input)
-                        .hint_text("user:*")
+                        .hint_text(tr("user:*"))
                         .desired_width(180.0),
                 );
                 if resp.lost_focus() && input != current {

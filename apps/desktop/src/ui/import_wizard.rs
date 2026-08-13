@@ -219,22 +219,22 @@ impl ImportWizard {
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.csv_options.has_header, "First row is header");
+            ui.checkbox(&mut self.csv_options.has_header, tr("First row is header"));
             ui.add_space(16.0);
             ui.label(tr("Delimiter:"));
             ComboBox::from_id_source("csv_delimiter")
                 .selected_text(match self.csv_options.delimiter {
-                    b',' => "Comma (,)",
-                    b'\t' => "Tab",
-                    b';' => "Semicolon (;)",
-                    b'|' => "Pipe (|)",
-                    _other => "Custom",
+                    b',' => tr("Comma (,)"),
+                    b'\t' => tr("Tab"),
+                    b';' => tr("Semicolon (;)"),
+                    b'|' => tr("Pipe (|)"),
+                    _other => tr("Custom"),
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.csv_options.delimiter, b',', "Comma (,)");
-                    ui.selectable_value(&mut self.csv_options.delimiter, b'\t', "Tab");
-                    ui.selectable_value(&mut self.csv_options.delimiter, b';', "Semicolon (;)");
-                    ui.selectable_value(&mut self.csv_options.delimiter, b'|', "Pipe (|)");
+                    ui.selectable_value(&mut self.csv_options.delimiter, b',', tr("Comma (,)"));
+                    ui.selectable_value(&mut self.csv_options.delimiter, b'\t', tr("Tab"));
+                    ui.selectable_value(&mut self.csv_options.delimiter, b';', tr("Semicolon (;)"));
+                    ui.selectable_value(&mut self.csv_options.delimiter, b'|', tr("Pipe (|)"));
                 });
         });
 
@@ -251,7 +251,7 @@ impl ImportWizard {
 
         if self.loading {
             ui.add_space(8.0);
-            ui.label(RichText::new("Loading CSV...").color(Color32::YELLOW));
+            ui.label(RichText::new(tr("Loading CSV...")).color(Color32::YELLOW));
         }
     }
 
@@ -293,7 +293,7 @@ impl ImportWizard {
             ));
 
             ui.add_space(8.0);
-            ui.label(RichText::new("First 10 rows:").strong());
+            ui.label(RichText::new(tr("First 10 rows:")).strong());
 
             // Table header
             Frame::group(ui.style()).show(ui, |ui| {
@@ -526,10 +526,10 @@ impl ImportWizard {
                 ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
                     use eframe::egui::Grid;
                     Grid::new("validation_issues").striped(true).show(ui, |ui| {
-                        ui.label(RichText::new("Row").strong());
-                        ui.label(RichText::new("Column").strong());
-                        ui.label(RichText::new("Value").strong());
-                        ui.label(RichText::new("Issue").strong());
+                        ui.label(RichText::new(tr("Row")).strong());
+                        ui.label(RichText::new(tr("Column")).strong());
+                        ui.label(RichText::new(tr("Value")).strong());
+                        ui.label(RichText::new(tr("Issue")).strong());
                         ui.end_row();
                         for issue in &report.issues {
                             ui.label(issue.row.to_string());
@@ -554,7 +554,7 @@ impl ImportWizard {
                 );
             });
         } else {
-            ui.label(RichText::new("Running validation...").color(Color32::YELLOW));
+            ui.label(RichText::new(tr("Running validation...")).color(Color32::YELLOW));
         }
 
         ui.add_space(12.0);

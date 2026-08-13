@@ -1,5 +1,7 @@
 use crate::ui::state::AppTheme;
-use eframe::egui::{vec2, Color32, Context, Margin, Rounding, Stroke, Visuals};
+use eframe::egui::{
+    vec2, Color32, Context, FontFamily, FontId, Margin, Rounding, Stroke, TextStyle, Visuals,
+};
 
 pub(super) fn apply_app_style(ctx: &Context, theme: AppTheme) {
     let mut visuals = match theme {
@@ -40,6 +42,20 @@ pub(super) fn apply_app_style(ctx: &Context, theme: AppTheme) {
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
+    for text_style in [
+        TextStyle::Small,
+        TextStyle::Body,
+        TextStyle::Button,
+        TextStyle::Heading,
+    ] {
+        if let Some(font_id) = style.text_styles.get_mut(&text_style) {
+            font_id.family = FontFamily::Name("orvyn-inter".into());
+        }
+    }
+    style.text_styles.insert(
+        TextStyle::Monospace,
+        FontId::new(14.0, FontFamily::Name("orvyn-mono".into())),
+    );
     style.spacing.item_spacing = vec2(8.0, 6.0);
     style.spacing.button_padding = vec2(8.0, 3.0);
     style.spacing.interact_size = vec2(44.0, 24.0);

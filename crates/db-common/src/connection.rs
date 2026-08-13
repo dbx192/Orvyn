@@ -5,6 +5,8 @@ use std::{collections::BTreeMap, fmt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DataSourceKind {
     MySql,
+    OceanBase,
+    Doris,
     TiDb,
     PostgreSql,
     TimescaleDb,
@@ -20,6 +22,8 @@ impl DataSourceKind {
     pub const fn default_port(self) -> Option<u16> {
         match self {
             Self::MySql => Some(3306),
+            Self::OceanBase => Some(2881),
+            Self::Doris => Some(9030),
             Self::TiDb => Some(4000),
             Self::PostgreSql => Some(5432),
             Self::TimescaleDb => Some(5432),
@@ -42,6 +46,8 @@ impl DataSourceKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MySql => "mysql",
+            Self::OceanBase => "oceanbase",
+            Self::Doris => "doris",
             Self::TiDb => "tidb",
             Self::PostgreSql => "postgresql",
             Self::TimescaleDb => "timescaledb",
@@ -135,6 +141,8 @@ impl ConnectionProfile {
         if matches!(
             self.kind,
             DataSourceKind::MySql
+                | DataSourceKind::OceanBase
+                | DataSourceKind::Doris
                 | DataSourceKind::TiDb
                 | DataSourceKind::PostgreSql
                 | DataSourceKind::TimescaleDb

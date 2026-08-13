@@ -186,9 +186,9 @@ pub fn build_alter_table_sql(
             )?;
             // MySQL uses MODIFY COLUMN, PostgreSQL/SQLite/DuckDB use ALTER COLUMN ... TYPE
             match kind {
-                DataSourceKind::MySql => Ok(format!(
-                    "ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"
-                )),
+                DataSourceKind::MySql | DataSourceKind::OceanBase | DataSourceKind::Doris => Ok(
+                    format!("ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"),
+                ),
                 DataSourceKind::PostgreSql => {
                     let mut statements = vec![format!(
                         "ALTER TABLE {table_sql} ALTER COLUMN {column_sql} TYPE {new_type}"
@@ -232,7 +232,7 @@ pub fn build_alter_table_sql(
             let _ = table;
             let index_sql = quote_id(dialect.as_ref(), index_name)?;
             match kind {
-                DataSourceKind::MySql => {
+                DataSourceKind::MySql | DataSourceKind::OceanBase | DataSourceKind::Doris => {
                     let table_sql = qualified_table_sql(
                         dialect.as_ref(),
                         kind,
