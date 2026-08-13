@@ -8,6 +8,7 @@ use crate::ui::grid::{
     resizable_header_cell, row_fill, text_edit_cell, GridCellResponse, TABLE_HEADER_HEIGHT,
     TABLE_ROW_HEIGHT,
 };
+use crate::ui::i18n::text as tr;
 use app_core::{metadata::MetadataService, query::QueryService};
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use db_common::{
@@ -594,7 +595,7 @@ impl TableEditor {
                 self.page = 0;
             }
             if ui
-                .add_enabled(!self.filter_text.is_empty(), Button::new("Clear"))
+                .add_enabled(!self.filter_text.is_empty(), Button::new(tr("Clear")))
                 .clicked()
             {
                 self.filter_text.clear();
@@ -660,7 +661,7 @@ impl TableEditor {
             if ui
                 .add_enabled(
                     self.has_changes() && !self.is_committing(),
-                    Button::new("Rollback"),
+                    Button::new(tr("Rollback")),
                 )
                 .clicked()
             {
@@ -933,7 +934,7 @@ impl TableEditor {
         let summary = self.build_change_summary();
 
         let mut open = true;
-        Window::new("Commit Changes")
+        Window::new(tr("Commit Changes"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -989,7 +990,7 @@ impl TableEditor {
                 ui.add_space(16.0);
 
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.show_commit_dialog = false;
                     }
                     if ui
@@ -1009,7 +1010,7 @@ impl TableEditor {
 
     fn close_warning_dialog(&mut self, ui: &mut Ui) {
         let mut open = true;
-        Window::new("Close Confirmation")
+        Window::new(tr("Close Confirmation"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1020,7 +1021,7 @@ impl TableEditor {
                 ));
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.show_close_warning = false;
                     }
                     if ui.button("Close Anyway").clicked() {
@@ -1052,28 +1053,29 @@ impl TableEditor {
         let mut confirm = false;
         let mut cancel = false;
 
-        Window::new("Confirm Row Delete")
+        Window::new(tr("Confirm Row Delete"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ui.ctx(), |ui| {
-                ui.label(RichText::new("Delete selected row(s)?").strong());
-                ui.add_space(8.0);
-                ui.label(format!(
-                    "{delete_count} row(s) will be deleted from the database."
-                ));
+                ui.label(RichText::new(tr("Delete selected row(s)?")).strong());
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("This action is saved immediately.")
+                    tr("{count} row(s) will be deleted from the database.")
+                        .replace("{count}", &delete_count.to_string()),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(tr("This action is saved immediately."))
                         .small()
                         .color(Color32::GRAY),
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button("Delete Row(s)").clicked() {
+                    if ui.button(tr("Delete Row(s)")).clicked() {
                         confirm = true;
                     }
                 });
@@ -1506,7 +1508,7 @@ impl TableEditor {
         ui.painter()
             .rect_stroke(rect.shrink(0.5), 0.0, grid_stroke(ui));
         response.context_menu(|ui| {
-            if ui.button("Insert Row").clicked() {
+            if ui.button(tr("Insert Row")).clicked() {
                 self.append_row(message);
                 ui.close_menu();
             }
@@ -1620,7 +1622,7 @@ impl TableEditor {
                 self.selected_row = Some(row_key);
             }
 
-            if ui.button("Insert Row").clicked() {
+            if ui.button(tr("Insert Row")).clicked() {
                 *append_requested = true;
                 ui.close_menu();
             }
@@ -1628,9 +1630,9 @@ impl TableEditor {
                 .add_enabled(
                     self.can_remove_or_restore_row(row_key),
                     Button::new(if self.row_is_deleted(row_key) {
-                        "Undo Delete"
+                        tr("Undo Delete")
                     } else {
-                        "Delete Row"
+                        tr("Delete Row")
                     }),
                 )
                 .clicked()
@@ -1638,11 +1640,11 @@ impl TableEditor {
                 *remove_requested = true;
                 ui.close_menu();
             }
-            if self.selected_rows.len() > 1 && ui.button("Delete Selected Rows").clicked() {
+            if self.selected_rows.len() > 1 && ui.button(tr("Delete Selected Rows")).clicked() {
                 *remove_requested = true;
                 ui.close_menu();
             }
-            if ui.button("Clear Selection").clicked() {
+            if ui.button(tr("Clear Selection")).clicked() {
                 *clear_selection_requested = true;
                 ui.close_menu();
             }
@@ -1971,10 +1973,10 @@ impl TableEditor {
                         set_null = true;
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("OK").clicked() {
+                        if ui.button(tr("OK")).clicked() {
                             apply_value = Some(picker.format_value());
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(tr("Cancel")).clicked() {
                             close_requested = true;
                         }
                     });

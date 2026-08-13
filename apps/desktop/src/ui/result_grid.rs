@@ -8,6 +8,7 @@ use crate::ui::grid::{
     estimate_text_width, grid_stroke, label_cell, paint_cell_outline, resizable_header_cell,
     row_fill, TABLE_HEADER_HEIGHT, TABLE_ROW_HEIGHT,
 };
+use crate::ui::i18n::text as tr;
 use db_common::{
     CellValue, QueryResult, QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
     QUERY_RESULT_METADATA_TOTAL_ROWS,
@@ -110,7 +111,7 @@ impl ResultSetGrid {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
                 ui.label(
-                    RichText::new("No columns in result")
+                    RichText::new(tr("No columns in result"))
                         .color(Color32::GRAY)
                         .italics(),
                 );
@@ -212,7 +213,7 @@ impl ResultSetGrid {
 
             ui.separator();
             let has_selection = self.selected.is_some();
-            ui.menu_button("Copy", |ui| {
+            ui.menu_button(tr("Copy"), |ui| {
                 if ui.add_enabled(has_selection, Button::new("Cell")).clicked() {
                     if let Some(text) = self.copy_cell_text() {
                         copy_to_clipboard(ui, text);
@@ -256,7 +257,7 @@ impl ResultSetGrid {
                 }
             });
 
-            ui.menu_button("Export", |ui| {
+            ui.menu_button(tr("Export"), |ui| {
                 if ui.button("Copy CSV").clicked() {
                     self.copy_export(ui, ExportFormat::Csv, action);
                     ui.close_menu();
@@ -291,7 +292,7 @@ impl ResultSetGrid {
                     .color(Color32::from_rgb(80, 80, 180))
                     .small(),
                 );
-                if ui.small_button("Clear sort").clicked() {
+                if ui.small_button(tr("Clear sort")).clicked() {
                     self.sort = None;
                     self.page = 0;
                     self.selected = None;

@@ -11,13 +11,18 @@ use db_common::ConnectionId;
 use eframe::egui::{Align, Color32, Context, Layout, RichText, SidePanel};
 use import_export::ExportFormat;
 
+const LEFT_PANEL_MIN_WIDTH: f32 = 200.0;
+const LEFT_PANEL_MAX_WIDTH: f32 = 320.0;
+
 impl DesktopApp {
     pub(super) fn left_tree(&mut self, ctx: &Context) {
         SidePanel::left("connection_object_tree")
             .resizable(true)
-            .default_width(250.0)
-            .width_range(200.0..=420.0)
+            .default_width(200.0)
+            .width_range(LEFT_PANEL_MIN_WIDTH..=LEFT_PANEL_MAX_WIDTH)
             .show(ctx, |ui| {
+                // Keep wide tree content and status text from changing the panel's drag width.
+                ui.set_max_width(ui.available_width());
                 let (message, actions) = self.object_tree.ui(ctx, ui);
                 if let Some(message) = message {
                     if !message.is_empty() {
@@ -35,7 +40,7 @@ impl DesktopApp {
             });
     }
 
-    fn handle_tree_actions(&mut self, actions: Vec<ObjectTreeAction>) {
+    pub(super) fn handle_tree_actions(&mut self, actions: Vec<ObjectTreeAction>) {
         for action in actions {
             match action {
                 ObjectTreeAction::ImportConnections => {

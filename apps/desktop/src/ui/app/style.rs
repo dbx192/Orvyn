@@ -14,7 +14,9 @@ pub(super) fn apply_app_style(ctx: &Context, theme: AppTheme) {
             visuals.faint_bg_color = Color32::from_rgb(232, 236, 241);
             visuals.widgets.noninteractive.bg_stroke =
                 Stroke::new(1.0, Color32::from_rgb(210, 216, 224));
-            visuals.selection.bg_fill = Color32::from_rgb(45, 103, 168);
+            // Keep selected tabs readable without overpowering the workspace.
+            visuals.selection.bg_fill = Color32::from_rgb(75, 137, 194);
+            visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(48, 99, 151));
         }
         AppTheme::Dark => {
             visuals.panel_fill = Color32::from_rgb(20, 23, 28);
@@ -22,7 +24,8 @@ pub(super) fn apply_app_style(ctx: &Context, theme: AppTheme) {
             visuals.faint_bg_color = Color32::from_rgb(31, 36, 43);
             visuals.widgets.noninteractive.bg_stroke =
                 Stroke::new(1.0, Color32::from_rgb(50, 58, 68));
-            visuals.selection.bg_fill = Color32::from_rgb(48, 108, 172);
+            visuals.selection.bg_fill = Color32::from_rgb(58, 125, 184);
+            visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(105, 165, 220));
         }
     }
 

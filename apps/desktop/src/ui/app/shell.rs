@@ -1,7 +1,8 @@
 use super::{style::apply_app_style, ActivePanel, DesktopApp};
+use crate::ui::i18n::{self, text as tr, Locale};
 use eframe::egui::{
-    Align, Button, CentralPanel, Context, Frame, Layout, Margin, RichText, Stroke, TopBottomPanel,
-    Ui,
+    vec2, Align, Button, CentralPanel, Context, Direction, Frame, Layout, Margin, RichText, Stroke,
+    TopBottomPanel, Ui,
 };
 use std::time::Duration;
 
@@ -48,7 +49,7 @@ impl DesktopApp {
 
         ui.horizontal_wrapped(|ui| {
             let query_selected = self.active_panel == ActivePanel::QueryEditor;
-            if ui.selectable_label(query_selected, "Query").clicked() {
+            if ui.selectable_label(query_selected, tr("Query")).clicked() {
                 if !query_selected {
                     if let Some((connection_id, database, schema, table)) = self
                         .active_table_editor
@@ -64,6 +65,9 @@ impl DesktopApp {
                     }
                 }
                 self.active_panel = ActivePanel::QueryEditor;
+            }
+            if self.active_structure.is_some() || self.pending_structure_load.is_some() {
+                self.workspace_tab(ui, ActivePanel::TableStructure, &tr("Structure"));
             }
             let tabs = self
                 .table_tab_order
@@ -102,19 +106,25 @@ impl DesktopApp {
                         .filter(|tab_id| *tab_id != id)
                         .collect::<Vec<_>>();
 
-                    close_menu_item(ui, "Close", vec![id], &dirty_tabs, &mut close_tabs);
-                    close_menu_item(ui, "Close Other Tabs", others, &dirty_tabs, &mut close_tabs);
+                    close_menu_item(ui, &tr("Close"), vec![id], &dirty_tabs, &mut close_tabs);
+                    close_menu_item(
+                        ui,
+                        &tr("Close Other Tabs"),
+                        others,
+                        &dirty_tabs,
+                        &mut close_tabs,
+                    );
                     ui.separator();
                     close_menu_item(
                         ui,
-                        "Close Tabs to the Left",
+                        &tr("Close Tabs to the Left"),
                         left,
                         &dirty_tabs,
                         &mut close_tabs,
                     );
                     close_menu_item(
                         ui,
-                        "Close Tabs to the Right",
+                        &tr("Close Tabs to the Right"),
                         right,
                         &dirty_tabs,
                         &mut close_tabs,
@@ -122,7 +132,7 @@ impl DesktopApp {
                     ui.separator();
                     close_menu_item(
                         ui,
-                        "Close All Tabs",
+                        &tr("Close All Tabs"),
                         ordered_ids.clone(),
                         &dirty_tabs,
                         &mut close_tabs,
@@ -131,9 +141,9 @@ impl DesktopApp {
                 if ui
                     .add_enabled(!dirty, Button::new("x"))
                     .on_hover_text(if dirty {
-                        "Save or rollback changes before closing"
+                        tr("Save or rollback changes before closing")
                     } else {
-                        "Close table"
+                        tr("Close table")
                     })
                     .clicked()
                 {
@@ -143,11 +153,8 @@ impl DesktopApp {
             if let Some(ids) = close_tabs {
                 self.close_table_tabs(&ids);
             }
-            if self.active_structure.is_some() || self.pending_structure_load.is_some() {
-                self.workspace_tab(ui, ActivePanel::TableStructure, "Structure");
-            }
             if self.import_wizard.is_some() {
-                self.workspace_tab(ui, ActivePanel::ImportWizard, "Import");
+                self.workspace_tab(ui, ActivePanel::ImportWizard, &tr("Import"));
             }
             if matches!(self.active_panel, ActivePanel::RedisBrowser) {
                 let label = self
@@ -272,11 +279,11 @@ impl DesktopApp {
                         None => {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(60.0);
-                                ui.label(RichText::new("Table Data").size(24.0).strong());
+                                ui.label(RichText::new(tr("Table Data")).size(24.0).strong());
                                 ui.add_space(12.0);
-                                ui.label("No table open. Double-click a table in the object tree to load data.");
+                                ui.label(tr("No table open. Double-click a table in the object tree to load data."));
                                 ui.add_space(8.0);
-                                if ui.button("Switch to Query Editor").clicked() {
+                                if ui.button(tr("Switch to Query Editor")).clicked() {
                                     self.active_panel = ActivePanel::QueryEditor;
                                 }
                             });
@@ -304,9 +311,9 @@ impl DesktopApp {
                         None => {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(60.0);
-                                ui.label(RichText::new("Table Structure").size(24.0).strong());
+                                ui.label(RichText::new(tr("Table Structure")).size(24.0).strong());
                                 ui.add_space(12.0);
-                                ui.label("Loading table structure...");
+                                ui.label(tr("Loading table structure..."));
                             });
                         }
                     },
@@ -321,7 +328,7 @@ impl DesktopApp {
                         }
                         None => {
                             ui.vertical_centered(|ui| {
-                                ui.label("No import wizard active.");
+                                ui.label(tr("No import wizard active."));
                             });
                         }
                     },
@@ -348,52 +355,66 @@ impl DesktopApp {
             .show(ctx, |ui| {
                 let compact = ui.available_width() < 920.0;
                 ui.horizontal(|ui| {
-                    ui.heading(RichText::new(&self.app_name).size(18.0));
-                    ui.separator();
-
-                    let connection_label = if compact { "Connect" } else { "New Connection" };
-                    if ui
-                        .add_sized([112.0, 28.0], Button::new(connection_label))
-                        .on_hover_text("Create or edit saved database connections")
-                        .clicked()
-                    {
-                        self.connection_manager_ui.new_connection();
-                        self.state.set_status("New connection editor opened");
+                    let connection_label = if compact {
+                        tr("Connect")
+                    } else {
+                        tr("Connections")
+                    };
+                    let mut connection_actions = Vec::new();
+                    ui.allocate_ui_with_layout(
+                        vec2(72.0, 28.0),
+                        Layout::centered_and_justified(Direction::LeftToRight),
+                        |ui| {
+                            ui.spacing_mut().interact_size = vec2(72.0, 28.0);
+                            ui.menu_button(connection_label, |ui| {
+                                if ui.button(tr("New")).clicked() {
+                                    self.connection_manager_ui.new_connection();
+                                    self.state.set_status(tr("New connection editor opened"));
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                self.object_tree
+                                    .connection_transfer_menu(ui, &mut connection_actions);
+                            });
+                        },
+                    );
+                    if !connection_actions.is_empty() {
+                        self.handle_tree_actions(connection_actions);
                     }
                     if ui
-                        .add_sized([72.0, 28.0], Button::new("History"))
-                        .on_hover_text("Show executed SQL history")
+                        .add_sized([72.0, 28.0], Button::new(tr("History")))
+                        .on_hover_text(tr("Show executed SQL history"))
                         .clicked()
                     {
                         self.query_editor.show_history();
                         self.active_panel = ActivePanel::QueryEditor;
-                        self.state.set_status("History opened");
+                        self.state.set_status(tr("History opened"));
                     }
                     if ui
-                        .add_sized([82.0, 28.0], Button::new("Favorites"))
-                        .on_hover_text("Show saved SQL snippets")
+                        .add_sized([82.0, 28.0], Button::new(tr("Favorites")))
+                        .on_hover_text(tr("Show saved SQL snippets"))
                         .clicked()
                     {
                         self.query_editor.show_favorites();
                         self.active_panel = ActivePanel::QueryEditor;
-                        self.state.set_status("Favorites opened");
+                        self.state.set_status(tr("Favorites opened"));
                     }
                     if ui
-                        .add_sized([76.0, 28.0], Button::new("Refresh"))
-                        .on_hover_text("Refresh the active browser or workspace")
+                        .add_sized([76.0, 28.0], Button::new(tr("Refresh")))
+                        .on_hover_text(tr("Refresh the active browser or workspace"))
                         .clicked()
                     {
-                        self.state.set_status("Refresh requested");
+                        self.state.set_status(tr("Refresh requested"));
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let theme_label = match self.state.theme {
-                            crate::ui::state::AppTheme::Light => "Dark",
-                            crate::ui::state::AppTheme::Dark => "Light",
+                            crate::ui::state::AppTheme::Light => tr("Dark"),
+                            crate::ui::state::AppTheme::Dark => tr("Light"),
                         };
                         if ui
                             .add_sized([58.0, 28.0], Button::new(theme_label))
-                            .on_hover_text("Toggle theme")
+                            .on_hover_text(tr("Toggle theme"))
                             .clicked()
                         {
                             self.state.toggle_theme();
@@ -404,13 +425,39 @@ impl DesktopApp {
                             && ui
                                 .add_sized(
                                     [86.0, 28.0],
-                                    Button::new(format!("Errors {error_count}")),
+                                    Button::new(i18n::format(
+                                        "Errors {count}",
+                                        &[("count", error_count.to_string())],
+                                    )),
                                 )
-                                .on_hover_text("Open error details")
+                                .on_hover_text(tr("Open error details"))
                                 .clicked()
                         {
                             self.error_window_open = true;
                         }
+
+                        ui.menu_button(
+                            format!("{}: {}", tr("Language"), i18n::locale().native_name()),
+                            |ui| {
+                                for locale in Locale::ALL {
+                                    if ui
+                                        .selectable_label(
+                                            i18n::locale() == locale,
+                                            locale.native_name(),
+                                        )
+                                        .clicked()
+                                    {
+                                        if i18n::set_locale(locale).is_ok() {
+                                            self.state.set_status(i18n::format(
+                                                "Language changed to {language}",
+                                                &[("language", locale.native_name().to_string())],
+                                            ));
+                                        }
+                                        ui.close_menu();
+                                    }
+                                }
+                            },
+                        );
 
                         ui.separator();
                         ui.label(RichText::new(&self.state.status).small().strong())

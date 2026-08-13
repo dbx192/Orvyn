@@ -25,6 +25,7 @@ fn main() -> eframe::Result<()> {
         Runtime::new().expect("failed to create background async runtime for desktop app"),
     );
     let config_dir = config::data_dir();
+    ui::i18n::initialize(&config_dir);
     let connection_manager = bootstrap_connection_manager(config_dir.clone());
     let session_manager = SessionManager::with_default_testers(connection_manager.clone());
     let metadata_service = MetadataService::with_default_readers(connection_manager.clone());
@@ -58,7 +59,7 @@ fn main() -> eframe::Result<()> {
         app_name,
         native_options,
         Box::new(move |cc| {
-            ui::fonts::install_cjk_fonts(&cc.egui_ctx);
+            ui::fonts::install_global_fonts(&cc.egui_ctx);
             Box::new(DesktopApp::new(
                 app_name.to_string(),
                 connection_manager,

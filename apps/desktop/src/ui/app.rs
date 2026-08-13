@@ -33,7 +33,6 @@ use std::collections::HashMap;
 use tokio::runtime::Handle;
 
 pub struct DesktopApp {
-    app_name: String,
     connection_manager_ui: ConnectionManagerUi,
     object_tree: ObjectTree,
     query_editor: QueryEditor,
@@ -82,7 +81,7 @@ enum ActivePanel {
 
 impl DesktopApp {
     pub fn new(
-        app_name: String,
+        _app_name: String,
         connection_manager: ConnectionManager,
         metadata_service: MetadataService,
         session_manager: SessionManager,
@@ -97,7 +96,6 @@ impl DesktopApp {
         let rt_cm_ui = runtime.clone();
         let rt_field = runtime.clone();
         Self {
-            app_name,
             connection_manager_ui: ConnectionManagerUi::new(connection_manager.clone(), rt_cm_ui),
             object_tree: ObjectTree::new(
                 metadata_service.clone(),

@@ -123,7 +123,7 @@ impl Default for AppState {
             tasks: Vec::new(),
             errors: Vec::new(),
             connection_tree: Vec::new(),
-            status: String::from("Ready"),
+            status: crate::ui::i18n::text("Ready"),
             theme: AppTheme::Dark,
             search_focused: false,
         }

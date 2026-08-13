@@ -1,3 +1,4 @@
+use crate::ui::i18n::text as tr;
 use app_core::connection::ConnectionManager;
 use db_common::{
     redact_connection_url, AppError, ConnectionId, ConnectionProfile, ConnectionSecurity,
@@ -284,8 +285,8 @@ impl ConnectionManagerUi {
         if self.window_open {
             let mut open = true;
             let title = match self.form.mode {
-                EditorMode::New => "New Connection",
-                EditorMode::Edit(_) => "Edit Connection",
+                EditorMode::New => tr("New Connection"),
+                EditorMode::Edit(_) => tr("Edit Connection"),
             };
 
             Window::new(title)
@@ -334,22 +335,25 @@ impl ConnectionManagerUi {
 
     #[allow(dead_code)]
     fn list_panel(&mut self, ui: &mut Ui) {
-        ui.heading("Connections");
+        ui.heading(tr("Connections"));
         ui.horizontal(|ui| {
-            if ui.button("New").clicked() {
+            if ui.button(tr("New")).clicked() {
                 self.selected = None;
                 self.form = ConnectionForm::new();
                 self.test_report = None;
                 self.error = None;
             }
-            if ui.add_enabled(!self.busy, Button::new("Refresh")).clicked() {
+            if ui
+                .add_enabled(!self.busy, Button::new(tr("Refresh")))
+                .clicked()
+            {
                 self.load_profiles();
             }
         });
 
         if !self.recent.is_empty() {
             ui.separator();
-            ui.label(RichText::new("Recent").strong());
+            ui.label(RichText::new(tr("Recent")).strong());
             for id in self.recent.clone() {
                 if let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) {
                     if ui
@@ -392,15 +396,15 @@ impl ConnectionManagerUi {
 
     fn editor_panel(&mut self, ui: &mut Ui, message: &mut Option<String>, as_window: bool) {
         ui.heading(match self.form.mode {
-            EditorMode::New => "New Connection",
-            EditorMode::Edit(_) => "Edit Connection",
+            EditorMode::New => tr("New Connection"),
+            EditorMode::Edit(_) => tr("Edit Connection"),
         });
 
         Grid::new("connection_editor_grid")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Type");
+                ui.label(tr("Type"));
                 let old_kind = self.form.kind;
                 ComboBox::from_id_source("connection_kind")
                     .selected_text(self.form.kind.as_str())
@@ -425,19 +429,19 @@ impl ConnectionManagerUi {
                 }
                 ui.end_row();
 
-                ui.label("Name");
+                ui.label(tr("Name"));
                 ui.add(TextEdit::singleline(&mut self.form.name).desired_width(260.0));
                 ui.end_row();
 
-                ui.label("Group");
+                ui.label(tr("Group"));
                 ui.add(TextEdit::singleline(&mut self.form.group).desired_width(260.0));
                 ui.end_row();
 
                 if self.form.kind.is_file_based() {
-                    ui.label("File path");
+                    ui.label(tr("File path"));
                     ui.horizontal(|ui| {
                         ui.add(TextEdit::singleline(&mut self.form.file_path).desired_width(290.0));
-                        if ui.button("Browse...").clicked() {
+                        if ui.button(tr("Browse...")).clicked() {
                             let mut dialog =
                                 rfd::FileDialog::new().set_title(match self.form.kind {
                                     DataSourceKind::DuckDb => "Select DuckDB database",
@@ -464,11 +468,11 @@ impl ConnectionManagerUi {
                     });
                     ui.end_row();
                 } else {
-                    ui.label("Host");
+                    ui.label(tr("Host"));
                     ui.add(TextEdit::singleline(&mut self.form.host).desired_width(260.0));
                     ui.end_row();
 
-                    ui.label("Port");
+                    ui.label(tr("Port"));
                     ui.add(DragValue::new(&mut self.form.port).clamp_range(1..=65535));
                     ui.end_row();
                 }
@@ -477,13 +481,13 @@ impl ConnectionManagerUi {
                     self.form.kind,
                     DataSourceKind::MySql | DataSourceKind::PostgreSql
                 ) {
-                    ui.label("Username");
+                    ui.label(tr("Username"));
                     ui.add(TextEdit::singleline(&mut self.form.username).desired_width(260.0));
                     ui.end_row();
                 }
 
                 if !self.form.kind.is_file_based() {
-                    ui.label("Password");
+                    ui.label(tr("Password"));
                     let response = ui.add(
                         TextEdit::singleline(&mut self.form.password)
                             .password(true)
@@ -506,12 +510,12 @@ impl ConnectionManagerUi {
                 }
 
                 if self.form.kind.is_relational() && !self.form.kind.is_file_based() {
-                    ui.label("Database");
+                    ui.label(tr("Database"));
                     ui.add(TextEdit::singleline(&mut self.form.database).desired_width(260.0));
                     ui.end_row();
                 }
 
-                ui.label("SSL");
+                ui.label(tr("SSL"));
                 ComboBox::from_id_source("connection_ssl_mode")
                     .selected_text(format!("{:?}", self.form.ssl_mode))
                     .show_ui(ui, |ui| {
@@ -527,10 +531,13 @@ impl ConnectionManagerUi {
                     });
                 ui.end_row();
 
-                ui.label("Options");
+                ui.label(tr("Options"));
                 ui.horizontal(|ui| {
-                    ui.add(Checkbox::new(&mut self.form.read_only, "Read only"));
-                    ui.add(Checkbox::new(&mut self.form.save_password, "Save password"));
+                    ui.add(Checkbox::new(&mut self.form.read_only, tr("Read only")));
+                    ui.add(Checkbox::new(
+                        &mut self.form.save_password,
+                        tr("Save password"),
+                    ));
                 });
                 ui.end_row();
             });
@@ -538,22 +545,32 @@ impl ConnectionManagerUi {
         ui.add_space(10.0);
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(!self.busy, Button::new("Test Connection"))
+                .add_enabled(!self.busy, Button::new(tr("Test Connection")))
                 .clicked()
             {
                 self.test_connection();
             }
-            if ui.add_enabled(!self.busy, Button::new("Save")).clicked() {
+            if ui
+                .add_enabled(!self.busy, Button::new(tr("Save")))
+                .clicked()
+            {
                 self.save_connection();
             }
-            if as_window && ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+            if as_window
+                && ui
+                    .add_enabled(!self.busy, Button::new(tr("Cancel")))
+                    .clicked()
+            {
                 self.window_open = false;
                 self.confirm_delete = None;
                 self.error = None;
                 self.test_report = None;
             }
             if let EditorMode::Edit(id) = self.form.mode {
-                if ui.add_enabled(!self.busy, Button::new("Delete")).clicked() {
+                if ui
+                    .add_enabled(!self.busy, Button::new(tr("Delete")))
+                    .clicked()
+                {
                     self.confirm_delete = Some(id);
                 }
             }
@@ -563,11 +580,11 @@ impl ConnectionManagerUi {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.colored_label(ui.visuals().warn_fg_color, "Confirm delete connection?");
-                if ui.button("Delete").clicked() {
+                if ui.button(tr("Delete")).clicked() {
                     self.delete_connection(id);
                     self.confirm_delete = None;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr("Cancel")).clicked() {
                     self.confirm_delete = None;
                 }
             });
@@ -617,7 +634,7 @@ impl ConnectionManagerUi {
         let mut open = true;
         let mut cancel = false;
 
-        Window::new("Connection Name Conflicts")
+        Window::new(tr("Connection Name Conflicts"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -634,10 +651,10 @@ impl ConnectionManagerUi {
                 });
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Overwrite Existing").clicked() {
+                    if ui.button(tr("Overwrite Existing")).clicked() {
                         action = Some(ImportConflictPolicy::Overwrite);
                     }
-                    if ui.button("Keep Both and Rename").clicked() {
+                    if ui.button(tr("Keep Both and Rename")).clicked() {
                         action = Some(ImportConflictPolicy::Rename);
                     }
                     if ui.button("Cancel").clicked() {
@@ -785,7 +802,10 @@ impl ConnectionManagerUi {
                 ConnectionEvent::Loaded(result) => match result {
                     Ok(profiles) => {
                         self.profiles = profiles;
-                        self.status = format!("Loaded {} connections", self.profiles.len());
+                        self.status = crate::ui::i18n::format(
+                            "Loaded {count} connections",
+                            &[("count", self.profiles.len().to_string())],
+                        );
                     }
                     Err(error) => {
                         self.error = Some(actionable_error(

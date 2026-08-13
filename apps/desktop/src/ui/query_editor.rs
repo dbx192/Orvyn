@@ -1,3 +1,4 @@
+use crate::ui::i18n::text as tr;
 use crate::ui::result_grid::{ResultSetGrid, ResultSetGridAction};
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::{
@@ -219,8 +220,8 @@ impl QueryEditor {
         if self.tabs.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.vertical(|ui| {
-                    ui.label("No SQL workspace open");
-                    if ui.button("New Query").clicked() {
+                    ui.label(tr("No SQL workspace open"));
+                    if ui.button(tr("New Query")).clicked() {
                         self.new_query();
                     }
                 });
@@ -476,15 +477,15 @@ impl QueryEditor {
                     self.active_tab = Some(id);
                 }
                 response.context_menu(|ui| {
-                    if ui.button("关闭").clicked() {
+                    if ui.button(tr("Close")).clicked() {
                         self.close_tab(id);
                         ui.close_menu();
                     }
-                    if ui.button("关闭其他").clicked() {
+                    if ui.button(tr("Close Other Tabs")).clicked() {
                         self.close_other_tabs(id);
                         ui.close_menu();
                     }
-                    if ui.button("关闭全部").clicked() {
+                    if ui.button(tr("Close All Tabs")).clicked() {
                         self.close_all_tabs();
                         ui.close_menu();
                     }
@@ -496,7 +497,7 @@ impl QueryEditor {
     fn toolbar(&mut self, ui: &mut Ui) {
         let mut transaction_action = None;
         ui.horizontal_wrapped(|ui| {
-            if ui.button("New Query").clicked() {
+            if ui.button(tr("New Query")).clicked() {
                 self.new_query();
             }
 
@@ -530,7 +531,7 @@ impl QueryEditor {
                     .unwrap_or((false, false, false, false, false));
 
             if !is_running {
-                if ui.button("Run Current").clicked() {
+                if ui.button(tr("Run Current")).clicked() {
                     self.execute_current_statement();
                 }
                 if ui
@@ -539,25 +540,25 @@ impl QueryEditor {
                 {
                     self.execute_selection();
                 }
-                if ui.button("Run All").clicked() {
+                if ui.button(tr("Run All")).clicked() {
                     self.show_execute_all = true;
                 }
-                if ui.button("Format SQL").clicked() {
+                if ui.button(tr("Format SQL")).clicked() {
                     if self.format_current_sql().is_some() {
                         self.status = "SQL formatted".to_string();
                     } else {
                         self.status = "SQL already formatted".to_string();
                     }
                 }
-                if ui.button("Explain").clicked() {
+                if ui.button(tr("Explain")).clicked() {
                     self.execute_explain(false);
                 }
-                if ui.button("Explain Analyze").clicked() {
+                if ui.button(tr("Explain Analyze")).clicked() {
                     self.execute_explain(true);
                 }
             } else if is_cancelling {
                 ui.add_enabled(false, Button::new("Cancelling..."));
-            } else if ui.button("Stop").clicked() {
+            } else if ui.button(tr("Stop")).clicked() {
                 self.stop_execution();
             }
 
@@ -691,7 +692,7 @@ impl QueryEditor {
                     .unwrap_or_default();
 
                 let mut changed = None;
-                if ui.selectable_label(false, "Default").clicked() {
+                if ui.selectable_label(false, tr("Default")).clicked() {
                     changed = Some(None);
                 }
                 for database in options {
@@ -734,7 +735,7 @@ impl QueryEditor {
                     .unwrap_or_default();
 
                 let mut changed = None;
-                if ui.selectable_label(false, "Default").clicked() {
+                if ui.selectable_label(false, tr("Default")).clicked() {
                     changed = Some(None);
                 }
                 for schema in options {
@@ -961,7 +962,7 @@ impl QueryEditor {
             }
 
             if tab.results.is_empty() {
-                ui.label("No query executed yet");
+                ui.label(tr("No query executed yet"));
                 return;
             }
 
@@ -1027,7 +1028,7 @@ impl QueryEditor {
                     None => {}
                 },
                 None => {
-                    ui.label("Statement executed without a tabular result.");
+                    ui.label(tr("Statement executed without a tabular result."));
                 }
             }
         }
@@ -1745,7 +1746,7 @@ impl QueryEditor {
     fn execute_all_dialog(&mut self, ctx: &eframe::egui::Context) {
         if self.show_execute_all {
             let mut open = true;
-            Window::new("Execute All Statements")
+            Window::new(tr("Execute All Statements"))
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -1764,10 +1765,10 @@ impl QueryEditor {
                     }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(tr("Cancel")).clicked() {
                             self.show_execute_all = false;
                         }
-                        if ui.button("Execute All").clicked() {
+                        if ui.button(tr("Execute All")).clicked() {
                             self.execute_all_statements();
                             self.show_execute_all = false;
                         }
@@ -1788,7 +1789,7 @@ impl QueryEditor {
         let mut open = true;
         let mode = pending.mode;
         let sql = pending.sql.clone();
-        Window::new("Confirm Dangerous SQL")
+        Window::new(tr("Confirm Dangerous SQL"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -1804,11 +1805,11 @@ impl QueryEditor {
                 });
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.pending_danger_confirm = None;
                         self.status = "Dangerous SQL cancelled".to_string();
                     }
-                    if ui.button("Execute Anyway").clicked() {
+                    if ui.button(tr("Execute Anyway")).clicked() {
                         self.pending_danger_confirm = None;
                         self.execute_active_confirmed(mode);
                     }
@@ -1856,7 +1857,7 @@ impl QueryEditor {
 
     fn history_list(&mut self, ui: &mut Ui, tab_id: QueryId) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("History").strong());
+            ui.label(RichText::new(tr("History")).strong());
             ui.label(
                 RichText::new(format!("{} entries", self.history_entries.len()))
                     .small()
@@ -1940,7 +1941,7 @@ impl QueryEditor {
 
     fn favorites_panel(&mut self, ui: &mut Ui, tab_id: QueryId) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Favorites").strong());
+            ui.label(RichText::new(tr("Favorites")).strong());
             ui.label(
                 RichText::new(format!("{} saved", self.favorite_entries.len()))
                     .small()

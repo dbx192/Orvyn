@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
+use crate::ui::i18n::text as tr;
 use db_common::{
     dialect::{BacktickDialect, Dialect, DoubleQuoteDialect, Identifier},
     AppError, ConnectionId, DataSourceKind, DatabaseFunction, TableColumn, TableForeignKey,
@@ -594,34 +595,19 @@ impl TableStructureView {
 
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(self.table_name()).strong().size(15.0));
-            ui.separator();
-            ui.label(
-                RichText::new(format!("{} columns", self.columns.len()))
-                    .small()
-                    .color(Color32::GRAY),
-            );
-            ui.label(
-                RichText::new(format!("{} indexes", self.indexes.len()))
-                    .small()
-                    .color(Color32::GRAY),
-            );
-            if !self.foreign_keys.is_empty() {
-                ui.label(
-                    RichText::new(format!("{} foreign keys", self.foreign_keys.len()))
-                        .small()
-                        .color(Color32::GRAY),
-                );
-            }
             if !self.details_loaded {
                 ui.label(
-                    RichText::new("details lazy-loaded")
+                    RichText::new(tr("Details load on demand"))
                         .small()
                         .color(Color32::GRAY),
                 );
             }
             ui.separator();
             if ui
-                .add_enabled(self.details_loaded, eframe::egui::Button::new("Copy DDL"))
+                .add_enabled(
+                    self.details_loaded,
+                    eframe::egui::Button::new(tr("Copy DDL")),
+                )
                 .clicked()
             {
                 ui.output_mut(|o| o.copied_text = self.create_sql.clone());
@@ -630,7 +616,7 @@ impl TableStructureView {
             if ui
                 .add_enabled(
                     self.details_loaded && !self.columns.is_empty(),
-                    Button::new("Add Column"),
+                    Button::new(tr("Add Column")),
                 )
                 .clicked()
             {
@@ -639,7 +625,7 @@ impl TableStructureView {
             if ui
                 .add_enabled(
                     self.details_loaded && !self.columns.is_empty(),
-                    Button::new("Add Index"),
+                    Button::new(tr("Add Index")),
                 )
                 .clicked()
             {
@@ -648,7 +634,7 @@ impl TableStructureView {
             if ui
                 .add_enabled(
                     self.details_loaded && !self.columns.is_empty(),
-                    Button::new("Add FK"),
+                    Button::new(tr("Add FK")),
                 )
                 .clicked()
             {
@@ -681,29 +667,29 @@ impl TableStructureView {
             ui.selectable_value(
                 &mut self.active_tab,
                 StructureTab::Columns,
-                format!("Columns {}", self.columns.len()),
+                format!("{} {}", tr("Columns"), self.columns.len()),
             );
             ui.selectable_value(
                 &mut self.active_tab,
                 StructureTab::Indexes,
-                format!("Indexes {}", self.indexes.len()),
+                format!("{} {}", tr("Indexes"), self.indexes.len()),
             );
             ui.selectable_value(
                 &mut self.active_tab,
                 StructureTab::ForeignKeys,
-                format!("Foreign Keys {}", self.foreign_keys.len()),
+                format!("{} {}", tr("Foreign Keys"), self.foreign_keys.len()),
             );
             ui.selectable_value(
                 &mut self.active_tab,
                 StructureTab::Triggers,
-                format!("Triggers {}", self.triggers.len()),
+                format!("{} {}", tr("Triggers"), self.triggers.len()),
             );
             ui.selectable_value(
                 &mut self.active_tab,
                 StructureTab::Functions,
-                format!("Functions {}", self.functions.len()),
+                format!("{} {}", tr("Functions"), self.functions.len()),
             );
-            ui.selectable_value(&mut self.active_tab, StructureTab::Ddl, "DDL");
+            ui.selectable_value(&mut self.active_tab, StructureTab::Ddl, tr("DDL"));
         });
     }
 
@@ -734,7 +720,7 @@ impl TableStructureView {
         let mut create_requested = false;
         let mut cancel_requested = false;
 
-        Window::new("Add Index")
+        Window::new(tr("Add Index"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -745,18 +731,18 @@ impl TableStructureView {
                     .num_columns(2)
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Name");
+                        ui.label(tr("Name"));
                         ui.add(
                             TextEdit::singleline(&mut self.draft_index_name).desired_width(260.0),
                         );
                         ui.end_row();
-                        ui.label("Unique");
+                        ui.label(tr("Unique"));
                         ui.checkbox(&mut self.draft_index_unique, "");
                         ui.end_row();
                     });
 
                 ui.add_space(8.0);
-                ui.label(RichText::new("Columns").strong());
+                ui.label(RichText::new(tr("Columns")).strong());
                 ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                     for (index, column) in self.columns.iter().enumerate() {
                         ui.checkbox(
@@ -776,10 +762,10 @@ impl TableStructureView {
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel_requested = true;
                     }
-                    if ui.button("Create").clicked() {
+                    if ui.button(tr("Create")).clicked() {
                         create_requested = true;
                     }
                 });
@@ -841,7 +827,7 @@ impl TableStructureView {
         let mut create_requested = false;
         let mut cancel_requested = false;
 
-        Window::new("Add Column")
+        Window::new(tr("Add Column"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -852,20 +838,20 @@ impl TableStructureView {
                     .num_columns(2)
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Column name");
+                        ui.label(tr("Column name"));
                         ui.add(
                             TextEdit::singleline(&mut self.draft_column_name).desired_width(240.0),
                         );
                         ui.end_row();
-                        ui.label("Type (e.g. VARCHAR(255))");
+                        ui.label(tr("Type (e.g. VARCHAR(255))"));
                         ui.add(
                             TextEdit::singleline(&mut self.draft_column_type).desired_width(240.0),
                         );
                         ui.end_row();
-                        ui.label("Nullable");
+                        ui.label(tr("Nullable"));
                         ui.checkbox(&mut self.draft_column_nullable, "");
                         ui.end_row();
-                        ui.label("Default (raw SQL, optional)");
+                        ui.label(tr("Default (raw SQL, optional)"));
                         ui.add(
                             TextEdit::singleline(&mut self.draft_column_default)
                                 .desired_width(240.0),
@@ -878,10 +864,10 @@ impl TableStructureView {
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel_requested = true;
                     }
-                    if ui.button("Add Column").clicked() {
+                    if ui.button(tr("Add Column")).clicked() {
                         create_requested = true;
                     }
                 });
@@ -927,7 +913,7 @@ impl TableStructureView {
         let mut open = true;
         let mut confirm = false;
         let mut cancel = false;
-        Window::new("Confirm Drop Column")
+        Window::new(tr("Confirm Drop Column"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -941,10 +927,10 @@ impl TableStructureView {
                 ui.label(format!("Column: {}", column_name));
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button("Drop Column").clicked() {
+                    if ui.button(tr("Drop Column")).clicked() {
                         confirm = true;
                     }
                 });
@@ -981,7 +967,7 @@ impl TableStructureView {
         let mut open = true;
         let mut confirm = false;
         let mut cancel = false;
-        Window::new("Modify Column")
+        Window::new(tr("Modify Column"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -993,15 +979,15 @@ impl TableStructureView {
                     .num_columns(2)
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("New type");
+                        ui.label(tr("New type"));
                         ui.add(
                             TextEdit::singleline(&mut self.draft_modify_type).desired_width(240.0),
                         );
                         ui.end_row();
-                        ui.label("Nullable");
+                        ui.label(tr("Nullable"));
                         ui.checkbox(&mut self.draft_modify_nullable, "");
                         ui.end_row();
-                        ui.label("Default (raw SQL, optional)");
+                        ui.label(tr("Default (raw SQL, optional)"));
                         ui.add(
                             TextEdit::singleline(&mut self.draft_modify_default)
                                 .desired_width(240.0),
@@ -1019,10 +1005,10 @@ impl TableStructureView {
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button("Apply").clicked() {
+                    if ui.button(tr("Apply")).clicked() {
                         confirm = true;
                     }
                 });
@@ -1065,21 +1051,21 @@ impl TableStructureView {
         let mut open = true;
         let mut confirm = false;
         let mut cancel = false;
-        Window::new("Confirm Drop Index")
+        Window::new(tr("Confirm Drop Index"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ui.ctx(), |ui| {
-                ui.label(RichText::new("Drop index?").strong());
+                ui.label(RichText::new(tr("Drop index?")).strong());
                 ui.add_space(8.0);
                 ui.label(format!("Table: {}", self.table_name()));
                 ui.label(format!("Index: {}", index_name));
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button("Drop Index").clicked() {
+                    if ui.button(tr("Drop Index")).clicked() {
                         confirm = true;
                     }
                 });
@@ -1124,7 +1110,7 @@ impl TableStructureView {
         let mut confirm = false;
         let mut cancel = false;
 
-        Window::new("Add Foreign Key")
+        Window::new(tr("Add Foreign Key"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1135,15 +1121,15 @@ impl TableStructureView {
                     .num_columns(2)
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Constraint name");
+                        ui.label(tr("Constraint name"));
                         ui.add(TextEdit::singleline(&mut self.draft_fk_name).desired_width(240.0));
                         ui.end_row();
-                        ui.label("Referenced table");
+                        ui.label(tr("Referenced table"));
                         ui.add(
                             TextEdit::singleline(&mut self.draft_fk_ref_table).desired_width(240.0),
                         );
                         ui.end_row();
-                        ui.label("ON UPDATE");
+                        ui.label(tr("ON UPDATE"));
                         ComboBox::from_id_source("fk_on_update")
                             .selected_text(
                                 if self.draft_fk_on_update.is_empty() {
@@ -1171,7 +1157,7 @@ impl TableStructureView {
                                 }
                             });
                         ui.end_row();
-                        ui.label("ON DELETE");
+                        ui.label(tr("ON DELETE"));
                         ComboBox::from_id_source("fk_on_delete")
                             .selected_text(
                                 if self.draft_fk_on_delete.is_empty() {
@@ -1202,7 +1188,7 @@ impl TableStructureView {
                     });
 
                 ui.add_space(8.0);
-                ui.label(RichText::new("Local columns").strong());
+                ui.label(RichText::new(tr("Local columns")).strong());
                 ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                     for (index, column) in self.columns.iter().enumerate() {
                         ui.checkbox(&mut self.draft_fk_columns[index], &column.name);
@@ -1210,9 +1196,9 @@ impl TableStructureView {
                 });
 
                 ui.add_space(4.0);
-                ui.label(RichText::new(
+                ui.label(RichText::new(tr(
                     "Referenced columns (comma-separated, one per selected local column)",
-                ));
+                )));
                 let mut ref_cols_text = self.draft_fk_ref_columns.join(", ");
                 ui.add(TextEdit::singleline(&mut ref_cols_text).desired_width(300.0));
                 self.draft_fk_ref_columns = ref_cols_text
@@ -1226,10 +1212,10 @@ impl TableStructureView {
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button("Add Foreign Key").clicked() {
+                    if ui.button(tr("Add Foreign Key")).clicked() {
                         confirm = true;
                     }
                 });
@@ -1303,7 +1289,14 @@ impl TableStructureView {
                     .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Type", "Null", "Default", "Key", "", ""] {
-                            ui.label(RichText::new(*label).strong());
+                            ui.label(
+                                RichText::new(if label.is_empty() {
+                                    String::new()
+                                } else {
+                                    tr(label)
+                                })
+                                .strong(),
+                            );
                         }
                         ui.end_row();
 
@@ -1317,15 +1310,15 @@ impl TableStructureView {
                             ui.label(col.default_value.as_deref().unwrap_or(""));
                             ui.label(if col.primary_key { "PK" } else { "" });
                             if ui
-                                .small_button("Edit")
-                                .on_hover_text("Modify column")
+                                .small_button(tr("Edit"))
+                                .on_hover_text(tr("Modify column"))
                                 .clicked()
                             {
                                 modify_requested = Some(col.name.clone());
                             }
                             if ui
-                                .small_button("Delete")
-                                .on_hover_text("Drop column")
+                                .small_button(tr("Delete"))
+                                .on_hover_text(tr("Drop column"))
                                 .clicked()
                             {
                                 drop_requested = Some(col.name.clone());
@@ -1360,7 +1353,14 @@ impl TableStructureView {
                     .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Columns", "Unique", "Primary", ""] {
-                            ui.label(RichText::new(*label).strong());
+                            ui.label(
+                                RichText::new(if label.is_empty() {
+                                    String::new()
+                                } else {
+                                    tr(label)
+                                })
+                                .strong(),
+                            );
                         }
                         ui.end_row();
 
@@ -1373,7 +1373,7 @@ impl TableStructureView {
                             if !idx.primary {
                                 if ui
                                     .small_button("\u{2715}")
-                                    .on_hover_text("Drop index")
+                                    .on_hover_text(tr("Drop index"))
                                     .clicked()
                                 {
                                     drop_requested = Some(idx.name.clone());
@@ -1393,7 +1393,7 @@ impl TableStructureView {
     /// Renders the foreign keys section as a table.
     fn foreign_keys_table(&self, ui: &mut Ui) {
         if self.foreign_keys.is_empty() {
-            empty_message(ui, "No foreign keys");
+            empty_message(ui, &tr("No foreign keys"));
             return;
         }
 
@@ -1413,7 +1413,7 @@ impl TableStructureView {
                             "On Update",
                             "On Delete",
                         ] {
-                            ui.label(RichText::new(*label).strong());
+                            ui.label(RichText::new(tr(label)).strong());
                         }
                         ui.end_row();
 
@@ -1446,7 +1446,7 @@ impl TableStructureView {
                     .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Event", "Timing", "Statement"] {
-                            ui.label(RichText::new(*label).strong());
+                            ui.label(RichText::new(tr(label)).strong());
                         }
                         ui.end_row();
 
@@ -1483,7 +1483,7 @@ impl TableStructureView {
                     .spacing([8.0, 0.0])
                     .show(ui, |ui| {
                         for label in &["Name", "Return Type", "Kind"] {
-                            ui.label(RichText::new(*label).strong());
+                            ui.label(RichText::new(tr(label)).strong());
                         }
                         ui.end_row();
 

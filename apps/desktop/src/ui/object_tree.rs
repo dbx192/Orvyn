@@ -1,6 +1,7 @@
 #![allow(clippy::if_same_then_else)]
 #![allow(clippy::collapsible_if)]
 
+use crate::ui::i18n::text as tr;
 use app_core::{metadata::MetadataService, query::QueryService, session::SessionManager};
 use db_common::{
     AppError, ConnectionId, ConnectionStatus, FavoriteQuery, MetadataNode, MetadataNodeKind,
@@ -265,7 +266,6 @@ impl ObjectTree {
         ui.spacing_mut().item_spacing.y = 4.0;
         let mut message = None;
         let mut actions = Vec::new();
-        self.connection_transfer_bar(ui, &mut message, &mut actions);
         self.search_bar(ui);
 
         let tree_width = ui.available_width();
@@ -282,51 +282,44 @@ impl ObjectTree {
         (message, actions)
     }
 
-    fn connection_transfer_bar(
-        &mut self,
-        ui: &mut Ui,
-        message: &mut Option<String>,
-        actions: &mut Vec<ObjectTreeAction>,
-    ) {
-        ui.horizontal(|ui| {
-            if ui.button("Import...").clicked() {
-                actions.push(ObjectTreeAction::ImportConnections);
-                *message = Some("Choose a connection backup to import".to_string());
-            }
+    pub fn connection_transfer_menu(&mut self, ui: &mut Ui, actions: &mut Vec<ObjectTreeAction>) {
+        if ui.button(format!("{}...", tr("Import"))).clicked() {
+            actions.push(ObjectTreeAction::ImportConnections);
+            ui.close_menu();
+        }
 
-            let selected_count = self.selected_connections.len();
-            ui.menu_button("Export", |ui| {
-                ui.checkbox(
-                    &mut self.export_include_passwords,
-                    "Include saved passwords",
+        let selected_count = self.selected_connections.len();
+        ui.menu_button(tr("Export"), |ui| {
+            ui.checkbox(
+                &mut self.export_include_passwords,
+                tr("Include saved passwords"),
+            )
+            .on_hover_text(tr("Passwords are written as plain text in the backup file"));
+            ui.separator();
+            if ui.button(tr("Export All...")).clicked() {
+                actions.push(ObjectTreeAction::ExportConnections {
+                    connection_ids: None,
+                    include_passwords: self.export_include_passwords,
+                });
+                ui.close_menu();
+            }
+            if ui
+                .add_enabled(
+                    selected_count > 0,
+                    Button::new(crate::ui::i18n::format(
+                        "Export Selected ({count})...",
+                        &[("count", selected_count.to_string())],
+                    )),
                 )
-                .on_hover_text("Passwords are written as plain text in the backup file");
-                ui.separator();
-                if ui.button("Export All...").clicked() {
-                    actions.push(ObjectTreeAction::ExportConnections {
-                        connection_ids: None,
-                        include_passwords: self.export_include_passwords,
-                    });
-                    *message = Some("Export all connections".to_string());
-                    ui.close_menu();
-                }
-                if ui
-                    .add_enabled(
-                        selected_count > 0,
-                        Button::new(format!("Export Selected ({selected_count})...")),
-                    )
-                    .clicked()
-                {
-                    actions.push(ObjectTreeAction::ExportConnections {
-                        connection_ids: Some(self.selected_connections.iter().copied().collect()),
-                        include_passwords: self.export_include_passwords,
-                    });
-                    *message = Some(format!("Export {selected_count} selected connections"));
-                    ui.close_menu();
-                }
-            });
+                .clicked()
+            {
+                actions.push(ObjectTreeAction::ExportConnections {
+                    connection_ids: Some(self.selected_connections.iter().copied().collect()),
+                    include_passwords: self.export_include_passwords,
+                });
+                ui.close_menu();
+            }
         });
-        ui.separator();
     }
 
     pub fn reload_root(&mut self) {
@@ -365,8 +358,9 @@ impl ObjectTree {
             let edit_width = (ui.available_width() - clear_width).max(80.0);
             let response = ui.add_sized(
                 [edit_width, 22.0],
-                TextEdit::singleline(&mut self.search_query)
-                    .hint_text(format!("搜索库、表、查询 (至少 {SEARCH_MIN_CHARS} 字符)")),
+                TextEdit::singleline(&mut self.search_query).hint_text(tr(
+                    "Search databases, tables, queries (at least 2 characters)",
+                )),
             );
             let _ = response.changed();
             if ui
@@ -452,7 +446,7 @@ impl ObjectTree {
                 selected: is_selected,
                 matched,
                 strong: true,
-                connection_status: Some((status_color, status_label)),
+                connection_status: Some((status_color, &status_label)),
             },
         );
 
@@ -699,22 +693,22 @@ impl ObjectTree {
 
         match status {
             ConnectionStatus::NotConnected | ConnectionStatus::Disconnected => {
-                if ui.button("Connect").clicked() {
+                if ui.button(tr("Connect")).clicked() {
                     self.connect(connection_id);
                     *message = Some("Connecting...".to_string());
                     ui.close_menu();
                 }
             }
             ConnectionStatus::Connecting => {
-                ui.add_enabled(false, Button::new("Connecting..."));
+                ui.add_enabled(false, Button::new(tr("Connecting...")));
             }
             ConnectionStatus::Connected => {
-                if ui.button("Disconnect").clicked() {
+                if ui.button(tr("Disconnect")).clicked() {
                     self.disconnect(connection_id);
                     *message = Some("Disconnected".to_string());
                     ui.close_menu();
                 }
-                if ui.button("New Query").clicked() {
+                if ui.button(tr("New Query")).clicked() {
                     let node = self.connection_node(connection_id);
                     if let Some(node) = node {
                         actions.push(ObjectTreeAction::OpenQuery {
@@ -739,13 +733,13 @@ impl ObjectTree {
 
         ui.separator();
         ui.add_enabled_ui(!matches!(status, ConnectionStatus::Connecting), |ui| {
-            if ui.button("Import Table...").clicked() {
+            if ui.button(tr("Import Table...")).clicked() {
                 actions.push(ObjectTreeAction::ImportTable { connection_id });
                 *message = Some("Opening table import".to_string());
                 ui.close_menu();
             }
-            ui.menu_button("Export Database", |ui| {
-                if ui.button("Structure Only...").clicked() {
+            ui.menu_button(tr("Export Database"), |ui| {
+                if ui.button(tr("Structure Only...")).clicked() {
                     actions.push(ObjectTreeAction::ExportDatabase {
                         connection_id,
                         database: None,
@@ -754,7 +748,7 @@ impl ObjectTree {
                     *message = Some("Export database structure".to_string());
                     ui.close_menu();
                 }
-                if ui.button("Structure and Data...").clicked() {
+                if ui.button(tr("Structure and Data...")).clicked() {
                     actions.push(ObjectTreeAction::ExportDatabase {
                         connection_id,
                         database: None,
@@ -767,16 +761,16 @@ impl ObjectTree {
         });
 
         ui.separator();
-        if ui.button("Refresh").clicked() {
+        if ui.button(tr("Refresh")).clicked() {
             self.refresh_connection(connection_id);
             *message = Some("Refreshing...".to_string());
             ui.close_menu();
         }
-        if ui.button("Edit Connection...").clicked() {
+        if ui.button(tr("Edit Connection...")).clicked() {
             actions.push(ObjectTreeAction::EditConnection(connection_id));
             ui.close_menu();
         }
-        if ui.button("Delete Connection").clicked() {
+        if ui.button(tr("Delete Connection")).clicked() {
             actions.push(ObjectTreeAction::DeleteConnection(connection_id));
             ui.close_menu();
         }
@@ -791,8 +785,8 @@ impl ObjectTree {
     ) {
         match node.kind {
             MetadataNodeKind::Database => {
-                ui.menu_button("Export Database", |ui| {
-                    if ui.button("Structure Only...").clicked() {
+                ui.menu_button(tr("Export Database"), |ui| {
+                    if ui.button(tr("Structure Only...")).clicked() {
                         actions.push(ObjectTreeAction::ExportDatabase {
                             connection_id: node.path.connection_id,
                             database: node.path.database.clone(),
@@ -801,7 +795,7 @@ impl ObjectTree {
                         *message = Some(format!("Export structure: {}", node.label));
                         ui.close_menu();
                     }
-                    if ui.button("Structure and Data...").clicked() {
+                    if ui.button(tr("Structure and Data...")).clicked() {
                         actions.push(ObjectTreeAction::ExportDatabase {
                             connection_id: node.path.connection_id,
                             database: node.path.database.clone(),
@@ -961,23 +955,23 @@ impl ObjectTree {
                     self.redis_pattern.insert(key.clone(), input.clone());
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
+                    if ui.button(tr("Apply")).clicked() {
                         self.apply_redis_pattern(key.clone(), input.clone());
                         ui.close_menu();
                     }
-                    if ui.button("Clear").clicked() {
+                    if ui.button(tr("Clear")).clicked() {
                         self.apply_redis_pattern(key.clone(), String::new());
                         ui.close_menu();
                     }
                 });
                 ui.separator();
-                if ui.button("Refresh").clicked() {
+                if ui.button(tr("Refresh")).clicked() {
                     self.refresh_node(node.clone());
                     ui.close_menu();
                 }
             }
             MetadataNodeKind::RedisDatabase => {
-                if ui.button("Clear Database...").clicked() {
+                if ui.button(tr("Clear Database...")).clicked() {
                     let database = node
                         .path
                         .database
@@ -993,7 +987,7 @@ impl ObjectTree {
                 ui.separator();
             }
             MetadataNodeKind::RedisKey => {
-                if ui.button("View Key").clicked() {
+                if ui.button(tr("View Key")).clicked() {
                     self.emit_key_action(
                         node,
                         |conn_id, db, key| ObjectTreeAction::ViewKey {
@@ -1005,7 +999,7 @@ impl ObjectTree {
                     );
                     ui.close_menu();
                 }
-                if ui.button("Delete Key").clicked() {
+                if ui.button(tr("Delete Key")).clicked() {
                     self.emit_key_action(
                         node,
                         |conn_id, db, key| ObjectTreeAction::DeleteRedisKey {
@@ -1023,20 +1017,20 @@ impl ObjectTree {
         }
 
         if !matches!(node.kind, MetadataNodeKind::RedisKeysFolder) {
-            if ui.button("Refresh").clicked() {
+            if ui.button(tr("Refresh")).clicked() {
                 self.refresh_node(node.clone());
                 ui.close_menu();
             }
         }
 
-        if ui.button("Copy Name").clicked() {
+        if ui.button(tr("Copy Name")).clicked() {
             ui.output_mut(|o| o.copied_text = node.label.clone());
             *message = Some(format!("Copied: {}", node.label));
             ui.close_menu();
         }
 
         if let Some(database) = &node.path.database {
-            if ui.button("Copy Full Path").clicked() {
+            if ui.button(tr("Copy Full Path")).clicked() {
                 let path_text = build_full_path(node);
                 ui.output_mut(|o| o.copied_text = format!("{path_text} ({database})"));
                 *message = Some("Path copied".to_string());
@@ -1740,20 +1734,27 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
     let center_y = rect.center().y;
     let mut x = rect.left() + 5.0 + tree_indent(spec.depth);
 
-    let arrow = if spec.leaf {
-        ""
-    } else if spec.expanded {
-        "▾"
-    } else {
-        "▸"
-    };
-    painter.text(
-        pos2(x + TREE_ARROW_WIDTH * 0.5, center_y),
-        Align2::CENTER_CENTER,
-        arrow,
-        FontId::proportional(12.0),
-        muted_text_color(ui),
-    );
+    if !spec.leaf {
+        let cx = x + TREE_ARROW_WIDTH * 0.5;
+        let points = if spec.expanded {
+            vec![
+                pos2(cx - 4.0, center_y - 2.0),
+                pos2(cx + 4.0, center_y - 2.0),
+                pos2(cx, center_y + 3.0),
+            ]
+        } else {
+            vec![
+                pos2(cx - 2.0, center_y - 4.0),
+                pos2(cx - 2.0, center_y + 4.0),
+                pos2(cx + 3.0, center_y),
+            ]
+        };
+        painter.add(eframe::egui::epaint::Shape::convex_polygon(
+            points,
+            muted_text_color(ui),
+            Stroke::NONE,
+        ));
+    }
     x += TREE_ARROW_WIDTH;
 
     if let Some((status_color, _)) = spec.connection_status {
@@ -2083,14 +2084,14 @@ fn connection_status_color(status: &ConnectionStatus) -> Color32 {
     }
 }
 
-fn connection_status_label(status: &ConnectionStatus) -> &'static str {
-    match status {
+fn connection_status_label(status: &ConnectionStatus) -> String {
+    tr(match status {
         ConnectionStatus::NotConnected => "Not connected",
         ConnectionStatus::Connecting => "Connecting",
         ConnectionStatus::Connected => "Connected",
         ConnectionStatus::Failed => "Connection failed",
         ConnectionStatus::Disconnected => "Disconnected",
-    }
+    })
 }
 
 fn tree_error_text(error: &AppError) -> String {

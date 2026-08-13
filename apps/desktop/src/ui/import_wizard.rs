@@ -2,6 +2,7 @@
 
 //! CSV import wizard: step-by-step guide to import CSV data into a database table.
 
+use crate::ui::i18n::text as tr;
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::dialect::{BacktickDialect, DoubleQuoteDialect};
 use db_common::{
@@ -135,7 +136,7 @@ impl ImportWizard {
         self.poll_pending();
 
         // Header
-        ui.heading(format!("📥 Import CSV → {}", self.table_name()));
+        ui.heading(format!("📥 {} CSV → {}", tr("Import"), self.table_name()));
         ui.add_space(4.0);
 
         // Step indicator
@@ -197,11 +198,11 @@ impl ImportWizard {
     // ── Step 1: File Selection ──
 
     fn step_select_file(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
-        ui.label("Choose a CSV file to import:");
+        ui.label(tr("Choose a CSV file to import:"));
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            if ui.button("📂 Browse...").clicked() {
+            if ui.button(format!("📂 {}", tr("Browse..."))).clicked() {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("CSV Files", &["csv", "tsv", "txt"])
                     .pick_file()
@@ -212,7 +213,7 @@ impl ImportWizard {
             if let Some(ref path) = self.file_path {
                 ui.label(format!("📄 {}", path.display()));
             } else {
-                ui.label(RichText::new("No file selected").color(Color32::GRAY));
+                ui.label(RichText::new(tr("No file selected")).color(Color32::GRAY));
             }
         });
 
@@ -220,7 +221,7 @@ impl ImportWizard {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.csv_options.has_header, "First row is header");
             ui.add_space(16.0);
-            ui.label("Delimiter:");
+            ui.label(tr("Delimiter:"));
             ComboBox::from_id_source("csv_delimiter")
                 .selected_text(match self.csv_options.delimiter {
                     b',' => "Comma (,)",
@@ -318,16 +319,16 @@ impl ImportWizard {
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.button("← Back").clicked() {
+                if ui.button(format!("← {}", tr("Back"))).clicked() {
                     self.step = ImportStep::SelectFile;
                 }
-                if ui.button("Next: Map Fields →").clicked() {
+                if ui.button(format!("{}: Map Fields →", tr("Next"))).clicked() {
                     self.load_table_columns();
                     self.step = ImportStep::FieldMapping;
                 }
             });
         } else {
-            ui.label("Loading preview...");
+            ui.label(tr("Loading preview..."));
         }
     }
 
@@ -386,19 +387,19 @@ impl ImportWizard {
         let preview = match &self.preview {
             Some(p) => p,
             None => {
-                ui.label("No preview available.");
+                ui.label(tr("No preview available."));
                 return;
             }
         };
         let mapping = match &mut self.mapping {
             Some(m) => m,
             None => {
-                ui.label("No mapping available.");
+                ui.label(tr("No mapping available."));
                 return;
             }
         };
 
-        ui.label("Map CSV columns to table columns:");
+        ui.label(tr("Map CSV columns to table columns:"));
         ui.add_space(8.0);
 
         ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
@@ -444,17 +445,20 @@ impl ImportWizard {
 
         // Auto-map hint
         ui.add_space(8.0);
-        if ui.button("🔧 Auto-Map by Name").clicked() {
+        if ui
+            .button(format!("🔧 {}", tr("Auto-Map by Name")))
+            .clicked()
+        {
             self.mapping = Some(auto_map_fields(&preview.headers, &self.table_columns));
             *message = Some("Fields auto-mapped by case-insensitive name matching".to_string());
         }
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.button("← Back").clicked() {
+            if ui.button(format!("← {}", tr("Back"))).clicked() {
                 self.step = ImportStep::Preview;
             }
-            if ui.button("Next: Validate →").clicked() {
+            if ui.button(format!("{}: Validate →", tr("Next"))).clicked() {
                 self.run_validation();
                 self.step = ImportStep::Validate;
             }
@@ -504,7 +508,10 @@ impl ImportWizard {
     fn step_validate(&mut self, ui: &mut Ui, _message: &mut Option<String>) {
         if let Some(ref report) = self.validation_report {
             if report.issues.is_empty() {
-                ui.label(RichText::new("✅ All rows passed validation!").color(Color32::GREEN));
+                ui.label(
+                    RichText::new(format!("✅ {}", tr("All rows passed validation!")))
+                        .color(Color32::GREEN),
+                );
             } else {
                 ui.label(
                     RichText::new(format!(
@@ -539,7 +546,7 @@ impl ImportWizard {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.stop_on_error, "Stop on first error");
                 ui.add_space(16.0);
-                ui.label("Batch size:");
+                ui.label(tr("Batch size:"));
                 ui.add(
                     eframe::egui::DragValue::new(&mut self.batch_size)
                         .speed(100)
@@ -552,7 +559,7 @@ impl ImportWizard {
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.button("← Back").clicked() {
+            if ui.button(format!("← {}", tr("Back"))).clicked() {
                 self.step = ImportStep::FieldMapping;
             }
             if ui
@@ -643,7 +650,7 @@ impl ImportWizard {
 
         if self.import_result.is_some() {
             ui.add_space(12.0);
-            if ui.button("Done").clicked() {
+            if ui.button(tr("Done")).clicked() {
                 // Reset wizard to allow another import
                 self.step = ImportStep::SelectFile;
                 self.file_path = None;
