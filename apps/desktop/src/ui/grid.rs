@@ -3,9 +3,12 @@ use eframe::egui::{
     RichText, Sense, Stroke, TextEdit, TextStyle, Ui, Vec2, WidgetText,
 };
 
-pub const CELL_PADDING_X: f32 = 0.0;
-pub const TABLE_ROW_HEIGHT: f32 = 16.0;
-pub const TABLE_HEADER_HEIGHT: f32 = 18.0;
+// Keep enough room for the 14px body font and a visible breathing space
+// between adjacent rows. These dimensions are shared by the result grid
+// and the table editor, so editing controls remain aligned with the cells.
+pub const CELL_PADDING_X: f32 = 6.0;
+pub const TABLE_ROW_HEIGHT: f32 = 23.0;
+pub const TABLE_HEADER_HEIGHT: f32 = 30.0;
 const TEXT_UNIT_WIDTH: f32 = 7.4;
 
 pub struct GridCellResponse {
@@ -128,6 +131,23 @@ pub fn resizable_header_cell(
     let current_width = *width;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(current_width, height), Sense::click());
     paint_cell_frame(ui, rect, header_fill(ui), grid_stroke(ui));
+    // Keep the sticky header visually in front of the scrolling body. The
+    // stronger lower rule remains visible even when the first row is flush
+    // against the header boundary.
+    ui.painter().line_segment(
+        [
+            pos2(rect.left(), rect.bottom() - 1.0),
+            pos2(rect.right(), rect.bottom() - 1.0),
+        ],
+        Stroke::new(
+            1.5,
+            if ui.visuals().dark_mode {
+                Color32::from_rgb(76, 88, 104)
+            } else {
+                Color32::from_rgb(174, 184, 196)
+            },
+        ),
+    );
     paint_label(ui, rect, height, text);
 
     let handle_rect = Rect::from_min_max(pos2(rect.max.x - 5.0, rect.min.y), rect.max);
@@ -165,7 +185,9 @@ pub fn paint_cell_frame(ui: &Ui, rect: Rect, fill: Color32, stroke: Stroke) {
 }
 
 fn paint_label(ui: &mut Ui, rect: Rect, height: f32, text: RichText) {
-    let inner_rect = rect.shrink2(vec2(CELL_PADDING_X, 0.0));
+    // A small vertical inset prevents glyphs from touching the cell borders
+    // when the row is scrolled or rendered at fractional scale factors.
+    let inner_rect = rect.shrink2(vec2(CELL_PADDING_X, 2.0));
     let galley =
         WidgetText::from(text).into_galley(ui, Some(false), inner_rect.width(), TextStyle::Body);
     let text_pos = pos2(
