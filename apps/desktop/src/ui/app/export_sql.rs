@@ -315,7 +315,7 @@ pub(super) fn build_create_index_sql(
 
 pub(super) fn dialect_for_kind(kind: DataSourceKind) -> Box<dyn Dialect> {
     match kind {
-        DataSourceKind::MySql => Box::new(BacktickDialect),
+        DataSourceKind::MySql | DataSourceKind::Doris => Box::new(BacktickDialect),
         _ => Box::new(DoubleQuoteDialect),
     }
 }

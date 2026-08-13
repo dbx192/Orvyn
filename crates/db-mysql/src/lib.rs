@@ -710,17 +710,24 @@ async fn execute_mysql_statements_on_connection(
         let statement = statement.as_str();
 
         if is_result_set_statement(statement) {
-            let rows = sqlx::query(statement)
+            // The Doris MySQL endpoint does not implement COM_STMT_PREPARE.
+            // User SQL in this path is already split into complete statements
+            // and contains no bound parameters, so use the text protocol.
+            let statement = statement.to_owned();
+            let rows = sqlx::query(&statement)
+                .persistent(false)
                 .fetch_all(&mut *conn)
                 .await
                 .map_err(mysql_query_error)?;
             results.push(
-                mysql_rows_to_query_result(statement, rows).with_elapsed(started_at.elapsed()),
+                mysql_rows_to_query_result(&statement, rows).with_elapsed(started_at.elapsed()),
             );
             continue;
         }
 
-        let done = sqlx::query(statement)
+        let statement = statement.to_owned();
+        let done = sqlx::query(&statement)
+            .persistent(false)
             .execute(&mut *conn)
             .await
             .map_err(mysql_query_error)?;

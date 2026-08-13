@@ -5,9 +5,6 @@ pub fn install_global_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
     let mut installed = 0;
 
-    // Bundle the small UI/editor fonts so the application looks consistent on
-    // machines without the same system font set. Keep one CJK fallback; the
-    // 16 MB bold face is intentionally omitted and egui synthesizes emphasis.
     fonts.font_data.insert(
         "orvyn-inter".to_string(),
         FontData::from_static(include_bytes!("../../fonts/Inter-Regular.ttf")),
