@@ -1222,9 +1222,15 @@ impl TableEditor {
         let database = self.database.clone();
         let schema = self.schema.clone();
         let table = self.table.clone();
+        let previous_total_rows = self
+            .result
+            .metadata
+            .get(QUERY_RESULT_METADATA_TOTAL_ROWS)
+            .cloned();
         let sql = self
             .ordered_table_query()
-            .unwrap_or_else(|_| format!("SELECT * FROM {table}"));
+            .map(|query| format!("{query} LIMIT {DEFAULT_PAGE_SIZE}"))
+            .unwrap_or_else(|_| format!("SELECT * FROM {table} LIMIT {DEFAULT_PAGE_SIZE}"));
 
         let cell = Arc::new(Mutex::new(None::<Result<(Vec<TableColumn>, QueryResult)>>));
         let cell_for_task = cell.clone();
@@ -1248,21 +1254,37 @@ impl TableEditor {
                     cursor_offset: 0,
                     selection: None,
                     timeout_ms: 30_000,
-                    result_limit: Some(DEFAULT_PAGE_SIZE as u32),
+                    // The SQL already contains a bounded LIMIT. Passing no
+                    // result_limit avoids QueryService's expensive automatic
+                    // COUNT(*) planning for the first page of huge tables.
+                    result_limit: None,
                     result_offset: 0,
                     result_total_rows: None,
                 },
                 None,
             );
             let result = match tokio::join!(columns_future, query_future) {
-                (Ok(cols), Ok(report)) => Ok((
-                    cols,
-                    report
+                (Ok(cols), Ok(report)) => {
+                    let mut query_result = report
                         .results
                         .into_iter()
                         .next()
-                        .unwrap_or(QueryResult::empty("")),
-                )),
+                        .unwrap_or(QueryResult::empty(""));
+                    query_result.metadata.insert(
+                        QUERY_RESULT_METADATA_PAGE_LIMIT.to_string(),
+                        DEFAULT_PAGE_SIZE.to_string(),
+                    );
+                    query_result.metadata.insert(
+                        QUERY_RESULT_METADATA_PAGE_OFFSET.to_string(),
+                        "0".to_string(),
+                    );
+                    if let Some(total_rows) = previous_total_rows.clone() {
+                        query_result
+                            .metadata
+                            .insert(QUERY_RESULT_METADATA_TOTAL_ROWS.to_string(), total_rows);
+                    }
+                    Ok((cols, query_result))
+                }
                 (Err(error), _) => Err(error),
                 (_, Err(error)) => Err(error),
             };

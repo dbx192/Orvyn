@@ -57,8 +57,8 @@ pub(super) fn apply_app_style(ctx: &Context, theme: AppTheme) {
         FontId::new(14.0, FontFamily::Name("orvyn-mono".into())),
     );
     style.spacing.item_spacing = vec2(8.0, 6.0);
-    style.spacing.button_padding = vec2(8.0, 3.0);
-    style.spacing.interact_size = vec2(44.0, 24.0);
+    style.spacing.button_padding = vec2(10.0, 5.0);
+    style.spacing.interact_size = vec2(44.0, 28.0);
     style.spacing.window_margin = Margin::symmetric(10.0, 8.0);
     ctx.set_style(style);
 }
