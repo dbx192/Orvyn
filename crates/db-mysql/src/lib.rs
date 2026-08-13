@@ -1,5 +1,7 @@
 //! MySQL adapter crate.
 
+mod doris;
+
 use async_trait::async_trait;
 use db_common::{
     is_result_set_statement, redact_connection_url, AppError, CellValue, Column, ConnectionId,
@@ -581,6 +583,9 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         pool_config: ConnectionPoolConfig,
     ) -> Result<Vec<QueryResult>> {
         let pool = self.pool_for(profile, password, pool_config).await?;
+        if profile.kind == DataSourceKind::Doris {
+            return doris::execute(pool, statements.to_vec()).await;
+        }
         let mut conn = pool.acquire().await.map_err(mysql_query_error)?;
         execute_mysql_statements_on_connection(&mut conn, statements).await
     }
@@ -965,6 +970,25 @@ fn mysql_cell_value(row: &sqlx::mysql::MySqlRow, index: usize) -> CellValue {
                 .unwrap_or(CellValue::Null);
         }
     }
+    // Doris types such as LARGEINT, DECIMALV3, JSONB, ARRAY and MAP can be
+    // reported with MySQL-compatible text metadata but are not supported by
+    // SQLx's typed decoders. Decode their wire value as text/bytes instead of
+    // failing the whole table result.
+    if type_name.contains("largeint")
+        || type_name.contains("json")
+        || type_name.contains("array")
+        || type_name.contains("map")
+        || type_name.contains("struct")
+    {
+        if let Ok(value) = row.try_get::<Option<Vec<u8>>, _>(index) {
+            return value
+                .map(|bytes| CellValue::Text(String::from_utf8_lossy(&bytes).into_owned()))
+                .unwrap_or(CellValue::Null);
+        }
+        if let Ok(value) = row.try_get::<Option<String>, _>(index) {
+            return value.map(CellValue::Text).unwrap_or(CellValue::Null);
+        }
+    }
     if let Ok(value) = row.try_get::<Option<String>, _>(index) {
         return value.map(CellValue::Text).unwrap_or(CellValue::Null);
     }
@@ -1012,7 +1036,11 @@ fn mysql_logical_type(type_name: &str) -> LogicalType {
         LogicalType::Time
     } else if type_name.contains("datetime") || type_name.contains("timestamp") {
         LogicalType::DateTime
-    } else if type_name == "json" {
+    } else if type_name.contains("json")
+        || type_name.contains("array")
+        || type_name.contains("map")
+        || type_name.contains("struct")
+    {
         LogicalType::Json
     } else if type_name.contains("blob")
         || type_name.contains("binary")

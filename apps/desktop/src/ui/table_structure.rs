@@ -1304,8 +1304,7 @@ impl TableStructureView {
                         let mut modify_requested = None;
                         for col in &self.columns {
                             ui.label(&col.name);
-                            ui.label(type_without_field_width(&col.database_type))
-                                .on_hover_text(&col.database_type);
+                            ui.label(type_without_field_width(&col.database_type));
                             ui.label(if col.nullable { "YES" } else { "NO" });
                             ui.label(col.default_value.as_deref().unwrap_or(""));
                             ui.label(if col.primary_key { "PK" } else { "" });

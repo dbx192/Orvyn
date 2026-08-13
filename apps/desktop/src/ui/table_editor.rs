@@ -1328,12 +1328,16 @@ impl TableEditor {
         };
         let offset = (next_page as u64).saturating_mul(u64::from(page_size));
         let total_rows = self.remote_total_rows();
-        let keyset_page = (!matches!(self.data_source_kind, Some(DataSourceKind::DuckDb)))
+        let direct_offset_paging = matches!(
+            self.data_source_kind,
+            Some(DataSourceKind::DuckDb | DataSourceKind::Doris)
+        );
+        let keyset_page = (!direct_offset_paging)
             .then(|| self.keyset_page_query(next_page, page_size))
             .flatten();
         let (sql, reverse_rows, uses_keyset) = match keyset_page {
             Some((sql, reverse_rows)) => (sql, reverse_rows, true),
-            None if matches!(self.data_source_kind, Some(DataSourceKind::DuckDb)) => (
+            None if direct_offset_paging => (
                 format!(
                     "{} LIMIT {page_size} OFFSET {offset}",
                     self.ordered_table_query()

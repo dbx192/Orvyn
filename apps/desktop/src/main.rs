@@ -17,14 +17,37 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::runtime::Runtime;
 use ui::app::DesktopApp;
 
-fn main() -> eframe::Result<()> {
-    tracing::info!("desktop application bootstrap");
+fn init_logging(config_dir: &std::path::Path) -> tracing_appender::non_blocking::WorkerGuard {
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info,sqlx=warn".to_string());
+    let file_appender = tracing_appender::rolling::never(config_dir, "orvyn.log");
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    tracing_subscriber::registry()
+        .with_env_filter(filter)
+        .with(tracing_subscriber::fmt::layer().with_ansi(true))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer),
+        )
+        .init();
+    guard
+}
 
+fn main() -> eframe::Result<()> {
     let app_name = app_core::app_name();
+    let config_dir = config::data_dir();
+    if let Err(error) = std::fs::create_dir_all(&config_dir) {
+        eprintln!(
+            "failed to create log directory {}: {error}",
+            config_dir.display()
+        );
+    }
+    let _log_guard = init_logging(&config_dir);
+    tracing::info!(log_file = %config_dir.join("orvyn.log").display(), "desktop application bootstrap");
     let runtime = Arc::new(
         Runtime::new().expect("failed to create background async runtime for desktop app"),
     );
-    let config_dir = config::data_dir();
     ui::i18n::initialize(&config_dir);
     let connection_manager = bootstrap_connection_manager(config_dir.clone());
     let session_manager = SessionManager::with_default_testers(connection_manager.clone());

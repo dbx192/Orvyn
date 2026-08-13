@@ -1897,9 +1897,7 @@ fn paint_table_icon(painter: &eframe::egui::Painter, rect: Rect, color: Color32)
 
 fn tree_message_row(ui: &mut Ui, depth: usize, text: &str, error: bool) {
     let width = ui.available_width().max(1.0);
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(width, TREE_ROW_HEIGHT), Sense::hover());
-    response.on_hover_text(text);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, TREE_ROW_HEIGHT), Sense::hover());
     draw_tree_guides(ui, rect, depth);
     let color = if error {
         ui.visuals().error_fg_color

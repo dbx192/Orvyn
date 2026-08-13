@@ -123,7 +123,7 @@ pub fn resizable_header_cell(
     width: &mut f32,
     height: f32,
     text: RichText,
-    hover_text: String,
+    _hover_text: String,
     id: Id,
     min_width: f32,
     max_width: f32,
@@ -166,8 +166,6 @@ pub fn resizable_header_cell(
         let delta = ui.input(|input| input.pointer.delta().x);
         *width = (*width + delta).clamp(min_width, max_width);
     }
-
-    let response = response.on_hover_text(hover_text);
 
     GridHeaderResponse {
         response,

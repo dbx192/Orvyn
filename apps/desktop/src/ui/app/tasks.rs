@@ -417,7 +417,7 @@ impl DesktopApp {
         let tbl = table.clone();
 
         runtime.spawn(async move {
-            let result = async {
+            let result: Result<TableDataPayload, AppError> = async {
                 let profile = connection_manager
                     .get_profile(connection_id)
                     .await?
@@ -431,12 +431,14 @@ impl DesktopApp {
                     sch.as_deref(),
                     &tbl,
                 )?;
+                tracing::info!(connection_id = %connection_id, database = ?db, schema = ?sch, table = %tbl, sql = %qualified, "loading table data");
 
                 let columns = metadata_service
                     .table_columns(connection_id, db.as_deref(), sch.as_deref(), &tbl, None)
                     .await?;
                 let base_sql = ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
-                let sql = if kind == DataSourceKind::DuckDb {
+                let uses_direct_paging = matches!(kind, DataSourceKind::DuckDb | DataSourceKind::Doris);
+                let sql = if uses_direct_paging {
                     format!("{base_sql} LIMIT 100 OFFSET 0")
                 } else {
                     base_sql
@@ -453,7 +455,7 @@ impl DesktopApp {
                             cursor_offset: 0,
                             selection: None,
                             timeout_ms: 30_000,
-                            result_limit: (kind != DataSourceKind::DuckDb).then_some(100),
+                            result_limit: (!uses_direct_paging).then_some(100),
                             result_offset: 0,
                             result_total_rows: None,
                         },
@@ -473,10 +475,10 @@ impl DesktopApp {
                         notices: Vec::new(),
                         metadata: Default::default(),
                     });
-                // DuckDB's table viewer uses explicit paging instead of the
+                // DuckDB and Doris use explicit paging instead of the
                 // generic SELECT wrapper. This guarantees consistent metadata
                 // for the UI and avoids planner-dependent wrapper behavior.
-                if kind == DataSourceKind::DuckDb {
+                if uses_direct_paging {
                     let count_report = query_service
                         .execute(
                             QueryExecutionRequest {
@@ -508,7 +510,7 @@ impl DesktopApp {
                             | db_common::CellValue::Decimal(value) => value.parse().ok(),
                             _ => None,
                         })
-                        .ok_or_else(|| AppError::internal("DuckDB table row count was invalid"))?;
+                        .ok_or_else(|| AppError::internal("table row count was invalid"))?;
                     data.metadata.insert(
                         QUERY_RESULT_METADATA_PAGE_LIMIT.to_string(),
                         "100".to_string(),
@@ -535,6 +537,9 @@ impl DesktopApp {
             }
             .await;
 
+            if let Err(error) = &result {
+                tracing::error!(connection_id = %connection_id, table = %table, message = %error.message, detail = ?error.detail, "table data load failed");
+            }
             *cell.lock().unwrap() = Some(result);
         });
     }

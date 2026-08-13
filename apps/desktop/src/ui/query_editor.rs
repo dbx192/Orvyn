@@ -206,7 +206,7 @@ impl QueryEditor {
             pending_danger_confirm: None,
             side_tab: QuerySideTab::History,
             side_panel_open: false,
-            side_panel_width: 280.0,
+            side_panel_width: 360.0,
             favorite_name_input: String::new(),
             status: String::new(),
         };
@@ -901,6 +901,9 @@ impl QueryEditor {
                     });
             });
 
+            ui.separator();
+            self.results_panel(ui, tab_id);
+
             if self.side_panel_open {
                 let (divider_rect, divider_response) = ui.allocate_exact_size(
                     vec2(8.0, ui.available_height()),
@@ -909,7 +912,7 @@ impl QueryEditor {
                 if divider_response.dragged() {
                     self.side_panel_width = (self.side_panel_width
                         - divider_response.drag_delta().x)
-                        .clamp(200.0, 520.0);
+                        .clamp(280.0, 640.0);
                     ui.ctx().request_repaint();
                 }
                 ui.painter().line_segment(
@@ -923,8 +926,6 @@ impl QueryEditor {
             }
         });
 
-        ui.separator();
-        self.results_panel(ui, tab_id);
         for table in column_loads {
             self.load_columns_for_tab(tab_id, table);
         }
@@ -1881,7 +1882,7 @@ impl QueryEditor {
         });
         ScrollArea::vertical()
             .id_source("query_history_panel")
-            .max_height(260.0)
+            .max_height(ui.available_height())
             .show(ui, |ui| {
                 if self.history_entries.is_empty() {
                     ui.label(
