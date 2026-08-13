@@ -126,6 +126,7 @@ pub enum ObjectTreeAction {
         connection_id: ConnectionId,
         database: Option<String>,
         schema: Option<String>,
+        table: Option<String>,
     },
     OpenSavedQuery {
         connection_id: ConnectionId,
@@ -720,6 +721,7 @@ impl ObjectTree {
                             connection_id,
                             database: node.path.database.clone(),
                             schema: node.path.schema.clone(),
+                            table: None,
                         });
                     }
                     *message = Some("Opening new query tab".to_string());
@@ -854,10 +856,11 @@ impl ObjectTree {
                 if ui.button("New Query on Table").clicked() {
                     self.emit_table_action(
                         node,
-                        |conn_id, db, schema, _table| ObjectTreeAction::OpenQuery {
+                        |conn_id, db, schema, table| ObjectTreeAction::OpenQuery {
                             connection_id: conn_id,
                             database: db,
                             schema,
+                            table: Some(table),
                         },
                         actions,
                     );

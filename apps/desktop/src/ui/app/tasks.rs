@@ -72,6 +72,9 @@ impl DesktopApp {
                             ));
                             self.table_structures.insert(editor_id, structure);
                             self.table_editors.insert(editor_id, editor);
+                            if !self.table_tab_order.contains(&editor_id) {
+                                self.table_tab_order.push(editor_id);
+                            }
                             self.active_table_editor = Some(editor_id);
                             self.active_structure = Some(editor_id);
                             self.state.set_status(format!(
@@ -270,8 +273,11 @@ impl DesktopApp {
                                 .retain(|id, _| !closed_editor_ids.contains(id));
                             self.table_structures
                                 .retain(|id, _| !closed_editor_ids.contains(id));
+                            self.table_tab_order
+                                .retain(|id| !closed_editor_ids.contains(id));
                             if self.table_editors.is_empty() {
                                 self.table_structures.clear();
+                                self.table_tab_order.clear();
                                 self.active_structure = None;
                                 self.active_panel = ActivePanel::QueryEditor;
                                 self.active_table_editor = None;

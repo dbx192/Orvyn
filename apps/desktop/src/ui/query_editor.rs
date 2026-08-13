@@ -261,25 +261,6 @@ impl QueryEditor {
     }
 
     pub fn new_query(&mut self) {
-        if let Some(tab_id) = self.active_tab {
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                // The editor is a single workspace.  Starting a new query
-                // clears the SQL while keeping the connection/database
-                // selected in the toolbar.
-                tab.sql.clear();
-                tab.cursor_offset = 0;
-                tab.selection = None;
-                tab.dirty = false;
-                tab.results.clear();
-                tab.execution_report = None;
-                tab.execution_error = None;
-                tab.highlighted_sql.clear();
-                tab.completion = CompletionState::default();
-                self.status = "New query".to_string();
-            }
-            return;
-        }
-
         let Some(profile) = self
             .connections
             .iter()
@@ -315,6 +296,7 @@ impl QueryEditor {
         connection_id: ConnectionId,
         database: Option<String>,
         schema: Option<String>,
+        table: Option<String>,
     ) {
         let profile = self
             .connections
@@ -327,6 +309,21 @@ impl QueryEditor {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 tab.database = database.or(profile.database.clone());
                 tab.schema = schema;
+                if let Some(table) = table {
+                    tab.title = table.clone();
+                    tab.sql = format!(
+                        "SELECT * FROM {};",
+                        qualified_query_table(
+                            profile.kind,
+                            tab.database.as_deref(),
+                            tab.schema.as_deref(),
+                            &table,
+                        )
+                    );
+                    tab.cursor_offset = tab.sql.len();
+                    tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                    tab.dirty = false;
+                }
             }
             self.refresh_metadata_for_tab(tab_id);
         } else {
@@ -341,7 +338,7 @@ impl QueryEditor {
         schema: Option<String>,
     ) {
         if self.tabs.is_empty() {
-            self.new_query_with_connection(connection_id, database, schema);
+            self.new_query_with_connection(connection_id, database, schema, None);
             return;
         }
 
@@ -426,35 +423,6 @@ impl QueryEditor {
     }
 
     fn open_new_tab(&mut self, profile: ConnectionProfile) -> QueryId {
-        // There is intentionally only one visible SQL workspace. Reuse the
-        // existing query instead of creating another hidden tab whose
-        // connection can become stale when the tree selection changes.
-        if let Some(tab_id) = self.active_tab {
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.connection_id = profile.id;
-                tab.title = "SQL".to_string();
-                tab.database = profile.database.clone();
-                tab.schema = None;
-                tab.sql.clear();
-                tab.cursor_offset = 0;
-                tab.selection = None;
-                tab.dirty = false;
-                tab.available_databases.clear();
-                tab.available_schemas.clear();
-                tab.available_tables.clear();
-                tab.columns_by_table.clear();
-                tab.pending_column_loads.clear();
-                tab.results.clear();
-                tab.execution_report = None;
-                tab.execution_error = None;
-                tab.highlighted_sql.clear();
-                tab.completion = CompletionState::default();
-                self.refresh_metadata_for_tab(tab_id);
-                self.status = "Query workspace reset".to_string();
-                return tab_id;
-            }
-        }
-
         let tab = QueryEditorTab::new(&profile);
         let tab_id = tab.id;
         self.tabs.insert(tab_id, tab);
@@ -462,6 +430,67 @@ impl QueryEditor {
         self.refresh_metadata_for_tab(tab_id);
         self.status = "SQL workspace ready".to_string();
         tab_id
+    }
+
+    fn close_tab(&mut self, tab_id: QueryId) {
+        let Some(tab) = self.tabs.remove(&tab_id) else {
+            return;
+        };
+        if self.active_tab == Some(tab_id) {
+            self.active_tab = self.tabs.keys().next_back().copied();
+        }
+        self.status = if tab.dirty {
+            "Query tab closed; unsaved SQL was discarded".to_string()
+        } else {
+            "Query tab closed".to_string()
+        };
+    }
+
+    fn close_all_tabs(&mut self) {
+        self.tabs.clear();
+        self.active_tab = None;
+        self.status = "All query tabs closed".to_string();
+    }
+
+    fn close_other_tabs(&mut self, keep: QueryId) {
+        self.tabs.retain(|id, _| *id == keep);
+        self.active_tab = Some(keep);
+        self.status = "Other query tabs closed".to_string();
+    }
+
+    fn tab_bar(&mut self, ui: &mut Ui) {
+        let ids: Vec<QueryId> = self.tabs.keys().copied().collect();
+        ui.horizontal_wrapped(|ui| {
+            for id in ids {
+                let Some(title) = self.tabs.get(&id).map(|tab| {
+                    if tab.dirty {
+                        format!("* {}", tab.title)
+                    } else {
+                        tab.title.clone()
+                    }
+                }) else {
+                    continue;
+                };
+                let response = ui.selectable_label(self.active_tab == Some(id), title);
+                if response.clicked() {
+                    self.active_tab = Some(id);
+                }
+                response.context_menu(|ui| {
+                    if ui.button("关闭").clicked() {
+                        self.close_tab(id);
+                        ui.close_menu();
+                    }
+                    if ui.button("关闭其他").clicked() {
+                        self.close_other_tabs(id);
+                        ui.close_menu();
+                    }
+                    if ui.button("关闭全部").clicked() {
+                        self.close_all_tabs();
+                        ui.close_menu();
+                    }
+                });
+            }
+        });
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
@@ -732,6 +761,8 @@ impl QueryEditor {
         };
 
         self.refresh_deferred_highlight(tab_id);
+        self.tab_bar(ui);
+        ui.separator();
         let editor_height = (ui.available_height() * 0.42).max(180.0);
         let side_width = 280.0;
         let connections_snapshot = self.connections.clone();
@@ -782,6 +813,16 @@ impl QueryEditor {
                             .max_height((editor_height - 32.0).max(120.0))
                             .show(ui, |ui| {
                                 let tokens = tab.highlighted_sql.clone();
+                                let tab_pressed = ui.input_mut(|input| {
+                                    if tab.completion.visible
+                                        && !tab.completion.items.is_empty()
+                                        && input.key_pressed(Key::Tab)
+                                    {
+                                        input.consume_key(eframe::egui::Modifiers::NONE, Key::Tab)
+                                    } else {
+                                        false
+                                    }
+                                });
                                 let dialect =
                                     connection_kind_for(&connections_snapshot, tab.connection_id);
                                 let mut layouter =
@@ -794,7 +835,7 @@ impl QueryEditor {
                                         ui.fonts(|fonts| fonts.layout_job(job))
                                     };
 
-                                let output = TextEdit::multiline(&mut tab.sql)
+                                let mut output = TextEdit::multiline(&mut tab.sql)
                                     .font(FontId::monospace(14.0))
                                     .desired_width(f32::INFINITY)
                                     .desired_rows(16)
@@ -840,8 +881,15 @@ impl QueryEditor {
                                     tab.completion.visible = false;
                                 }
 
-                                if let Some(inserted) = completion_panel(ui, tab) {
+                                if let Some(inserted) = completion_panel(ui, tab, tab_pressed) {
                                     tab.sql = inserted;
+                                    let char_cursor = tab.sql[..tab.cursor_offset].chars().count();
+                                    output.state.cursor.set_char_range(Some(
+                                        eframe::egui::text::CCursorRange::one(
+                                            eframe::egui::text::CCursor::new(char_cursor),
+                                        ),
+                                    ));
+                                    output.state.store(ui.ctx(), output.response.id);
                                     tab.dirty = true;
                                     schedule_sql_highlight(tab);
                                     update_completion_for_tab(tab);
@@ -2003,6 +2051,27 @@ fn next_tab_title(connection_name: &str) -> String {
     format!("Query · {}", connection_name)
 }
 
+fn qualified_query_table(
+    kind: DataSourceKind,
+    database: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+) -> String {
+    let quote = |value: &str| match kind {
+        DataSourceKind::MySql | DataSourceKind::TiDb => {
+            format!("`{}`", value.replace('`', "``"))
+        }
+        _ => format!("\"{}\"", value.replace('"', "\"\"")),
+    };
+    let qualifier = match kind {
+        DataSourceKind::MySql | DataSourceKind::TiDb => database.or(schema),
+        _ => schema.or(database),
+    };
+    qualifier
+        .map(|value| format!("{}.{}", quote(value), quote(table)))
+        .unwrap_or_else(|| quote(table))
+}
+
 fn statement_title(sql: &str) -> String {
     let trimmed = sql.trim();
     let preview = trimmed.lines().next().unwrap_or("SQL");
@@ -2434,11 +2503,12 @@ fn matches_prefix(candidate: &str, prefix: &str) -> bool {
 
 /// Render the completion popup and return the SQL with the selected item
 /// inserted if the user accepted a suggestion.
-fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab) -> Option<String> {
+fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab, tab_pressed: bool) -> Option<String> {
     if !tab.completion.visible {
         return None;
     }
 
+    let mut clicked = None;
     Frame::popup(ui.style()).show(ui, |ui| {
         if tab.completion.waiting_for_metadata {
             ui.label("Loading column suggestions...");
@@ -2455,13 +2525,21 @@ fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab) -> Option<String> {
             } else {
                 format!(" - {}", item.detail)
             };
-            ui.label(
-                RichText::new(format!("{}  [{}]{}", item.label, kind, detail)).color(if selected {
-                    ui.visuals().selection.stroke.color
-                } else {
-                    ui.visuals().text_color()
-                }),
-            );
+            if ui
+                .selectable_label(
+                    selected,
+                    RichText::new(format!("{}  [{}]{}", item.label, kind, detail)).color(
+                        if selected {
+                            ui.visuals().selection.stroke.color
+                        } else {
+                            ui.visuals().text_color()
+                        },
+                    ),
+                )
+                .clicked()
+            {
+                clicked = Some(index);
+            }
         }
     });
 
@@ -2470,11 +2548,10 @@ fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab) -> Option<String> {
             input.key_pressed(Key::ArrowDown),
             input.key_pressed(Key::ArrowUp),
             input.key_pressed(Key::Enter),
-            input.key_pressed(Key::Tab),
             input.key_pressed(Key::Escape),
         )
     });
-    let (down, up, enter, tab_key, escape) = input;
+    let (down, up, enter, escape) = input;
 
     if escape {
         tab.completion.visible = false;
@@ -2492,7 +2569,10 @@ fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab) -> Option<String> {
         tab.completion.selected = (tab.completion.selected + count - 1) % count;
     }
 
-    let accept = enter || tab_key;
+    if let Some(index) = clicked {
+        tab.completion.selected = index;
+    }
+    let accept = enter || clicked.is_some() || (tab_pressed && count == 1);
     if !accept {
         return None;
     }
@@ -2504,6 +2584,8 @@ fn completion_panel(ui: &mut Ui, tab: &mut QueryEditorTab) -> Option<String> {
     let start = replacement.start.min(sql.len());
     let end = replacement.end.min(sql.len());
     sql.replace_range(start..end, &item.insert_text);
+    tab.cursor_offset = start + item.insert_text.len();
+    tab.selection = None;
     tab.completion.visible = false;
     Some(sql)
 }

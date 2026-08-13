@@ -1011,7 +1011,7 @@ impl TableStructureView {
                 if self.kind == DataSourceKind::Sqlite {
                     ui.colored_label(
                         Color32::from_rgb(220, 150, 60),
-                        "SQLite has limited ALTER COLUMN support; type changes may fail.",
+                        "提示：SQLite 不支持原生 ALTER COLUMN，修改类型可能失败；请使用迁移 SQL 重建表。",
                     );
                 }
                 if let Some(error) = &self.modify_column_error {
@@ -1316,10 +1316,18 @@ impl TableStructureView {
                             ui.label(if col.nullable { "YES" } else { "NO" });
                             ui.label(col.default_value.as_deref().unwrap_or(""));
                             ui.label(if col.primary_key { "PK" } else { "" });
-                            if ui.small_button("✎").clicked() {
+                            if ui
+                                .small_button("Edit")
+                                .on_hover_text("Modify column")
+                                .clicked()
+                            {
                                 modify_requested = Some(col.name.clone());
                             }
-                            if ui.small_button("🗑").clicked() {
+                            if ui
+                                .small_button("Delete")
+                                .on_hover_text("Drop column")
+                                .clicked()
+                            {
                                 drop_requested = Some(col.name.clone());
                             }
                             ui.end_row();
@@ -1363,7 +1371,11 @@ impl TableStructureView {
                             ui.label(if idx.unique { "YES" } else { "" });
                             ui.label(if idx.primary { "YES" } else { "" });
                             if !idx.primary {
-                                if ui.small_button("🗑").clicked() {
+                                if ui
+                                    .small_button("\u{2715}")
+                                    .on_hover_text("Drop index")
+                                    .clicked()
+                                {
                                     drop_requested = Some(idx.name.clone());
                                 }
                             } else {

@@ -76,9 +76,15 @@ impl DesktopApp {
                     connection_id,
                     database,
                     schema,
+                    table,
                 } => {
-                    self.query_editor
-                        .new_query_with_connection(connection_id, database, schema);
+                    self.query_editor.new_query_with_connection(
+                        connection_id,
+                        database,
+                        schema,
+                        table,
+                    );
+                    self.active_panel = ActivePanel::QueryEditor;
                     self.state
                         .set_status(format!("New query on {}", connection_id));
                 }

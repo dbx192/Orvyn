@@ -17,8 +17,8 @@ use db_common::{
     QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use eframe::egui::{
-    pos2, vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Key, Layout, Margin,
-    Modifiers, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Window,
+    pos2, vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Grid, Key, Layout,
+    Margin, Modifiers, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Window,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -504,6 +504,15 @@ impl TableEditor {
             Some(schema) => format!("{}.{}", schema, self.table),
             None => self.table.clone(),
         }
+    }
+
+    pub fn query_context(&self) -> Option<(ConnectionId, Option<String>, Option<String>, String)> {
+        Some((
+            self.connection_id?,
+            self.database.clone(),
+            self.schema.clone(),
+            self.table.clone(),
+        ))
     }
 
     /// Returns true when a commit is in flight and UI actions that mutate data should be disabled.
@@ -1808,7 +1817,7 @@ impl TableEditor {
             ui.allocate_exact_size(vec2(width, TABLE_ROW_HEIGHT), Sense::hover());
         paint_cell_frame(ui, rect, fill, grid_stroke(ui));
 
-        let button_width = 16.0;
+        let button_width = 20.0;
         let edit_rect = Rect::from_min_max(
             rect.left_top() + vec2(crate::ui::grid::CELL_PADDING_X, 0.0),
             rect.right_bottom() + vec2(-(button_width + crate::ui::grid::CELL_PADDING_X), 0.0),
@@ -1835,7 +1844,7 @@ impl TableEditor {
                 ui.make_persistent_id(("temporal_picker_button", row, column_index)),
                 Sense::click(),
             )
-            .on_hover_text("Choose date/time");
+            .on_hover_text("Open date/time picker");
         if button_response.hovered() {
             ui.painter()
                 .rect_filled(button_rect, 0.0, ui.visuals().widgets.hovered.bg_fill);
@@ -1843,8 +1852,8 @@ impl TableEditor {
         ui.painter().text(
             button_rect.center(),
             Align2::CENTER_CENTER,
-            "...",
-            FontId::proportional(10.0),
+            "v",
+            FontId::proportional(12.0),
             ui.visuals().text_color(),
         );
 
@@ -1877,9 +1886,9 @@ impl TableEditor {
         };
 
         let title = match picker.kind {
-            TemporalKind::Date => "Choose Date",
-            TemporalKind::Time => "Choose Time",
-            TemporalKind::DateTime => "Choose Date/Time",
+            TemporalKind::Date => "Select Date",
+            TemporalKind::Time => "Select Time",
+            TemporalKind::DateTime => "Select Date and Time",
         };
         let mut open = true;
         let mut apply_value = None;
@@ -1890,41 +1899,85 @@ impl TableEditor {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
+            .default_width(278.0)
             .show(ui.ctx(), |ui| {
                 if matches!(picker.kind, TemporalKind::Date | TemporalKind::DateTime) {
                     ui.horizontal(|ui| {
-                        ui.label("Date");
-                        ui.add(DragValue::new(&mut picker.year).speed(1));
-                        ui.add(DragValue::new(&mut picker.month).clamp_range(1..=12));
-                        let max_day = days_in_month(picker.year, picker.month);
-                        picker.day = picker.day.clamp(1, max_day);
-                        ui.add(DragValue::new(&mut picker.day).clamp_range(1..=max_day));
+                        if ui
+                            .small_button("<")
+                            .on_hover_text("Previous month")
+                            .clicked()
+                        {
+                            picker.previous_month();
+                        }
+                        ui.with_layout(
+                            Layout::centered_and_justified(eframe::egui::Direction::LeftToRight),
+                            |ui| {
+                                ui.strong(format!("{} - {:02}", picker.year, picker.month));
+                            },
+                        );
+                        if ui.small_button(">").on_hover_text("Next month").clicked() {
+                            picker.next_month();
+                        }
                     });
+                    ui.add_space(4.0);
+                    calendar_grid(ui, &mut picker);
                 }
 
                 if matches!(picker.kind, TemporalKind::Time | TemporalKind::DateTime) {
+                    if matches!(picker.kind, TemporalKind::DateTime) {
+                        ui.separator();
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Time");
-                        ui.add(DragValue::new(&mut picker.hour).clamp_range(0..=23));
-                        ui.add(DragValue::new(&mut picker.minute).clamp_range(0..=59));
-                        ui.add(DragValue::new(&mut picker.second).clamp_range(0..=59));
+                        ui.add_sized(
+                            [42.0, 22.0],
+                            DragValue::new(&mut picker.hour)
+                                .clamp_range(0..=23)
+                                .fixed_decimals(0)
+                                .prefix(""),
+                        );
+                        ui.label(":");
+                        ui.add_sized(
+                            [42.0, 22.0],
+                            DragValue::new(&mut picker.minute)
+                                .clamp_range(0..=59)
+                                .fixed_decimals(0),
+                        );
+                        ui.label(":");
+                        ui.add_sized(
+                            [42.0, 22.0],
+                            DragValue::new(&mut picker.second)
+                                .clamp_range(0..=59)
+                                .fixed_decimals(0),
+                        );
                     });
                 }
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Now").clicked() {
+                    if ui
+                        .button("Current")
+                        .on_hover_text("Use the current date and time")
+                        .clicked()
+                    {
                         picker.set_now();
                     }
-                    if ui.button("NULL").clicked() {
+                    if ui
+                        .button("Clear")
+                        .on_hover_text("Set this value to NULL")
+                        .clicked()
+                    {
                         set_null = true;
                     }
-                    if ui.button("Cancel").clicked() {
-                        close_requested = true;
-                    }
-                    if ui.button("Apply").clicked() {
-                        apply_value = Some(picker.format_value());
-                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("OK").clicked() {
+                            apply_value = Some(picker.format_value());
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_requested = true;
+                        }
+                    });
                 });
             });
 
@@ -2471,6 +2524,30 @@ impl TimePickerState {
         self.second = now.second();
     }
 
+    fn previous_month(&mut self) {
+        if self.month == 1 {
+            self.year -= 1;
+            self.month = 12;
+        } else {
+            self.month -= 1;
+        }
+        self.clamp_day();
+    }
+
+    fn next_month(&mut self) {
+        if self.month == 12 {
+            self.year += 1;
+            self.month = 1;
+        } else {
+            self.month += 1;
+        }
+        self.clamp_day();
+    }
+
+    fn clamp_day(&mut self) {
+        self.day = self.day.clamp(1, days_in_month(self.year, self.month));
+    }
+
     fn format_value(&self) -> String {
         match self.kind {
             TemporalKind::Date => format!("{:04}-{:02}-{:02}", self.year, self.month, self.day),
@@ -2481,6 +2558,49 @@ impl TimePickerState {
             ),
         }
     }
+}
+
+fn calendar_grid(ui: &mut Ui, picker: &mut TimePickerState) {
+    const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let first_weekday = NaiveDate::from_ymd_opt(picker.year, picker.month, 1)
+        .map(|date| date.weekday().num_days_from_monday() as usize)
+        .unwrap_or_default();
+    let last_day = days_in_month(picker.year, picker.month);
+
+    Grid::new(("temporal_calendar", picker.row, picker.column))
+        .num_columns(7)
+        .min_col_width(32.0)
+        .spacing(vec2(3.0, 3.0))
+        .show(ui, |ui| {
+            for weekday in WEEKDAYS {
+                ui.centered_and_justified(|ui| {
+                    ui.weak(weekday);
+                });
+            }
+            ui.end_row();
+
+            let mut day = 1;
+            for cell in 0..42 {
+                if cell < first_weekday || day > last_day {
+                    ui.allocate_space(vec2(32.0, 24.0));
+                } else {
+                    let selected = day == picker.day;
+                    let button = Button::new(day.to_string())
+                        .min_size(vec2(32.0, 24.0))
+                        .selected(selected);
+                    if ui.add(button).clicked() {
+                        picker.day = day;
+                    }
+                    day += 1;
+                }
+                if (cell + 1) % 7 == 0 {
+                    ui.end_row();
+                    if day > last_day {
+                        break;
+                    }
+                }
+            }
+        });
 }
 
 fn sql_literal(value: &str) -> String {

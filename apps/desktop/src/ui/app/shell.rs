@@ -38,22 +38,96 @@ impl eframe::App for DesktopApp {
 
 impl DesktopApp {
     fn workspace_tabs(&mut self, ui: &mut Ui) {
+        self.table_tab_order
+            .retain(|id| self.table_editors.contains_key(id));
+        for id in self.table_editors.keys() {
+            if !self.table_tab_order.contains(id) {
+                self.table_tab_order.push(*id);
+            }
+        }
+
         ui.horizontal_wrapped(|ui| {
-            self.workspace_tab(ui, ActivePanel::QueryEditor, "Query");
+            let query_selected = self.active_panel == ActivePanel::QueryEditor;
+            if ui.selectable_label(query_selected, "Query").clicked() {
+                if !query_selected {
+                    if let Some((connection_id, database, schema, table)) = self
+                        .active_table_editor
+                        .and_then(|id| self.table_editors.get(&id))
+                        .and_then(|editor| editor.query_context())
+                    {
+                        self.query_editor.new_query_with_connection(
+                            connection_id,
+                            database,
+                            schema,
+                            Some(table),
+                        );
+                    }
+                }
+                self.active_panel = ActivePanel::QueryEditor;
+            }
             let tabs = self
-                .table_editors
+                .table_tab_order
                 .iter()
-                .map(|(id, editor)| (*id, editor.table_name(), editor.has_unsaved_changes()))
+                .filter_map(|id| {
+                    self.table_editors
+                        .get(id)
+                        .map(|editor| (*id, editor.table_name(), editor.has_unsaved_changes()))
+                })
                 .collect::<Vec<_>>();
-            let mut close = None;
+            let dirty_tabs = tabs
+                .iter()
+                .filter_map(|(id, _, dirty)| dirty.then_some(*id))
+                .collect::<Vec<_>>();
+            let ordered_ids = tabs.iter().map(|(id, _, _)| *id).collect::<Vec<_>>();
+            let mut close_tabs = None;
             for (id, title, dirty) in tabs {
                 let selected = self.active_panel == ActivePanel::TableEditor
                     && self.active_table_editor == Some(id);
-                if ui.selectable_label(selected, title).clicked() {
+                let tab_response = ui.selectable_label(selected, title);
+                if tab_response.clicked() {
                     self.active_panel = ActivePanel::TableEditor;
                     self.active_table_editor = Some(id);
                     self.active_structure = Some(id);
                 }
+                let tab_index = ordered_ids
+                    .iter()
+                    .position(|tab_id| *tab_id == id)
+                    .unwrap_or(0);
+                tab_response.context_menu(|ui| {
+                    let left = ordered_ids[..tab_index].to_vec();
+                    let right = ordered_ids[tab_index + 1..].to_vec();
+                    let others = ordered_ids
+                        .iter()
+                        .copied()
+                        .filter(|tab_id| *tab_id != id)
+                        .collect::<Vec<_>>();
+
+                    close_menu_item(ui, "Close", vec![id], &dirty_tabs, &mut close_tabs);
+                    close_menu_item(ui, "Close Other Tabs", others, &dirty_tabs, &mut close_tabs);
+                    ui.separator();
+                    close_menu_item(
+                        ui,
+                        "Close Tabs to the Left",
+                        left,
+                        &dirty_tabs,
+                        &mut close_tabs,
+                    );
+                    close_menu_item(
+                        ui,
+                        "Close Tabs to the Right",
+                        right,
+                        &dirty_tabs,
+                        &mut close_tabs,
+                    );
+                    ui.separator();
+                    close_menu_item(
+                        ui,
+                        "Close All Tabs",
+                        ordered_ids.clone(),
+                        &dirty_tabs,
+                        &mut close_tabs,
+                    );
+                });
                 if ui
                     .add_enabled(!dirty, Button::new("x"))
                     .on_hover_text(if dirty {
@@ -63,24 +137,11 @@ impl DesktopApp {
                     })
                     .clicked()
                 {
-                    close = Some(id);
+                    close_tabs = Some(vec![id]);
                 }
             }
-            if let Some(id) = close {
-                self.table_editors.remove(&id);
-                self.table_structures.remove(&id);
-                if self.active_structure == Some(id) {
-                    self.active_structure = self.active_table_editor.filter(|active| *active != id);
-                }
-                if self.active_table_editor == Some(id) {
-                    self.active_table_editor = self.table_editors.keys().next().copied();
-                    self.active_structure = self.active_table_editor;
-                    self.active_panel = if self.active_table_editor.is_some() {
-                        ActivePanel::TableEditor
-                    } else {
-                        ActivePanel::QueryEditor
-                    };
-                }
+            if let Some(ids) = close_tabs {
+                self.close_table_tabs(&ids);
             }
             if self.active_structure.is_some() || self.pending_structure_load.is_some() {
                 self.workspace_tab(ui, ActivePanel::TableStructure, "Structure");
@@ -97,6 +158,40 @@ impl DesktopApp {
                 self.workspace_tab(ui, ActivePanel::RedisBrowser, &label);
             }
         });
+    }
+
+    fn close_table_tabs(&mut self, ids: &[eframe::egui::Id]) {
+        let fallback_index = ids
+            .iter()
+            .filter_map(|id| self.table_tab_order.iter().position(|tab_id| tab_id == id))
+            .min()
+            .unwrap_or_default();
+        for id in ids {
+            self.table_editors.remove(id);
+            self.table_structures.remove(id);
+        }
+        self.table_tab_order.retain(|id| !ids.contains(id));
+
+        if self
+            .active_table_editor
+            .is_some_and(|active| ids.contains(&active))
+        {
+            self.active_table_editor = self
+                .table_tab_order
+                .get(fallback_index.min(self.table_tab_order.len().saturating_sub(1)))
+                .copied();
+            self.active_structure = self.active_table_editor;
+            self.active_panel = if self.active_table_editor.is_some() {
+                ActivePanel::TableEditor
+            } else {
+                ActivePanel::QueryEditor
+            };
+        } else if self
+            .active_structure
+            .is_some_and(|active| ids.contains(&active))
+        {
+            self.active_structure = self.active_table_editor;
+        }
     }
 
     fn workspace_tab(&mut self, ui: &mut Ui, panel: ActivePanel, label: &str) {
@@ -266,14 +361,6 @@ impl DesktopApp {
                         self.state.set_status("New connection editor opened");
                     }
                     if ui
-                        .add_sized([92.0, 28.0], Button::new("New Query"))
-                        .on_hover_text("Open a new SQL editor tab")
-                        .clicked()
-                    {
-                        self.query_editor.new_query();
-                        self.state.set_status("New query tab opened");
-                    }
-                    if ui
                         .add_sized([72.0, 28.0], Button::new("History"))
                         .on_hover_text("Show executed SQL history")
                         .clicked()
@@ -331,5 +418,25 @@ impl DesktopApp {
                     });
                 });
             });
+    }
+}
+
+fn close_menu_item(
+    ui: &mut Ui,
+    label: &str,
+    targets: Vec<eframe::egui::Id>,
+    dirty_tabs: &[eframe::egui::Id],
+    close_tabs: &mut Option<Vec<eframe::egui::Id>>,
+) {
+    let can_close = !targets.is_empty() && !targets.iter().any(|id| dirty_tabs.contains(id));
+    let response = ui.add_enabled(can_close, Button::new(label));
+    let response = if !targets.is_empty() && !can_close {
+        response.on_hover_text("Save or rollback changes before closing")
+    } else {
+        response
+    };
+    if response.clicked() {
+        *close_tabs = Some(targets);
+        ui.close_menu();
     }
 }

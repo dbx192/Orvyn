@@ -60,14 +60,10 @@ pub fn display_cell_value(value: &CellValue) -> String {
             human_bytes(bytes.len() as u64),
             base64_preview(bytes, 16)
         ),
-        CellValue::Date(value) => format!("<date {}>", value.format("%Y-%m-%d")),
-        CellValue::Time(value) => format!("<time {}>", value.format("%H:%M:%S")),
-        CellValue::DateTime(value) => {
-            format!("<datetime {}>", value.format("%Y-%m-%d %H:%M:%S"))
-        }
-        CellValue::Timestamp(value) => {
-            format!("<timestamp {}>", value.format("%Y-%m-%d %H:%M:%S UTC"))
-        }
+        CellValue::Date(value) => value.format("%Y-%m-%d").to_string(),
+        CellValue::Time(value) => value.format("%H:%M:%S").to_string(),
+        CellValue::DateTime(value) => value.format("%Y-%m-%d %H:%M:%S").to_string(),
+        CellValue::Timestamp(value) => value.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         CellValue::Json(value) => format!("<json {}>", value),
         _ => copy_cell_value(value),
     })
@@ -302,7 +298,7 @@ mod tests {
         let text = display_cell_value(&CellValue::Date(
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
         ));
-        assert_eq!(text, "<date 2024-01-02>");
+        assert_eq!(text, "2024-01-02");
     }
 
     #[test]
@@ -311,7 +307,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             NaiveTime::from_hms_opt(3, 4, 5).unwrap(),
         )));
-        assert_eq!(text, "<datetime 2024-01-02 03:04:05>");
+        assert_eq!(text, "2024-01-02 03:04:05");
     }
 
     #[test]
