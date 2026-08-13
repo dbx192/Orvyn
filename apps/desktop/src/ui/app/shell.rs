@@ -1,8 +1,8 @@
 use super::{style::apply_app_style, ActivePanel, DesktopApp};
 use crate::ui::i18n::{self, text as tr, Locale};
 use eframe::egui::{
-    vec2, Align, Button, CentralPanel, Context, Direction, Frame, Layout, Margin, RichText, Stroke,
-    TopBottomPanel, Ui,
+    vec2, Align, Button, CentralPanel, Context, Direction, Frame, Layout, Margin, RichText,
+    Spinner, Stroke, TopBottomPanel, Ui,
 };
 use std::time::Duration;
 
@@ -265,30 +265,48 @@ impl DesktopApp {
                             }
                         }
                     }
-                    ActivePanel::TableEditor => match self
-                        .active_table_editor
-                        .and_then(|id| self.table_editors.get_mut(&id)) {
-                        Some(editor) => {
-                            let message = editor.ui(ui);
-                            if let Some(msg) = message {
-                                if !msg.is_empty() {
-                                    self.state.set_status(msg);
+                    ActivePanel::TableEditor => {
+                        if self.pending_table_load.is_some() {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(72.0);
+                                ui.add(Spinner::new().size(28.0));
+                                ui.add_space(14.0);
+                                ui.label(RichText::new(tr("Loading table data..."))
+                                    .size(18.0)
+                                    .strong());
+                                ui.add_space(6.0);
+                                ui.label(RichText::new(tr("Fetching the first rows and table columns"))
+                                    .small()
+                                    .color(eframe::egui::Color32::GRAY));
+                            });
+                        } else {
+                            match self
+                                .active_table_editor
+                                .and_then(|id| self.table_editors.get_mut(&id))
+                            {
+                                Some(editor) => {
+                                    let message = editor.ui(ui);
+                                    if let Some(msg) = message {
+                                        if !msg.is_empty() {
+                                            self.state.set_status(msg);
+                                        }
+                                    }
+                                }
+                                None => {
+                                    ui.vertical_centered(|ui| {
+                                        ui.add_space(60.0);
+                                        ui.label(RichText::new(tr("Table Data")).size(24.0).strong());
+                                        ui.add_space(12.0);
+                                        ui.label(tr("No table open. Double-click a table in the object tree to load data."));
+                                        ui.add_space(8.0);
+                                        if ui.button(tr("Switch to Query Editor")).clicked() {
+                                            self.active_panel = ActivePanel::QueryEditor;
+                                        }
+                                    });
                                 }
                             }
                         }
-                        None => {
-                            ui.vertical_centered(|ui| {
-                                ui.add_space(60.0);
-                                ui.label(RichText::new(tr("Table Data")).size(24.0).strong());
-                                ui.add_space(12.0);
-                                ui.label(tr("No table open. Double-click a table in the object tree to load data."));
-                                ui.add_space(8.0);
-                                if ui.button(tr("Switch to Query Editor")).clicked() {
-                                    self.active_panel = ActivePanel::QueryEditor;
-                                }
-                            });
-                        }
-                    },
+                    }
                     ActivePanel::TableStructure => match self
                         .active_structure
                         .and_then(|id| self.table_structures.get_mut(&id)) {

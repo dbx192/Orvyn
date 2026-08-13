@@ -21,7 +21,7 @@ use import_export::{export_query_result, export_query_result_to_file, ExportForm
 use std::cmp::Ordering;
 use tokio::runtime::Handle;
 
-const DEFAULT_PAGE_SIZE: usize = 500;
+const DEFAULT_PAGE_SIZE: usize = 100;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 320.0;

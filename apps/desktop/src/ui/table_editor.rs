@@ -29,7 +29,7 @@ use std::{
 };
 use tokio::runtime::Handle;
 
-const DEFAULT_PAGE_SIZE: usize = 500;
+const DEFAULT_PAGE_SIZE: usize = 100;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
@@ -1906,8 +1906,10 @@ impl TableEditor {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(278.0)
+            .default_width(252.0)
+            .max_width(252.0)
             .show(ui.ctx(), |ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 if matches!(picker.kind, TemporalKind::Date | TemporalKind::DateTime) {
                     ui.horizontal(|ui| {
                         if ui
@@ -1938,7 +1940,7 @@ impl TableEditor {
                     ui.horizontal(|ui| {
                         ui.label("Time");
                         ui.add_sized(
-                            [42.0, 22.0],
+                            [36.0, 22.0],
                             DragValue::new(&mut picker.hour)
                                 .clamp_range(0..=23)
                                 .fixed_decimals(0)
@@ -1946,14 +1948,14 @@ impl TableEditor {
                         );
                         ui.label(":");
                         ui.add_sized(
-                            [42.0, 22.0],
+                            [36.0, 22.0],
                             DragValue::new(&mut picker.minute)
                                 .clamp_range(0..=59)
                                 .fixed_decimals(0),
                         );
                         ui.label(":");
                         ui.add_sized(
-                            [42.0, 22.0],
+                            [36.0, 22.0],
                             DragValue::new(&mut picker.second)
                                 .clamp_range(0..=59)
                                 .fixed_decimals(0),
@@ -2576,8 +2578,8 @@ fn calendar_grid(ui: &mut Ui, picker: &mut TimePickerState) {
 
     Grid::new(("temporal_calendar", picker.row, picker.column))
         .num_columns(7)
-        .min_col_width(32.0)
-        .spacing(vec2(3.0, 3.0))
+        .min_col_width(27.0)
+        .spacing(vec2(1.0, 2.0))
         .show(ui, |ui| {
             for weekday in WEEKDAYS {
                 ui.centered_and_justified(|ui| {
@@ -2589,11 +2591,11 @@ fn calendar_grid(ui: &mut Ui, picker: &mut TimePickerState) {
             let mut day = 1;
             for cell in 0..42 {
                 if cell < first_weekday || day > last_day {
-                    ui.allocate_space(vec2(32.0, 24.0));
+                    ui.allocate_space(vec2(27.0, 21.0));
                 } else {
                     let selected = day == picker.day;
                     let button = Button::new(day.to_string())
-                        .min_size(vec2(32.0, 24.0))
+                        .min_size(vec2(27.0, 21.0))
                         .selected(selected);
                     if ui.add(button).clicked() {
                         picker.day = day;

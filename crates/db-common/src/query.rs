@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub const DEFAULT_QUERY_TIMEOUT_MS: u64 = 30_000;
-pub const DEFAULT_QUERY_RESULT_LIMIT: u32 = 500;
+pub const DEFAULT_QUERY_RESULT_LIMIT: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextRange {

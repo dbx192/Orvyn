@@ -481,7 +481,7 @@ impl ConnectionManagerUi {
 
                 if matches!(
                     self.form.kind,
-                    DataSourceKind::MySql | DataSourceKind::PostgreSql
+                    DataSourceKind::MySql | DataSourceKind::Doris | DataSourceKind::PostgreSql
                 ) {
                     ui.label(tr("Username"));
                     ui.add(TextEdit::singleline(&mut self.form.username).desired_width(260.0));

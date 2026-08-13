@@ -1,7 +1,7 @@
 use crate::{validation, Result};
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_PAGE_SIZE: u32 = 500;
+pub const DEFAULT_PAGE_SIZE: u32 = 100;
 pub const MAX_PAGE_SIZE: u32 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

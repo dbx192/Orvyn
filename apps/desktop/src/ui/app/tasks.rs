@@ -437,7 +437,7 @@ impl DesktopApp {
                     .await?;
                 let base_sql = ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
                 let sql = if kind == DataSourceKind::DuckDb {
-                    format!("{base_sql} LIMIT 500 OFFSET 0")
+                    format!("{base_sql} LIMIT 100 OFFSET 0")
                 } else {
                     base_sql
                 };
@@ -453,7 +453,7 @@ impl DesktopApp {
                             cursor_offset: 0,
                             selection: None,
                             timeout_ms: 30_000,
-                            result_limit: (kind != DataSourceKind::DuckDb).then_some(500),
+                            result_limit: (kind != DataSourceKind::DuckDb).then_some(100),
                             result_offset: 0,
                             result_total_rows: None,
                         },
@@ -511,7 +511,7 @@ impl DesktopApp {
                         .ok_or_else(|| AppError::internal("DuckDB table row count was invalid"))?;
                     data.metadata.insert(
                         QUERY_RESULT_METADATA_PAGE_LIMIT.to_string(),
-                        "500".to_string(),
+                        "100".to_string(),
                     );
                     data.metadata.insert(
                         QUERY_RESULT_METADATA_PAGE_OFFSET.to_string(),
