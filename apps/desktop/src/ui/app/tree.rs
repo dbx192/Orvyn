@@ -33,8 +33,11 @@ impl DesktopApp {
                 self.handle_tree_actions(actions);
                 if !self.last_tree_status.is_empty() {
                     ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-                        let status = compact_status_text(&self.last_tree_status, 72);
-                        ui.label(RichText::new(status).small().color(Color32::GRAY));
+                        ui.label(
+                            RichText::new(&self.last_tree_status)
+                                .small()
+                                .color(Color32::GRAY),
+                        );
                     });
                 }
             });
@@ -326,17 +329,4 @@ impl DesktopApp {
             ));
         }
     }
-}
-
-fn compact_status_text(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-
-    let mut text = value
-        .chars()
-        .take(max_chars.saturating_sub(3))
-        .collect::<String>();
-    text.push_str("...");
-    text
 }

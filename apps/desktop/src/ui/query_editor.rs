@@ -9,7 +9,7 @@ use db_common::{
     QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use eframe::egui::{
-    text::LayoutJob, Align, Button, Color32, ComboBox, FontId, Frame, Key, Layout, Margin,
+    text::LayoutJob, vec2, Align, Button, Color32, ComboBox, FontId, Frame, Key, Layout, Margin,
     RichText, ScrollArea, Stroke, TextEdit, TextFormat, Ui, Window,
 };
 use import_export::{export_query_result_to_file, ExportFormat};
@@ -177,6 +177,7 @@ pub struct QueryEditor {
     pending_danger_confirm: Option<PendingDangerConfirm>,
     side_tab: QuerySideTab,
     side_panel_open: bool,
+    side_panel_width: f32,
     favorite_name_input: String,
     status: String,
 }
@@ -205,6 +206,7 @@ impl QueryEditor {
             pending_danger_confirm: None,
             side_tab: QuerySideTab::History,
             side_panel_open: false,
+            side_panel_width: 280.0,
             favorite_name_input: String::new(),
             status: String::new(),
         };
@@ -765,7 +767,7 @@ impl QueryEditor {
         self.tab_bar(ui);
         ui.separator();
         let editor_height = (ui.available_height() * 0.42).max(180.0);
-        let side_width = 280.0;
+        let side_width = self.side_panel_width;
         let connections_snapshot = self.connections.clone();
         let mut column_loads = Vec::new();
         ui.horizontal(|ui| {
@@ -900,7 +902,20 @@ impl QueryEditor {
             });
 
             if self.side_panel_open {
-                ui.separator();
+                let (divider_rect, divider_response) = ui.allocate_exact_size(
+                    vec2(8.0, ui.available_height()),
+                    eframe::egui::Sense::drag(),
+                );
+                if divider_response.dragged() {
+                    self.side_panel_width = (self.side_panel_width
+                        - divider_response.drag_delta().x)
+                        .clamp(200.0, 520.0);
+                    ui.ctx().request_repaint();
+                }
+                ui.painter().line_segment(
+                    [divider_rect.center_top(), divider_rect.center_bottom()],
+                    Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                );
                 ui.vertical(|ui| {
                     ui.set_width(side_width);
                     self.history_panel(ui, tab_id);

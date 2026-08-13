@@ -137,7 +137,13 @@ impl ConnectionManager {
             .testers
             .get(&profile.kind)
             .ok_or_else(|| unsupported_kind(profile.kind))?;
-        let stored_password = self.load_password(profile).await?;
+        // Callers may pass an editor-built profile with no password_ref. In
+        // that case resolve the persisted profile by id before testing.
+        let persisted_profile = self.store.get(profile.id).await?;
+        let stored_password = match persisted_profile.as_ref() {
+            Some(saved) => self.load_password(saved).await?,
+            None => self.load_password(profile).await?,
+        };
         let password = runtime_password.or(stored_password.as_deref());
 
         debug!(kind = ?profile.kind, "testing connection");

@@ -689,6 +689,22 @@ impl ConnectionManagerUi {
         self.busy = true;
         self.error = None;
         let profile = self.form.to_profile();
+        // Passwords are intentionally not copied into the editor form. Keep
+        // the stored credential reference on test so ConnectionManager can
+        // resolve it when the field is left blank.
+        let profile = match self.form.mode {
+            EditorMode::Edit(id) => self
+                .profiles
+                .iter()
+                .find(|saved| saved.id == id)
+                .map(|saved| {
+                    let mut profile = profile.clone();
+                    profile.password_ref = saved.password_ref.clone();
+                    profile
+                })
+                .unwrap_or(profile),
+            EditorMode::New => profile,
+        };
         let password = if self.form.save_password {
             if self.form.password_modified {
                 PasswordUpdate::Replace(self.form.password.clone())
@@ -718,6 +734,19 @@ impl ConnectionManagerUi {
         self.error = None;
         self.test_report = None;
         let profile = self.form.to_profile();
+        let profile = match self.form.mode {
+            EditorMode::Edit(id) => self
+                .profiles
+                .iter()
+                .find(|saved| saved.id == id)
+                .map(|saved| {
+                    let mut profile = profile.clone();
+                    profile.password_ref = saved.password_ref.clone();
+                    profile
+                })
+                .unwrap_or(profile),
+            EditorMode::New => profile,
+        };
         let runtime_password = if self.form.password.is_empty() {
             None
         } else {

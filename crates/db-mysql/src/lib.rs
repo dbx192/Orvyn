@@ -9,7 +9,7 @@ use db_common::{
     RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
 use sqlx::{
-    mysql::{MySqlConnection, MySqlPoolOptions, MySqlRow},
+    mysql::{MySqlConnectOptions, MySqlConnection, MySqlPoolOptions, MySqlRow},
     pool::PoolConnection,
     types::{
         chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc},
@@ -161,10 +161,22 @@ impl ConnectionTester for MySqlConnectionTester {
 
         let started_at = Instant::now();
         let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
-        let version: Option<String> = sqlx::query_scalar("SELECT VERSION()")
-            .fetch_optional(&pool)
-            .await
-            .map_err(mysql_query_error)?;
+        let version: Option<String> = if profile.kind == DataSourceKind::Doris {
+            // Doris does not implement the MySQL prepared-statement command.
+            // `raw_sql` uses the text protocol and is sufficient here because
+            // this health check has no parameters.
+            sqlx::raw_sql("SELECT VERSION()")
+                .fetch_one(&pool)
+                .await
+                .map_err(mysql_query_error)?
+                .try_get(0)
+                .ok()
+        } else {
+            sqlx::query_scalar("SELECT VERSION()")
+                .fetch_optional(&pool)
+                .await
+                .map_err(mysql_query_error)?
+        };
         pool.close().await;
 
         let mut report =
@@ -190,7 +202,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         password: Option<&str>,
     ) -> Result<Vec<DatabaseObject>> {
         let pool = self.pool_for(profile, password).await?;
-        let rows = sqlx::query("SHOW DATABASES")
+        let rows = sqlx::raw_sql("SHOW DATABASES")
             .fetch_all(&pool)
             .await
             .map_err(mysql_query_error)?;
@@ -243,6 +255,24 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
+        if profile.kind == DataSourceKind::Doris {
+            let sql = format!("SHOW TABLES FROM `{}`", escape_mysql_identifier(database));
+            let rows = sqlx::raw_sql(&sql)
+                .fetch_all(&pool)
+                .await
+                .map_err(mysql_query_error)?;
+            return rows
+                .into_iter()
+                .map(|row| {
+                    Ok(DatabaseObject {
+                        kind: DatabaseObjectKind::Table,
+                        name: mysql_string_at(&row, 0)?,
+                        schema: Some(database.to_string()),
+                        parent: Some(database.to_string()),
+                    })
+                })
+                .collect();
+        }
         list_mysql_objects(&pool, database, "BASE TABLE", DatabaseObjectKind::Table).await
     }
 
@@ -260,6 +290,27 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
+        if profile.kind == DataSourceKind::Doris {
+            let sql = format!(
+                "SHOW FULL TABLES FROM `{}` WHERE Table_type = 'VIEW'",
+                escape_mysql_identifier(database)
+            );
+            let rows = sqlx::raw_sql(&sql)
+                .fetch_all(&pool)
+                .await
+                .map_err(mysql_query_error)?;
+            return rows
+                .into_iter()
+                .map(|row| {
+                    Ok(DatabaseObject {
+                        kind: DatabaseObjectKind::View,
+                        name: mysql_string_at(&row, 0)?,
+                        schema: Some(database.to_string()),
+                        parent: Some(database.to_string()),
+                    })
+                })
+                .collect();
+        }
         list_mysql_objects(&pool, database, "VIEW", DatabaseObjectKind::View).await
     }
 
@@ -279,8 +330,12 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         })?;
         let pool = self.pool_for(profile, password).await?;
         let rows = if profile.kind == DataSourceKind::Doris {
-            let sql = format!("SHOW COLUMNS FROM `{}`.`{}`", database, table);
-            sqlx::query(&sql)
+            let sql = format!(
+                "SHOW COLUMNS FROM `{}`.`{}`",
+                escape_mysql_identifier(database),
+                escape_mysql_identifier(table)
+            );
+            sqlx::raw_sql(&sql)
                 .fetch_all(&pool)
                 .await
                 .map_err(mysql_query_error)?
@@ -349,17 +404,29 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
-        let rows = sqlx::query(
-            "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
+        let rows = if profile.kind == DataSourceKind::Doris {
+            let sql = format!(
+                "SHOW INDEX FROM `{}`.`{}`",
+                escape_mysql_identifier(database),
+                escape_mysql_identifier(table)
+            );
+            sqlx::raw_sql(&sql)
+                .fetch_all(&pool)
+                .await
+                .map_err(mysql_query_error)?
+        } else {
+            sqlx::query(
+                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE \
              FROM information_schema.STATISTICS \
              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
              ORDER BY INDEX_NAME, SEQ_IN_INDEX",
-        )
-        .bind(database)
-        .bind(table)
-        .fetch_all(&pool)
-        .await
-        .map_err(mysql_query_error)?;
+            )
+            .bind(database)
+            .bind(table)
+            .fetch_all(&pool)
+            .await
+            .map_err(mysql_query_error)?
+        };
 
         group_mysql_indexes(rows)
     }
@@ -698,13 +765,29 @@ async fn mysql_pool(
 ) -> Result<MySqlPool> {
     profile.validate()?;
     let url = mysql_url(profile, password)?;
+    // Doris speaks the MySQL wire protocol, but does not accept SQLx's
+    // default `SET sql_mode=(SELECT CONCAT(...))` session initialization.
+    // That expression is valid in MySQL but Doris requires SET values to be
+    // constants. Keep the MySQL defaults for MySQL-compatible servers and
+    // disable only the incompatible sql_mode additions for Doris.
+    let mut connect_options: MySqlConnectOptions =
+        url.parse::<MySqlConnectOptions>().map_err(|error| {
+            AppError::new(ErrorKind::Connection, "invalid MySQL connection URL")
+                .with_detail(error.to_string())
+        })?;
+    if profile.kind == DataSourceKind::Doris {
+        connect_options = connect_options
+            .pipes_as_concat(false)
+            .no_engine_substitution(false);
+    }
+
     MySqlPoolOptions::new()
         .min_connections(config.min_connections)
         .max_connections(config.max_connections.max(1))
         .acquire_timeout(config.acquire_timeout())
         .idle_timeout(config.idle_timeout())
         .max_lifetime(config.max_lifetime())
-        .connect(&url)
+        .connect_with(connect_options)
         .await
         .map_err(mysql_connection_error)
 }
@@ -725,27 +808,41 @@ async fn list_mysql_objects(
     table_type: &str,
     kind: DatabaseObjectKind,
 ) -> Result<Vec<DatabaseObject>> {
-    let rows = sqlx::query(
-        "SELECT TABLE_NAME FROM information_schema.TABLES \
+    let rows = if table_type == "BASE TABLE" {
+        sqlx::query(&format!(
+            "SHOW TABLES FROM `{}`",
+            escape_mysql_identifier(database)
+        ))
+        .fetch_all(pool)
+        .await
+        .map_err(mysql_query_error)?
+    } else {
+        sqlx::query(
+            "SELECT TABLE_NAME FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = ? \
          ORDER BY TABLE_NAME",
-    )
-    .bind(database)
-    .bind(table_type)
-    .fetch_all(pool)
-    .await
-    .map_err(mysql_query_error)?;
+        )
+        .bind(database)
+        .bind(table_type)
+        .fetch_all(pool)
+        .await
+        .map_err(mysql_query_error)?
+    };
 
     let mut objects = Vec::new();
     for row in rows {
         objects.push(DatabaseObject {
             kind,
-            name: mysql_string(&row, "TABLE_NAME")?,
+            name: mysql_string(&row, "TABLE_NAME").or_else(|_| mysql_string_at(&row, 0))?,
             schema: Some(database.to_string()),
             parent: Some(database.to_string()),
         });
     }
     Ok(objects)
+}
+
+fn escape_mysql_identifier(value: &str) -> String {
+    value.replace('`', "``")
 }
 
 fn mysql_string_at(row: &MySqlRow, index: usize) -> Result<String> {
