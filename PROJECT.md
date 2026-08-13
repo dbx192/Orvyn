@@ -83,7 +83,7 @@ tests/
 ### 3.1 数据源类型
 
 ```text
-DataSourceKind: MySQL, PostgreSQL, SQLite, DuckDB, Redis
+DataSourceKind: MySQL, PostgreSQL, SQLite, DuckDB, Redis, MongoDB, SQL Server, ClickHouse, TiDB, TimescaleDB
 ```
 
 ### 3.2 连接配置

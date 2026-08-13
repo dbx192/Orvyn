@@ -22,6 +22,27 @@ pub const ADAPTER_NAME: &str = "postgresql";
 pub struct PostgresConnectionTester;
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct TimescaleDbConnectionTester;
+
+#[async_trait]
+impl ConnectionTester for TimescaleDbConnectionTester {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::TimescaleDb
+    }
+    async fn test_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<ConnectionTestReport> {
+        let mut report = PostgresConnectionTester
+            .test_connection(profile, password)
+            .await?;
+        report.kind = DataSourceKind::TimescaleDb;
+        Ok(report)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct PostgresMetadataReader;
 
 #[derive(Debug, Clone, Default)]

@@ -5,7 +5,12 @@ use std::{collections::BTreeMap, fmt};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DataSourceKind {
     MySql,
+    TiDb,
     PostgreSql,
+    TimescaleDb,
+    SqlServer,
+    ClickHouse,
+    MongoDb,
     Sqlite,
     DuckDb,
     Redis,
@@ -15,7 +20,12 @@ impl DataSourceKind {
     pub const fn default_port(self) -> Option<u16> {
         match self {
             Self::MySql => Some(3306),
+            Self::TiDb => Some(4000),
             Self::PostgreSql => Some(5432),
+            Self::TimescaleDb => Some(5432),
+            Self::SqlServer => Some(1433),
+            Self::ClickHouse => Some(8123),
+            Self::MongoDb => Some(27017),
             Self::Redis => Some(6379),
             Self::Sqlite | Self::DuckDb => None,
         }
@@ -26,13 +36,18 @@ impl DataSourceKind {
     }
 
     pub const fn is_relational(self) -> bool {
-        !matches!(self, Self::Redis)
+        !matches!(self, Self::Redis | Self::MongoDb)
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MySql => "mysql",
+            Self::TiDb => "tidb",
             Self::PostgreSql => "postgresql",
+            Self::TimescaleDb => "timescaledb",
+            Self::SqlServer => "sqlserver",
+            Self::ClickHouse => "clickhouse",
+            Self::MongoDb => "mongodb",
             Self::Sqlite => "sqlite",
             Self::DuckDb => "duckdb",
             Self::Redis => "redis",
@@ -119,7 +134,13 @@ impl ConnectionProfile {
 
         if matches!(
             self.kind,
-            DataSourceKind::MySql | DataSourceKind::PostgreSql
+            DataSourceKind::MySql
+                | DataSourceKind::TiDb
+                | DataSourceKind::PostgreSql
+                | DataSourceKind::TimescaleDb
+                | DataSourceKind::SqlServer
+                | DataSourceKind::ClickHouse
+                | DataSourceKind::MongoDb
         ) {
             validation::ensure_not_blank("username", self.username.as_deref().unwrap_or_default())?;
         }
@@ -333,5 +354,16 @@ mod tests {
             format!("{:?}", PasswordUpdate::Replace("secret".to_string())),
             "Replace(********)"
         );
+    }
+
+    #[test]
+    fn supports_new_database_defaults() {
+        assert_eq!(DataSourceKind::MongoDb.default_port(), Some(27017));
+        assert_eq!(DataSourceKind::SqlServer.default_port(), Some(1433));
+        assert_eq!(DataSourceKind::ClickHouse.default_port(), Some(8123));
+        assert_eq!(DataSourceKind::TiDb.default_port(), Some(4000));
+        assert_eq!(DataSourceKind::TimescaleDb.default_port(), Some(5432));
+        assert!(!DataSourceKind::MongoDb.is_relational());
+        assert!(DataSourceKind::TiDb.is_relational());
     }
 }

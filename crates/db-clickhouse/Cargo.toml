@@ -1,0 +1,11 @@
+[package]
+name = "db-clickhouse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+db-common.workspace = true
+tokio.workspace = true
+

@@ -11,6 +11,15 @@ Orvyn 是一个使用 Rust 构建的跨平台桌面数据库客户端，面向�
 - SQLite
 - DuckDB
 - Redis
+- MongoDB
+- SQL Server
+- ClickHouse
+- TiDB（MySQL 协议）
+- TimescaleDB（PostgreSQL 协议）
+
+本地集成测试可复用 `F:\dnmp\docker-compose.orvyn.yml`：在 DNMP 目录执行
+`docker compose -f docker-compose.yml -f docker-compose.orvyn.yml up -d mongodb clickhouse sqlserver tidb`。
+TimescaleDB 已通过现有 PostgreSQL 服务配置，TiDB 使用 `127.0.0.1:4000`，ClickHouse 同时提供 `8123/9000`。
 
 ## 当前功能
 

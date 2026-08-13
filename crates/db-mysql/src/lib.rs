@@ -25,6 +25,27 @@ pub const ADAPTER_NAME: &str = "mysql";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MySqlConnectionTester;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TiDbConnectionTester;
+
+#[async_trait]
+impl ConnectionTester for TiDbConnectionTester {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::TiDb
+    }
+    async fn test_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<ConnectionTestReport> {
+        let mut report = MySqlConnectionTester
+            .test_connection(profile, password)
+            .await?;
+        report.kind = DataSourceKind::TiDb;
+        Ok(report)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MySqlMetadataReader {
     pools: Arc<Mutex<BTreeMap<MySqlPoolKey, MySqlPool>>>,

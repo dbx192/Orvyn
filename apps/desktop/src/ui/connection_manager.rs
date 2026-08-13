@@ -408,7 +408,12 @@ impl ConnectionManagerUi {
                         for kind in [
                             DataSourceKind::Redis,
                             DataSourceKind::MySql,
+                            DataSourceKind::TiDb,
                             DataSourceKind::PostgreSql,
+                            DataSourceKind::TimescaleDb,
+                            DataSourceKind::SqlServer,
+                            DataSourceKind::ClickHouse,
+                            DataSourceKind::MongoDb,
                             DataSourceKind::Sqlite,
                             DataSourceKind::DuckDb,
                         ] {

@@ -1007,7 +1007,10 @@ fn clear_table_sql(kind: DataSourceKind, table_sql: &str) -> String {
         DataSourceKind::MySql | DataSourceKind::PostgreSql | DataSourceKind::DuckDb => {
             format!("TRUNCATE TABLE {table_sql}")
         }
-        DataSourceKind::Redis => unreachable!("Redis databases are cleared with FLUSHDB"),
+        DataSourceKind::Redis | DataSourceKind::MongoDb => {
+            unreachable!("non-relational databases are cleared separately")
+        }
+        _ => format!("TRUNCATE TABLE {table_sql}"),
     }
 }
 

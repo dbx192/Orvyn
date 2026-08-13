@@ -557,8 +557,13 @@ impl MetadataService {
         &self,
         kind: DataSourceKind,
     ) -> Result<&Arc<dyn RelationalMetadataReader>> {
+        let adapter_kind = match kind {
+            DataSourceKind::TiDb => DataSourceKind::MySql,
+            DataSourceKind::TimescaleDb => DataSourceKind::PostgreSql,
+            other => other,
+        };
         self.relational_readers
-            .get(&kind)
+            .get(&adapter_kind)
             .ok_or_else(|| unsupported_kind(kind))
     }
 

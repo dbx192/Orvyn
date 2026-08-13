@@ -714,8 +714,13 @@ impl QueryService {
     }
 
     fn executor(&self, kind: DataSourceKind) -> Result<Arc<dyn RelationalQueryExecutor>> {
+        let adapter_kind = match kind {
+            DataSourceKind::TiDb => DataSourceKind::MySql,
+            DataSourceKind::TimescaleDb => DataSourceKind::PostgreSql,
+            other => other,
+        };
         self.executors
-            .get(&kind)
+            .get(&adapter_kind)
             .cloned()
             .ok_or_else(|| unsupported_kind(kind))
     }

@@ -11,6 +11,9 @@ chrono.workspace = true
 db-common.workspace = true
 db-duckdb = { path = "../db-duckdb" }
 db-mysql = { path = "../db-mysql" }
+db-mongodb = { path = "../db-mongodb" }
+db-sqlserver = { path = "../db-sqlserver" }
+db-clickhouse = { path = "../db-clickhouse" }
 db-postgres = { path = "../db-postgres" }
 db-redis = { path = "../db-redis" }
 db-sqlite = { path = "../db-sqlite" }

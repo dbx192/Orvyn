@@ -46,7 +46,12 @@ impl ConnectionManager {
             secure_store,
             vec![
                 Arc::new(db_mysql::MySqlConnectionTester),
+                Arc::new(db_mysql::TiDbConnectionTester),
                 Arc::new(db_postgres::PostgresConnectionTester),
+                Arc::new(db_postgres::TimescaleDbConnectionTester),
+                Arc::new(db_mongodb::MongoDbConnectionTester),
+                Arc::new(db_sqlserver::SqlServerConnectionTester),
+                Arc::new(db_clickhouse::ClickHouseConnectionTester),
                 Arc::new(db_sqlite::SqliteConnectionTester),
                 Arc::new(db_duckdb::DuckDbConnectionTester),
                 Arc::new(db_redis::RedisConnectionTester),

@@ -212,7 +212,15 @@ pub fn build_alter_table_sql(
                     // SQLite < 3.35 doesn't support full ALTER COLUMN; DuckDB does.
                     Ok(format!("ALTER TABLE {table_sql} ALTER COLUMN {column_sql} SET DATA TYPE {new_type}"))
                 }
-                DataSourceKind::Redis => Err(AppError::validation(
+                DataSourceKind::TiDb => Ok(format!(
+                    "ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"
+                )),
+                DataSourceKind::TimescaleDb
+                | DataSourceKind::SqlServer
+                | DataSourceKind::ClickHouse => Err(AppError::unsupported(
+                    "ALTER COLUMN is not available for this data source yet",
+                )),
+                DataSourceKind::Redis | DataSourceKind::MongoDb => Err(AppError::validation(
                     "unsupported data source for ALTER TABLE",
                 )),
             }
@@ -247,7 +255,22 @@ pub fn build_alter_table_sql(
                 DataSourceKind::Sqlite | DataSourceKind::DuckDb => {
                     Ok(format!("DROP INDEX IF EXISTS {index_sql}"))
                 }
-                DataSourceKind::Redis => Err(AppError::validation(
+                DataSourceKind::TiDb => {
+                    let table_sql = qualified_table_sql(
+                        dialect.as_ref(),
+                        kind,
+                        request.database(),
+                        request.schema(),
+                        table,
+                    )?;
+                    Ok(format!("DROP INDEX {index_sql} ON {table_sql}"))
+                }
+                DataSourceKind::TimescaleDb
+                | DataSourceKind::SqlServer
+                | DataSourceKind::ClickHouse => Err(AppError::unsupported(
+                    "DROP INDEX is not available for this data source yet",
+                )),
+                DataSourceKind::Redis | DataSourceKind::MongoDb => Err(AppError::validation(
                     "unsupported data source for DROP INDEX",
                 )),
             }

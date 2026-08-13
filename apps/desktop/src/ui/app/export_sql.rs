@@ -229,7 +229,18 @@ async fn database_export_targets(
                 }
             }
         }
-        DataSourceKind::Redis => {}
+        DataSourceKind::Redis | DataSourceKind::MongoDb => {}
+        _ => {
+            let database = selected_database.or(profile.database.as_deref());
+            let tables = metadata_service
+                .list_tables(connection_id, database, None, None)
+                .await?;
+            targets.extend(tables.into_iter().map(|table| DatabaseExportTarget {
+                database: database.map(ToOwned::to_owned),
+                schema: table.schema,
+                table: table.name,
+            }));
+        }
     }
 
     Ok(targets)
