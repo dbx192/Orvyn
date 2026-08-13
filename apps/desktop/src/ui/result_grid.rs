@@ -5,8 +5,8 @@ use crate::ui::format::{
     hover_cell_value,
 };
 use crate::ui::grid::{
-    estimate_text_width, grid_stroke, label_cell, paint_cell_outline, resizable_header_cell,
-    row_fill, TABLE_HEADER_HEIGHT, TABLE_ROW_HEIGHT,
+    estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_outline,
+    resizable_header_cell, row_fill, TABLE_HEADER_HEIGHT, TABLE_ROW_HEIGHT,
 };
 use crate::ui::i18n::text as tr;
 use db_common::{
@@ -133,7 +133,10 @@ impl ResultSetGrid {
             .inner_margin(Margin::same(0.0))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                self.header(ui);
+                let (header_rect, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), TABLE_HEADER_HEIGHT),
+                    Sense::hover(),
+                );
                 let body_height = ui.available_height().max(0.0);
                 let content_width = self.content_width();
                 let output = ScrollArea::both()
@@ -152,6 +155,9 @@ impl ResultSetGrid {
                         }
                     });
                 self.scroll_x = output.state.offset.x;
+                // Paint the header after the scroll area so partially visible
+                // rows can never bleed over it while scrolling.
+                self.header(ui, header_rect);
             });
 
         action
@@ -327,10 +333,8 @@ impl ResultSetGrid {
         }
     }
 
-    fn header(&mut self, ui: &mut Ui) {
-        let viewport_width = ui.available_width();
-        let (rect, _) =
-            ui.allocate_exact_size(vec2(viewport_width, TABLE_HEADER_HEIGHT), Sense::hover());
+    fn header(&mut self, ui: &mut Ui, rect: Rect) {
+        ui.painter().rect_filled(rect, 0.0, header_fill(ui));
         let header_rect = Rect::from_min_size(
             pos2(rect.left() - self.scroll_x, rect.top()),
             vec2(self.content_width(), TABLE_HEADER_HEIGHT),
