@@ -296,6 +296,7 @@ impl TableEditor {
                 let output = if visible_rows.is_empty() {
                     ScrollArea::both()
                         .id_source("table_editor_body")
+                        .min_scrolled_height(grid_height)
                         .max_height(grid_height)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -305,6 +306,7 @@ impl TableEditor {
                 } else {
                     ScrollArea::both()
                         .id_source("table_editor_body")
+                        .min_scrolled_height(grid_height)
                         .max_height(grid_height)
                         .auto_shrink([false, false])
                         .show_rows(ui, TABLE_ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
@@ -321,8 +323,7 @@ impl TableEditor {
                 };
                 self.scroll_x = output.state.offset.x;
                 // Keep the fixed header above the virtualized body. Rows are
-                // intentionally painted first because their clip can include
-                // a fractional pixel at the top while scrolling.
+                // painted first so a fractional top pixel cannot cover it.
                 self.header(ui, header_rect);
             });
         let table_hovered = ui.ctx().input(|input| {
@@ -1763,7 +1764,7 @@ impl TableEditor {
                 grid_stroke(ui),
             );
             GridCellResponse {
-                response: cell.response.on_hover_text(copy_cell_value(original)),
+                response: cell.response,
                 rect: cell.rect,
             }
         }

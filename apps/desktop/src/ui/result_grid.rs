@@ -2,7 +2,6 @@
 
 use crate::ui::format::{
     cell_rich_text, compare_cell_values, copy_cell_value, copy_to_clipboard, display_cell_value,
-    hover_cell_value,
 };
 use crate::ui::grid::{
     estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_outline,
@@ -141,6 +140,7 @@ impl ResultSetGrid {
                 let content_width = self.content_width();
                 let output = ScrollArea::both()
                     .id_source("result_set_body")
+                    .min_scrolled_height(body_height)
                     .max_height(body_height)
                     .auto_shrink([false, false])
                     .show_rows(ui, TABLE_ROW_HEIGHT, page_rows.len(), |ui, row_range| {
@@ -283,54 +283,6 @@ impl ResultSetGrid {
                 }
             });
         });
-
-        if let Some(sort) = self.sort {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "Local sort by {}{}",
-                        self.result.columns[sort.column].name,
-                        match sort.direction {
-                            SortDirection::Asc => " ↑",
-                            SortDirection::Desc => " ↓",
-                        }
-                    ))
-                    .color(Color32::from_rgb(80, 80, 180))
-                    .small(),
-                );
-                if ui.small_button(tr("Clear sort")).clicked() {
-                    self.sort = None;
-                    self.page = 0;
-                    self.selected = None;
-                }
-            });
-        }
-
-        if let Some(selected) = self.selected {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "Selected R{} C{}",
-                        selected.row + 1,
-                        selected.column + 1
-                    ))
-                    .small()
-                    .color(Color32::from_rgb(70, 110, 190)),
-                );
-                if let Some(value) = self
-                    .result
-                    .rows
-                    .get(selected.row)
-                    .and_then(|row| row.values.get(selected.column))
-                {
-                    ui.label(
-                        RichText::new(display_cell_value(value))
-                            .small()
-                            .color(Color32::GRAY),
-                    );
-                }
-            });
-        }
     }
 
     fn header(&mut self, ui: &mut Ui, rect: Rect) {
@@ -483,7 +435,7 @@ impl ResultSetGrid {
                     row_fill(ui, visible_row_index, selected),
                     grid_stroke(ui),
                 );
-                let response = cell.response.on_hover_text(hover_cell_value(value));
+                let response = cell.response;
 
                 if selected {
                     paint_cell_outline(

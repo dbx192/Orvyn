@@ -63,7 +63,7 @@ pub fn install_global_fonts(ctx: &Context) {
             fonts
                 .font_data
                 .insert(name.clone(), FontData::from_owned(bytes));
-            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            for family in fallback_families() {
                 if let Some(fallbacks) = fonts.families.get_mut(&family) {
                     if !fallbacks.contains(&name) {
                         fallbacks.push(name.clone());
@@ -78,6 +78,15 @@ pub fn install_global_fonts(ctx: &Context) {
     } else {
         ctx.set_fonts(fonts);
     }
+}
+
+fn fallback_families() -> [FontFamily; 4] {
+    [
+        FontFamily::Proportional,
+        FontFamily::Monospace,
+        FontFamily::Name("orvyn-inter".into()),
+        FontFamily::Name("orvyn-mono".into()),
+    ]
 }
 
 fn global_font_candidates() -> Vec<PathBuf> {
@@ -122,4 +131,16 @@ fn font_name(path: &Path) -> String {
         .and_then(|stem| stem.to_str())
         .map(|stem| format!("global-{stem}"))
         .unwrap_or_else(|| "global-fallback".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_fallbacks_cover_the_custom_ui_families() {
+        let families = fallback_families();
+        assert!(families.contains(&FontFamily::Name("orvyn-inter".into())));
+        assert!(families.contains(&FontFamily::Name("orvyn-mono".into())));
+    }
 }

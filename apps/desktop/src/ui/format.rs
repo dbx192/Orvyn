@@ -69,34 +69,6 @@ pub fn display_cell_value(value: &CellValue) -> String {
     })
 }
 
-pub fn hover_cell_value(value: &CellValue) -> String {
-    match value {
-        CellValue::Null => "Type: NULL\nValue: NULL".to_string(),
-        CellValue::Text(text) if text.is_empty() => "Type: TEXT\nValue: empty string".to_string(),
-        CellValue::Text(text) => format!("Type: TEXT\nValue: {}", text),
-        CellValue::Bytes(bytes) => format!(
-            "Type: BINARY\nSize: {}\nBase64: {}",
-            human_bytes(bytes.len() as u64),
-            base64_preview(bytes, bytes.len().min(128))
-        ),
-        CellValue::Date(value) => format!("Type: DATE\nValue: {}", value.format("%Y-%m-%d")),
-        CellValue::Time(value) => format!("Type: TIME\nValue: {}", value.format("%H:%M:%S%.3f")),
-        CellValue::DateTime(value) => {
-            format!(
-                "Type: DATETIME\nValue: {}",
-                value.format("%Y-%m-%d %H:%M:%S%.3f")
-            )
-        }
-        CellValue::Timestamp(value) => format!("Type: TIMESTAMP\nValue: {}", value.to_rfc3339()),
-        CellValue::Json(value) => format!("Type: JSON\nValue: {}", value),
-        CellValue::Bool(value) => format!("Type: BOOL\nValue: {}", value),
-        CellValue::Int(value) => format!("Type: INT\nValue: {}", value),
-        CellValue::UInt(value) => format!("Type: UINT\nValue: {}", value),
-        CellValue::Float(value) => format!("Type: FLOAT\nValue: {}", value),
-        CellValue::Decimal(value) => format!("Type: DECIMAL\nValue: {}", value),
-    }
-}
-
 pub fn truncate_display(value: String) -> String {
     let mut chars = value.chars();
     let truncated = chars.by_ref().take(MAX_DISPLAY_CHARS).collect::<String>();
