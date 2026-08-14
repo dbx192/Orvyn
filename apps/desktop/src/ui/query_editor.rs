@@ -55,6 +55,7 @@ struct PendingDangerConfirm {
 const LARGE_SQL_HIGHLIGHT_THRESHOLD: usize = 20_000;
 const SQL_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(140);
 const MAX_COMPLETION_ITEMS: usize = 24;
+const SQL_EDITOR_HEIGHT: f32 = 272.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionAction {
@@ -113,6 +114,7 @@ struct QueryEditorTab {
     execution_report: Option<QueryExecutionReport>,
     execution_running: bool,
     execution_cancelling: bool,
+    page_loading: Option<usize>,
     execution_error: Option<String>,
     highlighted_sql: Vec<SqlHighlightToken>,
     highlight_due_at: Option<Instant>,
@@ -144,6 +146,7 @@ impl QueryEditorTab {
             execution_report: None,
             execution_running: false,
             execution_cancelling: false,
+            page_loading: None,
             execution_error: None,
             highlighted_sql: Vec::new(),
             highlight_due_at: None,
@@ -766,69 +769,88 @@ impl QueryEditor {
         self.refresh_deferred_highlight(tab_id);
         self.tab_bar(ui);
         ui.separator();
-        let editor_height = (ui.available_height() * 0.42).max(180.0);
         let side_width = self.side_panel_width;
         let connections_snapshot = self.connections.clone();
         let mut column_loads = Vec::new();
         ui.horizontal(|ui| {
+            let main_height = ui.available_height();
             let main_width = if self.side_panel_open {
                 (ui.available_width() - side_width - 12.0).max(360.0)
             } else {
                 ui.available_width()
             };
 
-            ui.vertical(|ui| {
-                ui.set_width(main_width);
-                let Some(tab) = self.tabs.get_mut(&tab_id) else {
-                    return;
-                };
+            // The editor and result grid share the main workspace vertically.
+            // Previously they were laid out side-by-side, so the editor consumed
+            // the available width and left the result grid off-screen.
+            ui.allocate_ui_with_layout(
+                vec2(main_width, main_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    let editor_height = SQL_EDITOR_HEIGHT;
+                    let Some(tab) = self.tabs.get_mut(&tab_id) else {
+                        return;
+                    };
 
-                Frame::default()
-                    .fill(ui.visuals().extreme_bg_color)
-                    .stroke(Stroke::new(
-                        1.0,
-                        ui.visuals().widgets.noninteractive.bg_stroke.color,
-                    ))
-                    .inner_margin(Margin::same(6.0))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("SQL").strong().monospace());
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} statement(s)",
-                                    split_statements(&tab.sql).len()
-                                ))
-                                .small()
-                                .color(Color32::GRAY),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let selected = tab.selection.is_some();
+                    Frame::default()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .stroke(Stroke::new(
+                            1.0,
+                            ui.visuals().widgets.noninteractive.bg_stroke.color,
+                        ))
+                        .inner_margin(Margin::same(6.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("SQL").strong().monospace());
                                 ui.label(
-                                    RichText::new(if selected { "selection" } else { "cursor" })
+                                    RichText::new(format!(
+                                        "{} statement(s)",
+                                        split_statements(&tab.sql).len()
+                                    ))
+                                    .small()
+                                    .color(Color32::GRAY),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let selected = tab.selection.is_some();
+                                    ui.label(
+                                        RichText::new(if selected {
+                                            "selection"
+                                        } else {
+                                            "cursor"
+                                        })
                                         .small()
                                         .color(Color32::GRAY),
-                                );
-                            });
-                        });
-                        ui.separator();
-                        ScrollArea::vertical()
-                            .id_source("query_editor_sql_scroll")
-                            .max_height((editor_height - 32.0).max(120.0))
-                            .show(ui, |ui| {
-                                let tokens = tab.highlighted_sql.clone();
-                                let tab_pressed = ui.input_mut(|input| {
-                                    if tab.completion.visible
-                                        && !tab.completion.items.is_empty()
-                                        && input.key_pressed(Key::Tab)
-                                    {
-                                        input.consume_key(eframe::egui::Modifiers::NONE, Key::Tab)
-                                    } else {
-                                        false
-                                    }
+                                    );
                                 });
-                                let dialect =
-                                    connection_kind_for(&connections_snapshot, tab.connection_id);
-                                let mut layouter =
+                            });
+                            ui.separator();
+                            ScrollArea::vertical()
+                                .id_source("query_editor_sql_scroll")
+                                .max_height((editor_height - 32.0).max(120.0))
+                                .show(ui, |ui| {
+                                    // `max_height` limits a scroll area but does
+                                    // not reserve space for short SQL. Keep the
+                                    // viewport tall enough for the 32-row editor.
+                                    ui.set_min_height((editor_height - 32.0).max(120.0));
+                                    let tokens = tab.highlighted_sql.clone();
+                                    let tab_pressed = ui.input_mut(|input| {
+                                        if tab.completion.visible
+                                            && !tab.completion.items.is_empty()
+                                            && input.key_pressed(Key::Tab)
+                                        {
+                                            input.consume_key(
+                                                eframe::egui::Modifiers::NONE,
+                                                Key::Tab,
+                                            )
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    let dialect = connection_kind_for(
+                                        &connections_snapshot,
+                                        tab.connection_id,
+                                    );
+                                    let mut layouter =
                                     move |ui: &Ui,
                                           text: &str,
                                           wrap_width: f32|
@@ -838,71 +860,84 @@ impl QueryEditor {
                                         ui.fonts(|fonts| fonts.layout_job(job))
                                     };
 
-                                let mut output = TextEdit::multiline(&mut tab.sql)
-                                    .font(FontId::monospace(14.0))
-                                    .desired_width(f32::INFINITY)
-                                    .desired_rows(16)
-                                    .code_editor()
-                                    .frame(false)
-                                    .layouter(&mut layouter)
-                                    .show(ui);
+                                    let mut output = TextEdit::multiline(&mut tab.sql)
+                                        .font(FontId::monospace(14.0))
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(32)
+                                        .code_editor()
+                                        .frame(false)
+                                        .layouter(&mut layouter)
+                                        .show(ui);
 
-                                let mut refresh_completion = output.response.has_focus()
-                                    && ui.input(|input| {
-                                        input.key_pressed(Key::Space) && input.modifiers.ctrl
-                                    });
+                                    let mut refresh_completion = output.response.has_focus()
+                                        && ui.input(|input| {
+                                            input.key_pressed(Key::Space) && input.modifiers.ctrl
+                                        });
 
-                                if output.response.changed() {
-                                    tab.dirty = true;
-                                    schedule_sql_highlight(tab);
-                                    refresh_completion = true;
-                                }
+                                    if output.response.changed() {
+                                        tab.dirty = true;
+                                        schedule_sql_highlight(tab);
+                                        refresh_completion = true;
+                                    }
 
-                                if let Some(range) = output.cursor_range {
-                                    let primary = char_index_to_byte_offset(
-                                        &tab.sql,
-                                        range.primary.ccursor.index,
-                                    );
-                                    let secondary = char_index_to_byte_offset(
-                                        &tab.sql,
-                                        range.secondary.ccursor.index,
-                                    );
-                                    tab.cursor_offset = primary;
-                                    let selection = TextRange::new(primary, secondary);
-                                    tab.selection = (!selection.is_empty()).then_some(selection);
-                                }
+                                    if let Some(range) = output.cursor_range {
+                                        let primary = char_index_to_byte_offset(
+                                            &tab.sql,
+                                            range.primary.ccursor.index,
+                                        );
+                                        let secondary = char_index_to_byte_offset(
+                                            &tab.sql,
+                                            range.secondary.ccursor.index,
+                                        );
+                                        tab.cursor_offset = primary;
+                                        let selection = TextRange::new(primary, secondary);
+                                        tab.selection =
+                                            (!selection.is_empty()).then_some(selection);
+                                    }
 
-                                if refresh_completion {
-                                    update_completion_for_tab(tab);
-                                    column_loads.extend(missing_completion_columns(tab));
-                                }
+                                    if refresh_completion {
+                                        update_completion_for_tab(tab);
+                                        column_loads.extend(missing_completion_columns(tab));
+                                    }
 
-                                if output.response.has_focus()
-                                    && tab.completion.visible
-                                    && ui.input(|input| input.key_pressed(Key::Escape))
-                                {
-                                    tab.completion.visible = false;
-                                }
+                                    if output.response.has_focus()
+                                        && tab.completion.visible
+                                        && ui.input(|input| input.key_pressed(Key::Escape))
+                                    {
+                                        tab.completion.visible = false;
+                                    }
 
-                                if let Some(inserted) = completion_panel(ui, tab, tab_pressed) {
-                                    tab.sql = inserted;
-                                    let char_cursor = tab.sql[..tab.cursor_offset].chars().count();
-                                    output.state.cursor.set_char_range(Some(
-                                        eframe::egui::text::CCursorRange::one(
-                                            eframe::egui::text::CCursor::new(char_cursor),
-                                        ),
-                                    ));
-                                    output.state.store(ui.ctx(), output.response.id);
-                                    tab.dirty = true;
-                                    schedule_sql_highlight(tab);
-                                    update_completion_for_tab(tab);
-                                }
-                            });
-                    });
-            });
+                                    // Completion is tied to the current caret. Once
+                                    // the editor scrolls, its old layout position is
+                                    // no longer meaningful, so dismiss it.
+                                    if tab.completion.visible
+                                        && ui.input(|input| input.raw_scroll_delta.y != 0.0)
+                                    {
+                                        tab.completion.visible = false;
+                                    }
 
-            ui.separator();
-            self.results_panel(ui, tab_id);
+                                    if let Some(inserted) = completion_panel(ui, tab, tab_pressed) {
+                                        tab.sql = inserted;
+                                        let char_cursor =
+                                            tab.sql[..tab.cursor_offset].chars().count();
+                                        output.state.cursor.set_char_range(Some(
+                                            eframe::egui::text::CCursorRange::one(
+                                                eframe::egui::text::CCursor::new(char_cursor),
+                                            ),
+                                        ));
+                                        output.state.store(ui.ctx(), output.response.id);
+                                        tab.dirty = true;
+                                        schedule_sql_highlight(tab);
+                                        update_completion_for_tab(tab);
+                                    }
+                                });
+                        });
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    self.results_panel(ui, tab_id);
+                },
+            );
 
             if self.side_panel_open {
                 let (divider_rect, divider_response) = ui.allocate_exact_size(
@@ -1008,11 +1043,13 @@ impl QueryEditor {
                         .color(Color32::from_rgb(70, 110, 190))
                         .strong(),
                 );
-                ui.label(
-                    RichText::new(result.statement.trim())
-                        .small()
-                        .color(Color32::GRAY),
-                );
+                if tab.page_loading == Some(result_index) {
+                    ui.label(
+                        RichText::new("Loading page...")
+                            .small()
+                            .color(Color32::YELLOW),
+                    );
+                }
                 ui.separator();
                 if ui.button("Export CSV").clicked() {
                     export_request = Some((
@@ -1127,6 +1164,7 @@ impl QueryEditor {
 
         tab.execution_running = true;
         tab.execution_cancelling = false;
+        tab.page_loading = None;
         tab.execution_error = None;
         tab.results.clear();
         tab.execution_report = None;
@@ -1171,6 +1209,7 @@ impl QueryEditor {
 
         tab.execution_running = true;
         tab.execution_cancelling = false;
+        tab.page_loading = None;
         tab.execution_error = None;
         tab.results.clear();
         tab.execution_report = None;
@@ -1210,9 +1249,10 @@ impl QueryEditor {
             return;
         };
 
-        tab.execution_running = true;
-        tab.execution_cancelling = false;
-        tab.execution_error = None;
+        if tab.page_loading.is_some() {
+            return;
+        }
+        tab.page_loading = Some(result_index);
 
         let tx = self.tx.clone();
         let service = self.query_service.clone();
@@ -1621,8 +1661,7 @@ impl QueryEditor {
                 }
                 QueryEditorEvent::ResultPageCompleted(tab_id, result_index, result) => {
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                        tab.execution_running = false;
-                        tab.execution_cancelling = false;
+                        tab.page_loading = None;
                         match result {
                             Ok(report) => {
                                 if let Some(result) = report.results.first() {

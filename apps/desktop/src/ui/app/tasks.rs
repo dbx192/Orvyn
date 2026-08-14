@@ -1030,6 +1030,17 @@ fn ordered_table_select_sql(
     table_sql: &str,
     columns: &[db_common::TableColumn],
 ) -> Result<String, AppError> {
+    let time_columns = columns
+        .iter()
+        .filter(|column| {
+            let ty = column.database_type.to_ascii_lowercase();
+            ty.contains("date") || ty.contains("time") || ty.contains("timestamp")
+        })
+        .map(|column| {
+            db_common::Identifier::new(&column.name)
+                .map(|identifier| dialect.quote_identifier(&identifier))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let primary_keys = columns
         .iter()
         .filter(|column| column.primary_key)
@@ -1038,10 +1049,19 @@ fn ordered_table_select_sql(
                 .map(|identifier| dialect.quote_identifier(&identifier))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let order = if primary_keys.is_empty() {
-        String::new()
-    } else {
+    let order = if !time_columns.is_empty() {
+        format!(" ORDER BY {}", time_columns.join(", "))
+    } else if !primary_keys.is_empty() {
         format!(" ORDER BY {}", primary_keys.join(", "))
+    } else if let Some(first_column) = columns.first() {
+        // Doris requires ORDER BY whenever OFFSET is used. A first-column
+        // fallback keeps pagination valid for tables without a primary key.
+        format!(
+            " ORDER BY {}",
+            dialect.quote_identifier(&db_common::Identifier::new(&first_column.name)?)
+        )
+    } else {
+        String::new()
     };
     Ok(format!("SELECT * FROM {table_sql}{order}"))
 }

@@ -2375,18 +2375,33 @@ impl TableEditor {
 
     fn ordered_table_query(&self) -> std::result::Result<String, String> {
         let table = self.qualified_table_name()?;
+        let time_columns = self
+            .columns
+            .iter()
+            .filter(|column| {
+                let ty = column.database_type.to_ascii_lowercase();
+                ty.contains("date") || ty.contains("time") || ty.contains("timestamp")
+            })
+            .map(|column| self.quote_identifier(&column.name))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let primary_keys = self
             .columns
             .iter()
             .filter(|column| column.primary_key)
             .map(|column| self.quote_identifier(&column.name))
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        if primary_keys.is_empty() {
+        let order_columns =
+            if self.data_source_kind == Some(DataSourceKind::Doris) && !time_columns.is_empty() {
+                time_columns
+            } else {
+                primary_keys
+            };
+        if order_columns.is_empty() {
             Ok(format!("SELECT * FROM {table}"))
         } else {
             Ok(format!(
                 "SELECT * FROM {table} ORDER BY {}",
-                primary_keys.join(", ")
+                order_columns.join(", ")
             ))
         }
     }
