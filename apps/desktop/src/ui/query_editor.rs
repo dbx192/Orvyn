@@ -1,9 +1,11 @@
 use crate::ui::i18n::text as tr;
 use crate::ui::result_grid::{ResultSetGrid, ResultSetGridAction};
+use crate::ui::table_editor::TableEditor;
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::{
+    dialect::{BacktickDialect, DoubleQuoteDialect},
     looks_like_unqualified_mutation, split_statements, statement_at_offset, AppError, ConnectionId,
-    ConnectionProfile, DataSourceKind, DatabaseObject, ErrorKind, FavoriteQuery,
+    ConnectionProfile, DataSourceKind, DatabaseObject, Dialect, ErrorKind, FavoriteQuery,
     QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
     SqlHighlightToken, SqlTokenKind, TableColumn, TextRange, DEFAULT_QUERY_RESULT_LIMIT,
     QUERY_RESULT_METADATA_TOTAL_ROWS,
@@ -25,6 +27,7 @@ struct QueryResultView {
     statement: String,
     summary: String,
     grid: Option<ResultSetGrid>,
+    table_editor: Option<TableEditor>,
     affected_rows: u64,
     elapsed_ms: u128,
     notices: Vec<String>,
@@ -39,6 +42,7 @@ enum QueryEditorEvent {
     SchemaList(QueryId, Vec<String>),
     TableList(QueryId, Vec<String>),
     ColumnList(QueryId, String, Vec<TableColumn>),
+    ResultTableColumns(QueryId, usize, String, Option<String>, Vec<TableColumn>),
     HistoryLoaded(Vec<QueryHistoryEntry>),
     FavoritesLoaded(Vec<FavoriteQuery>),
     FavoriteSaved(Result<FavoriteQuery, AppError>),
@@ -1111,19 +1115,25 @@ impl QueryEditor {
                 ui.label(RichText::new(notice).small().color(Color32::LIGHT_BLUE));
             }
 
-            match &mut result.grid {
-                Some(grid) => match grid.ui(ui) {
-                    Some(ResultSetGridAction::Message(message)) => {
-                        self.status = message;
+            if let Some(editor) = &mut result.table_editor {
+                if let Some(message) = editor.ui(ui) {
+                    self.status = message;
+                }
+            } else {
+                match &mut result.grid {
+                    Some(grid) => match grid.ui(ui) {
+                        Some(ResultSetGridAction::Message(message)) => {
+                            self.status = message;
+                        }
+                        Some(ResultSetGridAction::PageRequested { offset, page_size }) => {
+                            page_request =
+                                Some((result_index, result.statement.clone(), offset, page_size));
+                        }
+                        None => {}
+                    },
+                    None => {
+                        ui.label(tr("Statement executed without a tabular result."));
                     }
-                    Some(ResultSetGridAction::PageRequested { offset, page_size }) => {
-                        page_request =
-                            Some((result_index, result.statement.clone(), offset, page_size));
-                    }
-                    None => {}
-                },
-                None => {
-                    ui.label(tr("Statement executed without a tabular result."));
                 }
             }
         }
@@ -1670,6 +1680,7 @@ impl QueryEditor {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 QueryEditorEvent::ExecutionCompleted(tab_id, result) => {
+                    let mut editable_requests = Vec::new();
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
                         tab.execution_running = false;
                         tab.execution_cancelling = false;
@@ -1686,6 +1697,19 @@ impl QueryEditor {
                                 tab.selected_result = 0;
                                 tab.execution_report = Some(report.clone());
                                 tab.results = results;
+                                for (index, view) in tab.results.iter().enumerate() {
+                                    if let Some((table, schema)) =
+                                        editable_result_source(&view.statement)
+                                    {
+                                        editable_requests.push((
+                                            index,
+                                            table,
+                                            schema.or_else(|| tab.schema.clone()),
+                                            tab.connection_id,
+                                            tab.database.clone(),
+                                        ));
+                                    }
+                                }
                                 tab.dirty = false;
                                 self.status = format!(
                                     "Execution completed in {} ms, {} statement result(s), {} rows affected",
@@ -1704,6 +1728,26 @@ impl QueryEditor {
                                 }
                             }
                         }
+                    }
+                    for (index, table, schema, connection_id, database) in editable_requests {
+                        let metadata = self.metadata_service.clone();
+                        let tx = self.tx.clone();
+                        self.runtime.spawn(async move {
+                            if let Ok(columns) = metadata
+                                .table_columns(
+                                    connection_id,
+                                    database.as_deref(),
+                                    schema.as_deref(),
+                                    &table,
+                                    None,
+                                )
+                                .await
+                            {
+                                let _ = tx.send(QueryEditorEvent::ResultTableColumns(
+                                    tab_id, index, table, schema, columns,
+                                ));
+                            }
+                        });
                     }
                     self.load_history();
                 }
@@ -1808,6 +1852,53 @@ impl QueryEditor {
                         tab.columns_by_table
                             .insert(normalize_identifier(&table), columns);
                         refresh_active_completion(tab);
+                    }
+                }
+                QueryEditorEvent::ResultTableColumns(
+                    tab_id,
+                    result_index,
+                    table,
+                    schema,
+                    columns,
+                ) => {
+                    let Some(tab) = self.tabs.get_mut(&tab_id) else {
+                        continue;
+                    };
+                    let Some(kind) = connection_kind_for(&self.connections, tab.connection_id)
+                    else {
+                        continue;
+                    };
+                    let has_primary_key = columns.iter().any(|column| column.primary_key);
+                    let Some(view) = tab.results.get_mut(result_index) else {
+                        continue;
+                    };
+                    let Some(result) = view.grid.as_ref().map(|grid| grid.result().clone()) else {
+                        continue;
+                    };
+                    let result_columns = result
+                        .columns
+                        .iter()
+                        .map(|column| normalize_identifier(&column.name))
+                        .collect::<BTreeSet<_>>();
+                    let includes_all_keys = columns
+                        .iter()
+                        .filter(|column| column.primary_key)
+                        .all(|column| result_columns.contains(&normalize_identifier(&column.name)));
+                    if has_primary_key && includes_all_keys {
+                        view.table_editor = Some(TableEditor::with_services(
+                            schema,
+                            table,
+                            columns,
+                            result,
+                            query_dialect(kind),
+                            self.query_service.clone(),
+                            self.metadata_service.clone(),
+                            tab.connection_id,
+                            kind,
+                            tab.database.clone(),
+                            self.runtime.clone(),
+                        ));
+                        view.grid = None;
                     }
                 }
                 QueryEditorEvent::TransactionCompleted(tab_id, action, result) => {
@@ -2230,6 +2321,7 @@ fn query_result_view(
         summary: result_tab_summary(index, result),
         grid: (!result.columns.is_empty())
             .then(|| ResultSetGrid::new(result.clone()).with_runtime(runtime)),
+        table_editor: None,
         affected_rows: result.affected_rows,
         elapsed_ms: result.execution_time_ms,
         notices: result.notices.clone(),
@@ -2261,6 +2353,53 @@ fn result_tab_summary(index: usize, result: &db_common::QueryResult) -> String {
             statement,
             result.affected_rows
         )
+    }
+}
+
+fn query_dialect(kind: DataSourceKind) -> Box<dyn Dialect> {
+    match kind {
+        DataSourceKind::MySql | DataSourceKind::Doris => Box::new(BacktickDialect),
+        _ => Box::new(DoubleQuoteDialect),
+    }
+}
+
+/// Returns a table only for simple, single-table SELECT statements. Results
+/// from joins, derived tables, and aggregates remain read-only.
+fn editable_result_source(statement: &str) -> Option<(String, Option<String>)> {
+    let normalized = statement.trim().trim_end_matches(';').trim();
+    let upper = normalized.to_ascii_uppercase();
+    if !upper.starts_with("SELECT ")
+        || [
+            " JOIN ",
+            " GROUP ",
+            " HAVING ",
+            " UNION ",
+            " INTERSECT ",
+            " EXCEPT ",
+        ]
+        .iter()
+        .any(|keyword| upper.contains(keyword))
+    {
+        return None;
+    }
+    let from = upper.find(" FROM ")?;
+    let source = normalized[from + 6..].trim_start();
+    if source.starts_with('(') {
+        return None;
+    }
+    let source = source.split_whitespace().next()?.trim_end_matches(',');
+    if source.contains(',') {
+        return None;
+    }
+    let parts = source
+        .split('.')
+        .map(|part| part.trim_matches(|ch| ch == '`' || ch == '"'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [table] => Some(((*table).to_string(), None)),
+        [schema, table] => Some(((*table).to_string(), Some((*schema).to_string()))),
+        _ => None,
     }
 }
 
@@ -3037,6 +3176,30 @@ mod completion_tests {
                     alias: Some("a".to_string()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn identifies_single_table_results_as_editable_candidates() {
+        assert_eq!(
+            editable_result_source(
+                "SELECT id, name FROM \"base\".\"country\" WHERE id > 1 ORDER BY name LIMIT 10"
+            ),
+            Some(("country".to_string(), Some("base".to_string())))
+        );
+    }
+
+    #[test]
+    fn keeps_joined_and_aggregate_results_read_only() {
+        assert_eq!(
+            editable_result_source(
+                "SELECT * FROM books JOIN authors ON authors.id = books.author_id"
+            ),
+            None
+        );
+        assert_eq!(
+            editable_result_source("SELECT category, COUNT(*) FROM books GROUP BY category"),
+            None
         );
     }
 }

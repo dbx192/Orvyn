@@ -2394,8 +2394,17 @@ impl TableEditor {
         let order_columns =
             if self.data_source_kind == Some(DataSourceKind::Doris) && !time_columns.is_empty() {
                 time_columns
-            } else {
+            } else if !primary_keys.is_empty() {
                 primary_keys
+            } else if self.data_source_kind == Some(DataSourceKind::Doris) {
+                self.columns
+                    .first()
+                    .map(|column| self.quote_identifier(&column.name))
+                    .transpose()?
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
             };
         if order_columns.is_empty() {
             Ok(format!("SELECT * FROM {table}"))
@@ -2886,6 +2895,17 @@ mod tests {
             "SELECT * FROM `main`.`customers` WHERE `id` < 1 ORDER BY `id` DESC LIMIT 500"
         );
         assert!(reverse_previous);
+    }
+
+    #[test]
+    fn orders_doris_offset_pages_by_the_first_column_without_keys() {
+        let mut editor = test_editor(false);
+        editor.data_source_kind = Some(DataSourceKind::Doris);
+
+        assert_eq!(
+            editor.ordered_table_query().unwrap(),
+            "SELECT * FROM `main`.`customers` ORDER BY `id`"
+        );
     }
 
     #[test]

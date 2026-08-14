@@ -272,6 +272,9 @@ pub fn page_result_statement(sql: &str, limit: u32, offset: u64) -> Option<Strin
     if !is_pageable_result_query(statement) {
         return None;
     }
+    if has_explicit_page_clause(statement) {
+        return None;
+    }
 
     Some(format!(
         "SELECT * FROM ({statement}) AS __query_page LIMIT {limit} OFFSET {offset}"
@@ -283,10 +286,19 @@ pub fn count_result_page_statement(sql: &str) -> Option<String> {
     if !is_pageable_result_query(statement) {
         return None;
     }
+    if has_explicit_page_clause(statement) {
+        return None;
+    }
 
     Some(format!(
         "SELECT COUNT(*) AS total_rows FROM ({statement}) AS __query_count"
     ))
+}
+
+fn has_explicit_page_clause(statement: &str) -> bool {
+    top_level_sql_words(statement)
+        .iter()
+        .any(|word| matches!(word.value.as_str(), "LIMIT" | "OFFSET" | "FETCH"))
 }
 
 pub fn statement_summary(sql: &str, max_chars: usize) -> String {
@@ -891,6 +903,13 @@ mod tests {
             count_result_page_statement("SELECT * FROM books;").as_deref(),
             Some("SELECT COUNT(*) AS total_rows FROM (SELECT * FROM books) AS __query_count")
         );
+    }
+
+    #[test]
+    fn skips_page_wrappers_for_explicit_top_level_limits() {
+        let sql = "SELECT * FROM `base`.`country` ORDER BY `zh_name` LIMIT 10";
+        assert_eq!(page_result_statement(sql, 100, 0), None);
+        assert_eq!(count_result_page_statement(sql), None);
     }
 
     #[test]
