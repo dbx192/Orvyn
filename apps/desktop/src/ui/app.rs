@@ -23,14 +23,14 @@ use crate::ui::{
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
     state::{AppState, AppTheme},
     table_editor::TableEditor,
-    table_structure::TableStructureView,
+    table_structure::{AlterTableRequest, TableStructureView},
 };
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
     redis_service::RedisService, search_service::SearchService, session::SessionManager,
 };
 use eframe::egui::{Context, Id, Key, Modifiers};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokio::runtime::Handle;
 
 pub struct DesktopApp {
@@ -60,6 +60,8 @@ pub struct DesktopApp {
     pending_table_drop: Option<PendingTask<DropTablePayload>>,
     pending_clear: Option<PendingTask<ClearPayload>>,
     pending_alter_table: Option<PendingTask<AlterTablePayload>>,
+    /// Table-structure ALTER requests waiting to be applied one at a time.
+    alter_queue: VecDeque<AlterTableRequest>,
     export_request: Option<TableExportRequest>,
     import_table_request: Option<ImportTableRequest>,
     drop_table_request: Option<DropTableRequest>,
@@ -134,6 +136,7 @@ impl DesktopApp {
             pending_table_drop: None,
             pending_clear: None,
             pending_alter_table: None,
+            alter_queue: VecDeque::new(),
             export_request: None,
             import_table_request: None,
             drop_table_request: None,

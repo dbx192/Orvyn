@@ -330,7 +330,7 @@ impl DesktopApp {
                         Some(view) => {
                             let message = view.ui(ui);
                             let create_index = view.take_create_index_request();
-                            let alter_request = view.take_alter_request();
+                            let alter_requests = view.take_alter_requests();
                             if let Some(msg) = message {
                                 if !msg.is_empty() {
                                     self.state.set_status(msg);
@@ -339,8 +339,9 @@ impl DesktopApp {
                             if let Some(request) = create_index {
                                 self.spawn_index_create(request);
                             }
-                            if let Some(request) = alter_request {
-                                self.spawn_alter_table(request);
+                            if !alter_requests.is_empty() {
+                                self.alter_queue.extend(alter_requests);
+                                self.pump_alter_queue();
                             }
                         }
                         None => {

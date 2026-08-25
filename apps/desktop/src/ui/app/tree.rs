@@ -13,8 +13,11 @@ use db_common::ConnectionId;
 use eframe::egui::{Align, Color32, Context, Layout, RichText, SidePanel};
 use import_export::ExportFormat;
 
-const LEFT_PANEL_MIN_WIDTH: f32 = 200.0;
-const LEFT_PANEL_MAX_WIDTH: f32 = 280.0;
+// The previous "resizable" panel clamped the width to 200..280, an ~80px
+// sliver for which dragging felt like nothing happened. Widen the range so the
+// split is actually adjustable between a compact rail and a wider explorer.
+const LEFT_PANEL_MIN_WIDTH: f32 = 180.0;
+const LEFT_PANEL_MAX_WIDTH: f32 = 420.0;
 
 impl DesktopApp {
     pub(super) fn left_tree(&mut self, ctx: &Context) {
@@ -22,7 +25,7 @@ impl DesktopApp {
         // content-driven sizing implementation are not restored.
         SidePanel::left("connection_object_tree_resizable_v2")
             .resizable(true)
-            .default_width(200.0)
+            .default_width(210.0)
             .width_range(LEFT_PANEL_MIN_WIDTH..=LEFT_PANEL_MAX_WIDTH)
             .show(ctx, |ui| {
                 let (message, actions) = self.object_tree.ui(ctx, ui);

@@ -397,6 +397,7 @@ impl DesktopApp {
             if !done {
                 self.pending_alter_table = Some(cell);
             }
+            self.pump_alter_queue();
         }
     }
 
@@ -971,6 +972,11 @@ impl DesktopApp {
             AlterTableRequest::ModifyColumn { column_name, .. } => {
                 format!("modify column {column_name} on {table}")
             }
+            AlterTableRequest::RenameColumn {
+                old_name, new_name, ..
+            } => {
+                format!("rename column {old_name} to {new_name} on {table}")
+            }
             AlterTableRequest::DropIndex { index_name, .. } => {
                 format!("drop index {index_name} on {table}")
             }
@@ -1020,6 +1026,18 @@ impl DesktopApp {
         });
 
         self.state.set_status("Altering table...");
+    }
+
+    /// Pop the next queued ALTER request and run it, if none is currently in
+    /// flight. Used to apply a Save batch one statement at a time (the task
+    /// completion handler in `poll_pending_loads` re-invokes this).
+    pub(super) fn pump_alter_queue(&mut self) {
+        if self.pending_alter_table.is_some() {
+            return;
+        }
+        if let Some(request) = self.alter_queue.pop_front() {
+            self.spawn_alter_table(request);
+        }
     }
 }
 

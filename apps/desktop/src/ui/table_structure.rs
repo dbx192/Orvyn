@@ -23,6 +23,15 @@ pub struct CreateIndexRequest {
     pub unique: bool,
 }
 
+/// A column definition that can be copied on the clipboard for Navicat-style
+/// copy / paste inside the structure designer.
+#[derive(Debug, Clone, Default)]
+pub struct StagedColumn {
+    pub column_type: String,
+    pub nullable: bool,
+    pub default_value: Option<String>,
+}
+
 /// A request to alter a table's structure. The shell layer turns this into
 /// a `QueryExecutionRequest` and re-loads the structure after it completes.
 #[derive(Debug, Clone)]
@@ -54,6 +63,14 @@ pub enum AlterTableRequest {
         nullable: bool,
         default_value: Option<String>,
     },
+    RenameColumn {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        old_name: String,
+        new_name: String,
+    },
     DropIndex {
         connection_id: ConnectionId,
         database: Option<String>,
@@ -81,6 +98,7 @@ impl AlterTableRequest {
             AlterTableRequest::AddColumn { connection_id, .. }
             | AlterTableRequest::DropColumn { connection_id, .. }
             | AlterTableRequest::ModifyColumn { connection_id, .. }
+            | AlterTableRequest::RenameColumn { connection_id, .. }
             | AlterTableRequest::DropIndex { connection_id, .. }
             | AlterTableRequest::AddForeignKey { connection_id, .. } => *connection_id,
         }
@@ -91,6 +109,7 @@ impl AlterTableRequest {
             AlterTableRequest::AddColumn { table, .. }
             | AlterTableRequest::DropColumn { table, .. }
             | AlterTableRequest::ModifyColumn { table, .. }
+            | AlterTableRequest::RenameColumn { table, .. }
             | AlterTableRequest::DropIndex { table, .. }
             | AlterTableRequest::AddForeignKey { table, .. } => table,
         }
@@ -101,6 +120,7 @@ impl AlterTableRequest {
             AlterTableRequest::AddColumn { database, .. }
             | AlterTableRequest::DropColumn { database, .. }
             | AlterTableRequest::ModifyColumn { database, .. }
+            | AlterTableRequest::RenameColumn { database, .. }
             | AlterTableRequest::DropIndex { database, .. }
             | AlterTableRequest::AddForeignKey { database, .. } => database.as_deref(),
         }
@@ -111,6 +131,7 @@ impl AlterTableRequest {
             AlterTableRequest::AddColumn { schema, .. }
             | AlterTableRequest::DropColumn { schema, .. }
             | AlterTableRequest::ModifyColumn { schema, .. }
+            | AlterTableRequest::RenameColumn { schema, .. }
             | AlterTableRequest::DropIndex { schema, .. }
             | AlterTableRequest::AddForeignKey { schema, .. } => schema.as_deref(),
         }
@@ -220,6 +241,44 @@ pub fn build_alter_table_sql(
                 )),
                 _ => Err(AppError::validation(
                     "unsupported data source for ALTER TABLE",
+                )),
+            }
+        }
+        AlterTableRequest::RenameColumn {
+            table,
+            old_name,
+            new_name,
+            ..
+        } => {
+            let table_sql = qualified_table_sql(
+                dialect.as_ref(),
+                kind,
+                request.database(),
+                request.schema(),
+                table,
+            )?;
+            let old_sql = quote_id(dialect.as_ref(), old_name)?;
+            let new_sql = quote_id(dialect.as_ref(), new_name)?;
+            match kind.protocol_family() {
+                // MySQL and Postgres both support `RENAME COLUMN old TO new`.
+                ProtocolFamily::MySql | ProtocolFamily::PostgreSql => Ok(format!(
+                    "ALTER TABLE {table_sql} RENAME COLUMN {old_sql} TO {new_sql}"
+                )),
+                ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => Ok(format!(
+                    "ALTER TABLE {table_sql} RENAME COLUMN {old_sql} TO {new_sql}"
+                )),
+                ProtocolFamily::SqlServer => Ok(format!(
+                    "EXEC sp_rename '{}.{}', '{}', 'COLUMN'",
+                    qualified_table_sql(dialect.as_ref(), kind, None, None, table)?,
+                    old_name,
+                    new_name,
+                )),
+                ProtocolFamily::ClickHouse
+                | ProtocolFamily::Tdengine => Err(AppError::unsupported(
+                    "RENAME COLUMN is not available for this data source yet",
+                )),
+                _ => Err(AppError::validation(
+                    "unsupported data source for RENAME COLUMN",
                 )),
             }
         }
@@ -373,6 +432,17 @@ pub struct TableStructureView {
     schema: Option<String>,
     table: String,
     columns: Vec<TableColumn>,
+    /// Snapshot of the columns as loaded, used to diff staged edits on Save.
+    original_columns: Vec<TableColumn>,
+    /// Per-row identity of each column in `columns`: `Some(original_name)`
+    /// for columns that existed at load, `None` for rows added since (e.g. via
+    /// paste or the Add-Column dialog), so the Save diff can detect adds,
+    /// renames and drops.
+    col_original_name: Vec<Option<String>>,
+    /// Last column copied via the context menu (for Paste).
+    copied_column: Option<StagedColumn>,
+    /// Row whose Name cell is being edited inline (Navicat designer style).
+    editing_name: Option<usize>,
     indexes: Vec<TableIndex>,
     foreign_keys: Vec<TableForeignKey>,
     triggers: Vec<TableTrigger>,
@@ -412,8 +482,9 @@ pub struct TableStructureView {
     draft_fk_on_update: String,
     draft_fk_on_delete: String,
     add_fk_error: Option<String>,
-    // The structure edit waiting to be picked up by the shell
-    pending_alter: Option<AlterTableRequest>,
+    // The structure edits waiting to be picked up by the shell. A Save runs
+    // a whole batch (add / rename / modify / drop) in one go.
+    pending_alter_batch: Vec<AlterTableRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,13 +513,18 @@ impl TableStructureView {
         create_sql: String,
     ) -> Self {
         let column_count = columns.len();
+        let col_original_name = columns.iter().map(|c| Some(c.name.clone())).collect();
         Self {
             connection_id,
             kind,
             database,
             schema,
             table,
-            columns,
+            columns: columns.clone(),
+            original_columns: columns,
+            col_original_name,
+            copied_column: None,
+            editing_name: None,
             indexes,
             foreign_keys,
             triggers,
@@ -483,7 +559,7 @@ impl TableStructureView {
             draft_fk_on_update: String::new(),
             draft_fk_on_delete: String::new(),
             add_fk_error: None,
-            pending_alter: None,
+            pending_alter_batch: Vec::new(),
         }
     }
 
@@ -496,13 +572,18 @@ impl TableStructureView {
         columns: Vec<TableColumn>,
     ) -> Self {
         let column_count = columns.len();
+        let col_original_name = columns.iter().map(|c| Some(c.name.clone())).collect();
         Self {
             connection_id,
             kind,
             database,
             schema,
             table,
-            columns,
+            columns: columns.clone(),
+            original_columns: columns,
+            col_original_name,
+            copied_column: None,
+            editing_name: None,
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
             triggers: Vec::new(),
@@ -537,7 +618,7 @@ impl TableStructureView {
             draft_fk_on_update: String::new(),
             draft_fk_on_delete: String::new(),
             add_fk_error: None,
-            pending_alter: None,
+            pending_alter_batch: Vec::new(),
         }
     }
 
@@ -558,8 +639,97 @@ impl TableStructureView {
         self.pending_create_index.take()
     }
 
-    pub fn take_alter_request(&mut self) -> Option<AlterTableRequest> {
-        self.pending_alter.take()
+    pub fn take_alter_requests(&mut self) -> Vec<AlterTableRequest> {
+        std::mem::take(&mut self.pending_alter_batch)
+    }
+
+    fn queue_alter(&mut self, request: AlterTableRequest) {
+        self.pending_alter_batch.push(request);
+    }
+
+    /// Diff the staged columns against the original snapshot and produce the
+    /// ordered ALTER requests (adds / renames / modifies first, drops last)
+    /// that persist the current design.
+    fn staged_requests(&self) -> Vec<AlterTableRequest> {
+        use std::collections::{HashMap, HashSet};
+        let c = self.connection_id;
+        let db = self.database.clone();
+        let sc = self.schema.clone();
+        let tbl = self.table.clone();
+
+        let orig_by_name: HashMap<&str, &TableColumn> = self
+            .original_columns
+            .iter()
+            .map(|col| (col.name.as_str(), col))
+            .collect();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut changes: Vec<AlterTableRequest> = Vec::new();
+        let mut drops: Vec<AlterTableRequest> = Vec::new();
+
+        for (idx, col) in self.columns.iter().enumerate() {
+            match self.col_original_name[idx].as_deref() {
+                Some(orig) => {
+                    if orig != col.name {
+                        changes.push(AlterTableRequest::RenameColumn {
+                            connection_id: c,
+                            database: db.clone(),
+                            schema: sc.clone(),
+                            table: tbl.clone(),
+                            old_name: orig.to_string(),
+                            new_name: col.name.clone(),
+                        });
+                    }
+                    if let Some(original) = orig_by_name.get(orig) {
+                        seen.insert(orig);
+                        if original.database_type != col.database_type
+                            || original.nullable != col.nullable
+                            || original.default_value != col.default_value
+                        {
+                            changes.push(AlterTableRequest::ModifyColumn {
+                                connection_id: c,
+                                database: db.clone(),
+                                schema: sc.clone(),
+                                table: tbl.clone(),
+                                column_name: col.name.clone(),
+                                new_type: col.database_type.clone(),
+                                nullable: col.nullable,
+                                default_value: col.default_value.clone(),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    changes.push(AlterTableRequest::AddColumn {
+                        connection_id: c,
+                        database: db.clone(),
+                        schema: sc.clone(),
+                        table: tbl.clone(),
+                        column_name: col.name.clone(),
+                        column_type: col.database_type.clone(),
+                        nullable: col.nullable,
+                        default_value: col.default_value.clone(),
+                    });
+                }
+            }
+        }
+        for original in &self.original_columns {
+            if !seen.contains(original.name.as_str()) {
+                drops.push(AlterTableRequest::DropColumn {
+                    connection_id: c,
+                    database: db.clone(),
+                    schema: sc.clone(),
+                    table: tbl.clone(),
+                    column_name: original.name.clone(),
+                });
+            }
+        }
+        changes.extend(drops);
+        changes
+    }
+
+    /// True when the designer has staged column edits waiting to be saved.
+    fn has_pending_changes(&self) -> bool {
+        !self.staged_requests().is_empty()
     }
 
     /// Return the fully qualified table name.
@@ -627,6 +797,18 @@ impl TableStructureView {
             {
                 self.prepare_add_fk();
             }
+            ui.separator();
+            let has_changes = self.has_pending_changes();
+            if ui
+                .add_enabled(has_changes, Button::new(tr("Save")))
+                .on_hover_text(tr("Apply all pending structure changes"))
+                .clicked()
+            {
+                let requests = self.staged_requests();
+                let count = requests.len();
+                self.pending_alter_batch.extend(requests);
+                message = Some(format!("Saving {} structure change(s)...", count));
+            }
         });
 
         ui.add_space(4.0);
@@ -636,9 +818,13 @@ impl TableStructureView {
         Frame::default()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-            .inner_margin(Margin::same(0.0))
+            .inner_margin(Margin::symmetric(10.0, 6.0))
             .show(ui, |ui| match self.active_tab {
-                StructureTab::Columns => self.columns_table(ui),
+                StructureTab::Columns => {
+                    if let Some(m) = self.columns_table(ui) {
+                        message = Some(m);
+                    }
+                }
                 StructureTab::Indexes => self.indexes_table(ui),
                 StructureTab::ForeignKeys => self.foreign_keys_table(ui),
                 StructureTab::Triggers => self.triggers_table(ui),
@@ -830,10 +1016,22 @@ impl TableStructureView {
                             TextEdit::singleline(&mut self.draft_column_name).desired_width(240.0),
                         );
                         ui.end_row();
-                        ui.label(tr("Type (e.g. VARCHAR(255))"));
-                        ui.add(
-                            TextEdit::singleline(&mut self.draft_column_type).desired_width(240.0),
-                        );
+                        ui.label(tr("Type"));
+                        ComboBox::from_id_source("add_column_type")
+                            .selected_text(if self.draft_column_type.is_empty() {
+                                tr("Select type...")
+                            } else {
+                                self.draft_column_type.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                for candidate in common_column_types(self.kind) {
+                                    ui.selectable_value(
+                                        &mut self.draft_column_type,
+                                        (*candidate).to_string(),
+                                        *candidate,
+                                    );
+                                }
+                            });
                         ui.end_row();
                         ui.label(tr("Nullable"));
                         ui.checkbox(&mut self.draft_column_nullable, "");
@@ -872,7 +1070,7 @@ impl TableStructureView {
             } else if col_type.is_empty() {
                 self.add_column_error = Some("Column type is required".to_string());
             } else {
-                self.pending_alter = Some(AlterTableRequest::AddColumn {
+                self.queue_alter(AlterTableRequest::AddColumn {
                     connection_id: self.connection_id,
                     database: self.database.clone(),
                     schema: self.schema.clone(),
@@ -923,7 +1121,7 @@ impl TableStructureView {
                 });
             });
         if confirm {
-            self.pending_alter = Some(AlterTableRequest::DropColumn {
+            self.queue_alter(AlterTableRequest::DropColumn {
                 connection_id: self.connection_id,
                 database: self.database.clone(),
                 schema: self.schema.clone(),
@@ -1007,7 +1205,7 @@ impl TableStructureView {
                 self.pending_modify_column = Some(column_name);
                 return;
             }
-            self.pending_alter = Some(AlterTableRequest::ModifyColumn {
+            self.queue_alter(AlterTableRequest::ModifyColumn {
                 connection_id: self.connection_id,
                 database: self.database.clone(),
                 schema: self.schema.clone(),
@@ -1058,7 +1256,7 @@ impl TableStructureView {
                 });
             });
         if confirm {
-            self.pending_alter = Some(AlterTableRequest::DropIndex {
+            self.queue_alter(AlterTableRequest::DropIndex {
                 connection_id: self.connection_id,
                 database: self.database.clone(),
                 schema: self.schema.clone(),
@@ -1236,7 +1434,7 @@ impl TableStructureView {
                     self.draft_fk_ref_columns.len()
                 ));
             } else {
-                self.pending_alter = Some(AlterTableRequest::AddForeignKey {
+                self.queue_alter(AlterTableRequest::AddForeignKey {
                     connection_id: self.connection_id,
                     database: self.database.clone(),
                     schema: self.schema.clone(),
@@ -1260,12 +1458,26 @@ impl TableStructureView {
         }
     }
 
-    /// Renders the columns section as a table.
-    fn columns_table(&mut self, ui: &mut Ui) {
+    /// Renders the columns section as a table, returning an optional status
+    /// message (e.g. when the user copies a name or reorders a column).
+    fn columns_table(&mut self, ui: &mut Ui) -> Option<String> {
         if self.columns.is_empty() {
             empty_message(ui, "No columns");
-            return;
+            return None;
         }
+        let mut status: Option<String> = None;
+        let column_count = self.columns.len();
+
+        let copy_label = tr("Copy");
+        let paste_label = tr("Paste");
+        let copy_name_label = tr("Copy Name");
+        let modify_label = tr("Modify");
+        let delete_label = tr("Delete");
+        let move_up_label = tr("Move Up");
+        let move_down_label = tr("Move Down");
+        let edit_label = tr("Edit");
+        let modify_hint = tr("Modify column");
+        let drop_hint = tr("Drop column");
 
         ScrollArea::both()
             .auto_shrink([false, false])
@@ -1287,40 +1499,167 @@ impl TableStructureView {
                         }
                         ui.end_row();
 
-                        let mut drop_requested = None;
-                        let mut modify_requested = None;
-                        for col in &self.columns {
-                            ui.label(&col.name);
-                            ui.label(type_without_field_width(&col.database_type));
-                            ui.label(if col.nullable { "YES" } else { "NO" });
-                            ui.label(col.default_value.as_deref().unwrap_or(""));
-                            ui.label(if col.primary_key { "PK" } else { "" });
+                        let mut copy_requested: Option<usize> = None;
+                        let mut paste_requested = false;
+                        let mut drop_requested: Option<usize> = None;
+                        let mut modify_requested: Option<usize> = None;
+                        let mut move_requested: Option<(usize, i32)> = None;
+
+                        for idx in 0..column_count {
+                            let name = self.columns[idx].name.clone();
+
+                            // ---- Name: inline editable, focused after copy/paste ----
+                            let name_edit = TextEdit::singleline(&mut self.columns[idx].name)
+                                .desired_width(150.0);
+                            let name_resp = ui.add_sized([150.0, 22.0], name_edit);
+                            if self.editing_name == Some(idx) {
+                                name_resp.request_focus();
+                                self.editing_name = None;
+                            }
+                            name_resp.context_menu(|ui| {
+                                if ui.button(&copy_label).clicked() {
+                                    copy_requested = Some(idx);
+                                    ui.close_menu();
+                                }
+                                if ui.button(&paste_label).clicked() {
+                                    paste_requested = true;
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                if ui.button(&copy_name_label).clicked() {
+                                    ui.ctx().output_mut(|o| o.copied_text = name.clone());
+                                    status = Some("Column name copied".to_string());
+                                    ui.close_menu();
+                                }
+                                if ui.button(&modify_label).clicked() {
+                                    modify_requested = Some(idx);
+                                    ui.close_menu();
+                                }
+                                if ui.button(&delete_label).clicked() {
+                                    drop_requested = Some(idx);
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                if ui
+                                    .add_enabled(idx > 0, Button::new(&move_up_label))
+                                    .clicked()
+                                {
+                                    move_requested = Some((idx, -1));
+                                    ui.close_menu();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        idx + 1 < column_count,
+                                        Button::new(&move_down_label),
+                                    )
+                                    .clicked()
+                                {
+                                    move_requested = Some((idx, 1));
+                                    ui.close_menu();
+                                }
+                            });
+
+                            // ---- Type ----
+                            let type_edit =
+                                TextEdit::singleline(&mut self.columns[idx].database_type)
+                                    .desired_width(140.0);
+                            ui.add_sized([140.0, 22.0], type_edit);
+
+                            // ---- Nullable ----
+                            ui.checkbox(&mut self.columns[idx].nullable, "");
+
+                            // ---- Default ----
+                            let mut default_buf =
+                                self.columns[idx].default_value.clone().unwrap_or_default();
+                            let default_edit =
+                                TextEdit::singleline(&mut default_buf).desired_width(120.0);
+                            ui.add_sized([120.0, 22.0], default_edit);
+                            let trimmed_default = default_buf.trim().to_string();
+                            self.columns[idx].default_value = if trimmed_default.is_empty() {
+                                None
+                            } else {
+                                Some(default_buf)
+                            };
+
+                            // ---- Key ----
+                            ui.label(if self.columns[idx].primary_key { "PK" } else { "" });
+
+                            // ---- Edit / Delete ----
                             if ui
-                                .small_button(tr("Edit"))
-                                .on_hover_text(tr("Modify column"))
+                                .small_button(&edit_label)
+                                .on_hover_text(&modify_hint)
                                 .clicked()
                             {
-                                modify_requested = Some(col.name.clone());
+                                modify_requested = Some(idx);
                             }
                             if ui
-                                .small_button(tr("Delete"))
-                                .on_hover_text(tr("Drop column"))
+                                .small_button(&delete_label)
+                                .on_hover_text(&drop_hint)
                                 .clicked()
                             {
-                                drop_requested = Some(col.name.clone());
+                                drop_requested = Some(idx);
                             }
                             ui.end_row();
                         }
-                        if let Some(name) = drop_requested {
-                            self.pending_drop_column = Some(name);
+
+                        // Apply row actions after the loop (borrow of `columns` released).
+                        if let Some((from, delta)) = move_requested {
+                            let to = from as i32 + delta;
+                            if to >= 0 && (to as usize) < column_count {
+                                self.columns.swap(from, to as usize);
+                                self.col_original_name.swap(from, to as usize);
+                                status = Some(
+                                    if delta < 0 {
+                                        "Moved column up (display order)"
+                                    } else {
+                                        "Moved column down (display order)"
+                                    }
+                                    .to_string(),
+                                );
+                            }
                         }
-                        if let Some(name) = modify_requested {
+                        if let Some(idx) = drop_requested {
+                            self.pending_drop_column = Some(self.columns[idx].name.clone());
+                        }
+                        if let Some(idx) = modify_requested {
                             // Reset draft fields so the dialog picks up the new column.
                             self.draft_modify_type.clear();
-                            self.pending_modify_column = Some(name);
+                            self.pending_modify_column = Some(self.columns[idx].name.clone());
+                        }
+                        if let Some(idx) = copy_requested {
+                            self.copied_column = Some(StagedColumn {
+                                column_type: self.columns[idx].database_type.clone(),
+                                nullable: self.columns[idx].nullable,
+                                default_value: self.columns[idx].default_value.clone(),
+                            });
+                            self.editing_name = Some(idx);
+                            status = Some("Column definition copied".to_string());
+                        }
+                        if paste_requested {
+                            if let Some(staged) = self.copied_column.clone() {
+                                let mut new_name = format!("column_{}", self.columns.len() + 1);
+                                let mut counter = 2;
+                                while self.columns.iter().any(|c| c.name == new_name) {
+                                    new_name =
+                                        format!("column_{}", self.columns.len() + counter);
+                                    counter += 1;
+                                }
+                                self.columns.push(TableColumn {
+                                    name: new_name,
+                                    database_type: staged.column_type,
+                                    nullable: staged.nullable,
+                                    default_value: staged.default_value,
+                                    primary_key: false,
+                                    comment: None,
+                                });
+                                self.col_original_name.push(None);
+                                self.editing_name = Some(self.columns.len() - 1);
+                                status = Some("Column pasted; edit its name".to_string());
+                            }
                         }
                     });
             });
+        status
     }
 
     /// Renders the indexes section as a table.
@@ -1358,7 +1697,7 @@ impl TableStructureView {
                             ui.label(if idx.primary { "YES" } else { "" });
                             if !idx.primary {
                                 if ui
-                                    .small_button("\u{2715}")
+                                    .small_button(tr("Delete"))
                                     .on_hover_text(tr("Drop index"))
                                     .clicked()
                                 {
@@ -1493,7 +1832,7 @@ impl TableStructureView {
                         .font(TextStyle::Monospace)
                         .desired_width(ui.available_width().max(720.0))
                         .desired_rows(28)
-                        .interactive(false),
+                        .interactive(true),
                 );
             });
     }
@@ -1504,6 +1843,41 @@ fn empty_message(ui: &mut Ui, text: &str) {
     ui.vertical_centered(|ui| {
         ui.label(RichText::new(text).color(Color32::GRAY).italics());
     });
+}
+
+/// Common column type candidates offered in the Add-Column dropdown, grouped
+/// by the target protocol family so users pick from the right vocabulary
+/// instead of typing a type by hand.
+fn common_column_types(kind: DataSourceKind) -> &'static [&'static str] {
+    match kind.protocol_family() {
+        ProtocolFamily::MySql => &[
+            "INT", "BIGINT", "TINYINT", "SMALLINT", "VARCHAR(255)", "CHAR(64)", "TEXT", "DATETIME",
+            "TIMESTAMP", "DATE", "TIME", "DECIMAL(10,2)", "FLOAT", "DOUBLE", "BOOLEAN", "JSON",
+            "BLOB", "ENUM",
+        ],
+        ProtocolFamily::PostgreSql => &[
+            "INTEGER", "BIGINT", "SMALLINT", "SERIAL", "BIGSERIAL", "VARCHAR(255)", "TEXT", "TIMESTAMP",
+            "TIMESTAMPTZ", "DATE", "TIME", "NUMERIC(10,2)", "DOUBLE PRECISION", "BOOLEAN", "JSONB",
+            "UUID", "BYTEA",
+        ],
+        ProtocolFamily::SqlServer => &[
+            "INT", "BIGINT", "SMALLINT", "TINYINT", "NVARCHAR(255)", "VARCHAR(255)", "NCHAR(64)",
+            "CHAR(64)", "TEXT", "NTEXT", "DATETIME", "DATETIME2", "DATE", "TIME", "DECIMAL(18,2)",
+            "NUMERIC", "FLOAT", "REAL", "BIT", "UNIQUEIDENTIFIER", "BINARY(16)",
+        ],
+        ProtocolFamily::ClickHouse => &[
+            "Int32", "Int64", "UInt32", "Float64", "String", "FixedString(16)", "Date", "DateTime",
+            "DateTime64(3)", "Decimal(18,6)", "Nullable(Int64)", "Array(Int32)", "UUID", "JSON",
+        ],
+        ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => &[
+            "INTEGER", "BIGINT", "TEXT", "REAL", "DOUBLE", "DECIMAL", "BOOLEAN", "DATE", "DATETIME",
+            "TIMESTAMP", "TIME", "BLOB", "JSON", "UUID",
+        ],
+        _ => &[
+            "INT", "BIGINT", "VARCHAR(255)", "TEXT", "DATE", "DATETIME", "TIMESTAMP", "DECIMAL(10,2)",
+            "BOOLEAN", "JSON",
+        ],
+    }
 }
 
 fn type_without_field_width(value: &str) -> String {
