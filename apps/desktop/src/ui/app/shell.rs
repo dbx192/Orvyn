@@ -1,7 +1,7 @@
 use super::{style::apply_app_style, ActivePanel, DesktopApp};
 use crate::ui::i18n::{self, text as tr, Locale};
 use eframe::egui::{
-    vec2, Align, Button, CentralPanel, Context, Direction, Frame, Layout, Margin, RichText,
+    vec2, Align, Button, CentralPanel, Context, Frame, Layout, Margin, RichText,
     Spinner, Stroke, TopBottomPanel, Ui,
 };
 use std::time::Duration;
@@ -391,45 +391,62 @@ impl DesktopApp {
     }
 
     pub(super) fn top_toolbar(&mut self, ctx: &Context) {
-        let stroke = ctx.style().visuals.widgets.noninteractive.bg_stroke;
+        use super::style::current_palette;
+        use eframe::egui::{Align2, FontId, Rounding, Sense};
+        let palette = current_palette(ctx);
         TopBottomPanel::top("top_toolbar")
             .frame(
                 Frame::default()
-                    .fill(ctx.style().visuals.panel_fill)
-                    .stroke(Stroke::new(1.0, stroke.color))
-                    .inner_margin(Margin::symmetric(10.0, 6.0)),
+                    .fill(palette.surface)
+                    .stroke(Stroke::new(1.0, palette.border))
+                    .inner_margin(Margin::symmetric(12.0, 8.0)),
             )
             .show(ctx, |ui| {
-                let compact = ui.available_width() < 920.0;
+                let compact = ui.available_width() < 960.0;
                 ui.horizontal(|ui| {
+                    // ---- Brand ----
+                    let (brand_rect, _) =
+                        ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(brand_rect, Rounding::same(6.0), palette.info);
+                    ui.painter().text(
+                        brand_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "O",
+                        FontId::proportional(15.0),
+                        palette.accent_fg,
+                    );
+                    ui.label(RichText::new("Orvyn").strong().size(15.0));
+                    if !compact {
+                        ui.label(
+                            RichText::new(tr("Multi-database workbench"))
+                                .small()
+                                .color(palette.fg_muted),
+                        );
+                    }
+                    ui.separator();
+
+                    // ---- Connection group ----
                     let connection_label = if compact {
                         tr("Connect")
                     } else {
                         tr("Connections")
                     };
                     let mut connection_actions = Vec::new();
-                    ui.allocate_ui_with_layout(
-                        vec2(72.0, 28.0),
-                        Layout::centered_and_justified(Direction::LeftToRight),
-                        |ui| {
-                            ui.spacing_mut().interact_size = vec2(72.0, 28.0);
-                            ui.menu_button(connection_label, |ui| {
-                                if ui.button(tr("New")).clicked() {
-                                    self.connection_manager_ui.new_connection();
-                                    self.state.set_status(tr("New connection editor opened"));
-                                    ui.close_menu();
-                                }
-                                ui.separator();
-                                self.object_tree
-                                    .connection_transfer_menu(ui, &mut connection_actions);
-                            });
-                        },
-                    );
+                    ui.menu_button(RichText::new(connection_label).strong(), |ui| {
+                        if ui.button(tr("New")).clicked() {
+                            self.connection_manager_ui.new_connection();
+                            self.state.set_status(tr("New connection editor opened"));
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        self.object_tree.connection_transfer_menu(ui, &mut connection_actions);
+                    });
                     if !connection_actions.is_empty() {
                         self.handle_tree_actions(connection_actions);
                     }
                     if ui
-                        .add_sized([72.0, 28.0], Button::new(tr("History")))
+                        .add(Button::new(tr("History")))
                         .on_hover_text(tr("Show executed SQL history"))
                         .clicked()
                     {
@@ -438,7 +455,7 @@ impl DesktopApp {
                         self.state.set_status(tr("History opened"));
                     }
                     if ui
-                        .add_sized([82.0, 28.0], Button::new(tr("Favorites")))
+                        .add(Button::new(tr("Favorites")))
                         .on_hover_text(tr("Show saved SQL snippets"))
                         .clicked()
                     {
@@ -446,22 +463,13 @@ impl DesktopApp {
                         self.active_panel = ActivePanel::QueryEditor;
                         self.state.set_status(tr("Favorites opened"));
                     }
-                    if ui
-                        .add_sized([76.0, 28.0], Button::new(tr("Refresh")))
-                        .on_hover_text(tr("Refresh the active browser or workspace"))
-                        .clicked()
-                    {
-                        self.state.set_status(tr("Refresh requested"));
-                    }
 
+                    // ---- Right-aligned actions ----
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let theme_label = match self.state.theme {
-                            crate::ui::state::AppTheme::Light => tr("Dark"),
-                            crate::ui::state::AppTheme::Dark => tr("Light"),
-                        };
+                        let theme_icon = if ui.visuals().dark_mode { "◐" } else { "◑" };
                         if ui
-                            .add_sized([58.0, 28.0], Button::new(theme_label))
-                            .on_hover_text(tr("Toggle theme"))
+                            .add_sized([34.0, 28.0], Button::new(theme_icon).frame(false))
+                            .on_hover_text(tr("Toggle theme (Ctrl+T)"))
                             .clicked()
                         {
                             self.state.toggle_theme();
@@ -471,11 +479,12 @@ impl DesktopApp {
                         if error_count > 0
                             && ui
                                 .add_sized(
-                                    [86.0, 28.0],
-                                    Button::new(i18n::format(
-                                        "Errors {count}",
-                                        &[("count", error_count.to_string())],
-                                    )),
+                                    [78.0, 28.0],
+                                    Button::new(
+                                        RichText::new(format!("⚠ {error_count}"))
+                                            .color(palette.danger)
+                                            .strong(),
+                                    ),
                                 )
                                 .on_hover_text(tr("Open error details"))
                                 .clicked()
@@ -483,32 +492,46 @@ impl DesktopApp {
                             self.error_window_open = true;
                         }
 
-                        ui.menu_button(
-                            format!("{}: {}", tr("Language"), i18n::locale().native_name()),
-                            |ui| {
-                                for locale in Locale::ALL {
-                                    if ui
-                                        .selectable_label(
-                                            i18n::locale() == locale,
-                                            locale.native_name(),
-                                        )
-                                        .clicked()
-                                    {
-                                        if i18n::set_locale(locale).is_ok() {
-                                            self.state.set_status(i18n::format(
-                                                "Language changed to {language}",
-                                                &[("language", locale.native_name().to_string())],
-                                            ));
-                                        }
-                                        ui.close_menu();
+                        let lang_badge = i18n::locale()
+                            .tag()
+                            .split('-')
+                            .next()
+                            .unwrap_or("EN")
+                            .to_uppercase();
+                        ui.menu_button(RichText::new(lang_badge).strong(), |ui| {
+                            for locale in Locale::ALL {
+                                if ui
+                                    .selectable_label(
+                                        i18n::locale() == locale,
+                                        format!("{}  ({})", locale.native_name(), locale.tag()),
+                                    )
+                                    .clicked()
+                                {
+                                    if i18n::set_locale(locale).is_ok() {
+                                        self.state.set_status(i18n::format(
+                                            "Language changed to {language}",
+                                            &[("language", locale.native_name().to_string())],
+                                        ));
                                     }
+                                    ui.close_menu();
                                 }
-                            },
-                        );
+                            }
+                        })
+                        .response
+                        .on_hover_text(format!(
+                            "{} · {}",
+                            tr("Language"),
+                            i18n::locale().tag()
+                        ));
 
                         ui.separator();
-                        ui.label(RichText::new(&self.state.status).small().strong())
-                            .on_hover_text(&self.state.status);
+                        ui.label(
+                            RichText::new(&self.state.status)
+                                .small()
+                                .color(palette.fg_muted)
+                                .strong(),
+                        )
+                        .on_hover_text(&self.state.status);
                     });
                 });
             });

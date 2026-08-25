@@ -27,37 +27,37 @@ pub fn estimate_text_width(text: &str) -> f32 {
 
 pub fn grid_stroke(ui: &Ui) -> Stroke {
     if ui.visuals().dark_mode {
-        Stroke::new(1.0, Color32::from_rgb(48, 55, 64))
+        Stroke::new(1.0, Color32::from_rgb(54, 56, 61))
     } else {
-        Stroke::new(1.0, Color32::from_rgb(214, 220, 228))
+        Stroke::new(1.0, Color32::from_rgb(225, 227, 232))
     }
 }
 
 pub fn header_fill(ui: &Ui) -> Color32 {
     if ui.visuals().dark_mode {
-        Color32::from_rgb(38, 43, 50)
+        Color32::from_rgb(31, 33, 36)
     } else {
-        Color32::from_rgb(244, 247, 250)
+        Color32::from_rgb(246, 247, 249)
     }
 }
 
 pub fn row_fill(ui: &Ui, row: usize, selected: bool) -> Color32 {
     if selected {
         if ui.visuals().dark_mode {
-            Color32::from_rgb(34, 70, 110)
+            Color32::from_rgb(45, 49, 56)
         } else {
-            Color32::from_rgb(218, 235, 255)
+            Color32::from_rgb(227, 232, 240)
         }
     } else if ui.visuals().dark_mode {
         if row % 2 == 0 {
-            Color32::from_rgb(17, 20, 25)
+            Color32::from_rgb(19, 20, 23)
         } else {
-            Color32::from_rgb(21, 25, 31)
+            Color32::from_rgb(23, 24, 27)
         }
     } else if row % 2 == 0 {
         Color32::from_rgb(255, 255, 255)
     } else {
-        Color32::from_rgb(249, 251, 253)
+        Color32::from_rgb(248, 249, 251)
     }
 }
 
@@ -142,9 +142,9 @@ pub fn resizable_header_cell(
         Stroke::new(
             1.5,
             if ui.visuals().dark_mode {
-                Color32::from_rgb(76, 88, 104)
+                Color32::from_rgb(82, 86, 94)
             } else {
-                Color32::from_rgb(174, 184, 196)
+                Color32::from_rgb(168, 172, 180)
             },
         ),
     );

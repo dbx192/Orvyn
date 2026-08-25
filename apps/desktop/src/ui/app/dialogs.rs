@@ -1,6 +1,7 @@
 use super::{
     export_sql::{database_export_mode_label, qualified_table_label},
     payloads::ClearRequest,
+    style::current_palette,
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
@@ -11,8 +12,8 @@ use crate::ui::{
 };
 use db_common::ConnectionId;
 use eframe::egui::{
-    vec2, Align, Button, Color32, Context, Frame, Layout, RichText, TextEdit, TopBottomPanel,
-    Window,
+    vec2, Align, Button, Color32, Context, Frame, Layout, Margin, RichText, Stroke,
+    TextEdit, TopBottomPanel, Window,
 };
 use import_export::ExportFormat;
 
@@ -351,30 +352,69 @@ impl DesktopApp {
     }
 
     pub(super) fn bottom_status(&mut self, ctx: &Context) {
-        TopBottomPanel::bottom("bottom_status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&self.state.status).small())
+        let palette = current_palette(ctx);
+        TopBottomPanel::bottom("bottom_status")
+            .frame(
+                Frame::default()
+                    .fill(palette.surface)
+                    .inner_margin(Margin::symmetric(12.0, 5.0)),
+            )
+            .show(ctx, |ui| {
+                if ui.visuals().dark_mode {
+                    ui.painter().line_segment(
+                        [
+                            ui.max_rect().left_top(),
+                            ui.max_rect().right_top(),
+                        ],
+                        Stroke::new(1.0, palette.border),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(&self.state.status)
+                            .small()
+                            .color(palette.fg_muted),
+                    )
                     .on_hover_text(&self.state.status);
 
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let error_count = self.state.errors.len();
-                    if error_count > 0 {
-                        if ui.button(format!("Errors: {}", error_count)).clicked() {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(match self.state.errors.len() {
+                                0 => tr("No errors").to_string(),
+                                count => {
+                                    format!("⚠ {count} {}", tr("errors"))
+                                }
+                            })
+                            .small()
+                            .color(if self.state.errors.is_empty() {
+                                palette.fg_muted
+                            } else {
+                                palette.danger
+                            }),
+                        );
+                        if self.state.errors.len() > 0
+                            && ui
+                                .small_button(tr("View"))
+                                .on_hover_text(tr("Open error details"))
+                                .clicked()
+                        {
                             self.error_window_open = true;
                         }
-                    } else {
-                        ui.label(format!("Errors: {}", error_count));
-                    }
-                    ui.separator();
-                    ui.label(format!(
-                        "Workspace: {}",
-                        active_panel_label(self.active_panel)
-                    ));
-                    ui.separator();
-                    ui.label(task_summary(&self.state.tasks));
+                        ui.separator();
+                        ui.label(
+                            RichText::new(active_panel_label(self.active_panel))
+                                .small()
+                                .color(palette.fg_muted),
+                        );
+                        ui.separator();
+                        ui.label(
+                            RichText::new(task_summary(&self.state.tasks))
+                                .small()
+                                .color(palette.fg_muted),
+                        );
+                    });
                 });
             });
-        });
     }
 
     pub(super) fn error_window(&mut self, ctx: &Context) {

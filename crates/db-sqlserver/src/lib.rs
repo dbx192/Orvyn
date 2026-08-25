@@ -13,7 +13,7 @@ use db_common::{
     DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryId, QueryResult,
     RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableIndex,
 };
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tiberius::{AuthMethod, Client, ColumnType, EncryptionLevel};
 use tokio::net::TcpStream;
