@@ -11,15 +11,20 @@ use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
     DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryId,
-    QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
-    TableForeignKey, TableIndex, TableTrigger,
+    QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, SslMode,
+    TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
-use std::{collections::BTreeMap, error::Error, fmt::Write, sync::Arc, time::Instant};
+use std::{
+    collections::BTreeMap, error::Error, fmt::Write, fs::File, io::BufReader, sync::Arc,
+    time::Instant,
+};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_postgres::{
+    config::SslMode as PgSslMode,
     types::{FromSql, Type},
     Client, Config, NoTls, Row as PgRow,
 };
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 pub const ADAPTER_NAME: &str = "postgresql";
 
@@ -35,7 +40,7 @@ pub struct PostgresQueryExecutor {
     transactions: Arc<Mutex<BTreeMap<QueryId, PostgresPoolClient>>>,
 }
 
-type PostgresPoolKey = (ConnectionId, Option<String>);
+type PostgresPoolKey = (ConnectionId, Option<String>, SslMode, Option<String>);
 
 impl PostgresQueryExecutor {
     pub fn new() -> Self {
@@ -59,14 +64,23 @@ impl PostgresQueryExecutor {
     }
 }
 
-#[derive(Debug)]
 struct PostgresPool {
     connection_id: ConnectionId,
     connect_config: Config,
+    tls: Option<MakeRustlsConnect>,
     config: ConnectionPoolConfig,
     semaphore: Arc<Semaphore>,
     idle: Mutex<Vec<Client>>,
     size: Mutex<u32>,
+}
+
+impl std::fmt::Debug for PostgresPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostgresPool")
+            .field("connection_id", &self.connection_id)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PostgresPool {
@@ -78,6 +92,7 @@ impl PostgresPool {
         Ok(Self {
             connection_id: profile.id,
             connect_config: postgres_config(profile, password)?,
+            tls: postgres_tls_connector(profile)?,
             config,
             semaphore: Arc::new(Semaphore::new(config.max_connections.max(1) as usize)),
             idle: Mutex::new(Vec::new()),
@@ -118,20 +133,12 @@ impl PostgresPool {
     }
 
     async fn connect(&self) -> Result<Client> {
-        let (client, connection) = tokio::time::timeout(
+        let client = tokio::time::timeout(
             self.config.connect_timeout(),
-            self.connect_config.connect(NoTls),
+            connect_postgres(&self.connect_config, self.tls.clone()),
         )
         .await
-        .map_err(|_| AppError::new(ErrorKind::Timeout, "timed out connecting to PostgreSQL"))?
-        .map_err(|error| {
-            AppError::new(ErrorKind::Connection, "failed to connect to PostgreSQL")
-                .with_detail(error.to_string())
-        })?;
-
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        .map_err(|_| AppError::new(ErrorKind::Timeout, "timed out connecting to PostgreSQL"))??;
 
         Ok(client)
     }
@@ -187,14 +194,7 @@ impl ConnectionTester for PostgresConnectionTester {
         let started_at = Instant::now();
         let config = postgres_config(profile, password)?;
 
-        let (client, connection) = config.connect(NoTls).await.map_err(|error| {
-            AppError::new(ErrorKind::Connection, "failed to connect to PostgreSQL")
-                .with_detail(error.to_string())
-        })?;
-
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        let client = connect_postgres(&config, postgres_tls_connector(profile)?).await?;
 
         let row = client
             .query_one("SELECT version()", &[])
@@ -702,16 +702,7 @@ async fn postgres_client_for_database(
 ) -> Result<tokio_postgres::Client> {
     let config = postgres_config_for_database(profile, password, database)?;
 
-    let (client, connection) = config.connect(NoTls).await.map_err(|error| {
-        AppError::new(ErrorKind::Connection, "failed to connect to PostgreSQL")
-            .with_detail(error.to_string())
-    })?;
-
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    Ok(client)
+    connect_postgres(&config, postgres_tls_connector(profile)?).await
 }
 
 fn postgres_config(profile: &ConnectionProfile, password: Option<&str>) -> Result<Config> {
@@ -727,6 +718,11 @@ fn postgres_config_for_database(
     let mut config = Config::new();
     config.host(profile.required_host()?);
     config.port(profile.required_port()?);
+    config.ssl_mode(match profile.security.ssl_mode {
+        SslMode::Disable => PgSslMode::Disable,
+        SslMode::Prefer => PgSslMode::Prefer,
+        SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => PgSslMode::Require,
+    });
 
     if let Some(username) = profile
         .username
@@ -748,6 +744,64 @@ fn postgres_config_for_database(
     Ok(config)
 }
 
+async fn connect_postgres(config: &Config, tls: Option<MakeRustlsConnect>) -> Result<Client> {
+    macro_rules! connect {
+        ($connector:expr) => {{
+            let (client, connection) = config.connect($connector).await.map_err(|error| {
+                AppError::new(ErrorKind::Connection, "failed to connect to PostgreSQL")
+                    .with_detail(error.to_string())
+            })?;
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            Ok(client)
+        }};
+    }
+
+    match tls {
+        Some(tls) => connect!(tls),
+        None => connect!(NoTls),
+    }
+}
+
+fn postgres_tls_connector(profile: &ConnectionProfile) -> Result<Option<MakeRustlsConnect>> {
+    if profile.security.ssl_mode == SslMode::Disable {
+        return Ok(None);
+    }
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(ca_path) = tls_ca_path(profile) {
+        let file = File::open(ca_path).map_err(|error| {
+            AppError::new(ErrorKind::Validation, "failed to open TLS CA certificate")
+                .with_detail(error.to_string())
+        })?;
+        let certificates = rustls_pemfile::certs(&mut BufReader::new(file))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| {
+                AppError::new(ErrorKind::Validation, "failed to parse TLS CA certificate")
+                    .with_detail(error.to_string())
+            })?;
+        let (valid, _) = roots.add_parsable_certificates(certificates);
+        if valid == 0 {
+            return Err(AppError::validation(
+                "TLS CA certificate contains no valid certificates",
+            ));
+        }
+    }
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Some(MakeRustlsConnect::new(config)))
+}
+
+fn tls_ca_path(profile: &ConnectionProfile) -> Option<&str> {
+    profile
+        .extra_param("tls_ca_path")
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn selected_database(profile: &ConnectionProfile, database: Option<&str>) -> Option<String> {
     database
         .or(profile.database.as_deref())
@@ -763,6 +817,8 @@ fn postgres_pool_key(profile: &ConnectionProfile) -> PostgresPoolKey {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(ToOwned::to_owned),
+        profile.security.ssl_mode,
+        tls_ca_path(profile).map(ToOwned::to_owned),
     )
 }
 
@@ -1262,6 +1318,20 @@ mod tests {
     fn decodes_negative_postgres_numeric() {
         let raw = postgres_numeric_raw(1, 0x4000, 2, &[1, 0, 2500]);
         assert_eq!(decode_postgres_numeric(&raw).unwrap(), "-10000.25");
+    }
+
+    #[test]
+    fn postgres_tls_mode_requires_tls_except_when_disabled() {
+        let mut profile = ConnectionProfile::builder(DataSourceKind::PostgreSql, "pg")
+            .host("db.example.com")
+            .port(5432)
+            .username("postgres")
+            .build()
+            .expect("profile");
+        assert!(postgres_tls_connector(&profile).unwrap().is_some());
+
+        profile.security.ssl_mode = SslMode::Disable;
+        assert!(postgres_tls_connector(&profile).unwrap().is_none());
     }
 
     fn postgres_numeric_raw(weight: i16, sign: u16, dscale: u16, digits: &[u16]) -> Vec<u8> {

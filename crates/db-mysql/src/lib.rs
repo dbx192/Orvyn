@@ -11,10 +11,11 @@ use db_common::{
     ConnectionPoolConfig, ConnectionPoolStats, ConnectionProfile, ConnectionTestReport,
     ConnectionTester, DataSourceKind, DatabaseFunction, DatabaseObject, DatabaseObjectKind,
     ErrorKind, LogicalType, QueryId, QueryResult, RelationalMetadataReader,
-    RelationalQueryExecutor, Result, Row, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+    RelationalQueryExecutor, Result, Row, SslMode, TableColumn, TableForeignKey, TableIndex,
+    TableTrigger,
 };
 use sqlx::{
-    mysql::{MySqlConnectOptions, MySqlConnection, MySqlPoolOptions, MySqlRow},
+    mysql::{MySqlConnectOptions, MySqlConnection, MySqlPoolOptions, MySqlRow, MySqlSslMode},
     pool::PoolConnection,
     types::{
         chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc},
@@ -47,7 +48,7 @@ pub struct MySqlQueryExecutor {
     transactions: Arc<Mutex<BTreeMap<QueryId, PoolConnection<MySql>>>>,
 }
 
-type MySqlPoolKey = (ConnectionId, Option<String>);
+type MySqlPoolKey = (ConnectionId, Option<String>, SslMode, Option<String>);
 
 impl MySqlQueryExecutor {
     pub fn new() -> Self {
@@ -674,6 +675,8 @@ fn mysql_pool_key(profile: &ConnectionProfile) -> MySqlPoolKey {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(ToOwned::to_owned),
+        profile.security.ssl_mode,
+        tls_ca_path(profile).map(ToOwned::to_owned),
     )
 }
 
@@ -778,6 +781,10 @@ async fn mysql_pool(
     if brand_for(profile).is_some_and(|b| b.is_doris_family()) {
         connect_options = doris::configure_connect_options(connect_options);
     }
+    connect_options = connect_options.ssl_mode(mysql_ssl_mode(profile.security.ssl_mode));
+    if let Some(ca_path) = tls_ca_path(profile) {
+        connect_options = connect_options.ssl_ca(ca_path);
+    }
 
     MySqlPoolOptions::new()
         .min_connections(config.min_connections)
@@ -793,6 +800,22 @@ async fn mysql_pool(
 fn mysql_connection_error(error: sqlx::Error) -> AppError {
     AppError::new(ErrorKind::Connection, "failed to connect to MySQL")
         .with_detail(redact_connection_url(&error.to_string()))
+}
+
+fn mysql_ssl_mode(mode: SslMode) -> MySqlSslMode {
+    match mode {
+        SslMode::Disable => MySqlSslMode::Disabled,
+        SslMode::Prefer => MySqlSslMode::Preferred,
+        SslMode::Require => MySqlSslMode::Required,
+        SslMode::VerifyCa => MySqlSslMode::VerifyCa,
+        SslMode::VerifyFull => MySqlSslMode::VerifyIdentity,
+    }
+}
+
+fn tls_ca_path(profile: &ConnectionProfile) -> Option<&str> {
+    profile
+        .extra_param("tls_ca_path")
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn mysql_query_error(error: sqlx::Error) -> AppError {
@@ -1109,6 +1132,30 @@ mod tests {
     fn mysql_temporal_types_are_classified_as_datetime() {
         assert_eq!(mysql_logical_type("TIMESTAMP"), LogicalType::DateTime);
         assert_eq!(mysql_logical_type("DATETIME"), LogicalType::DateTime);
+    }
+
+    #[test]
+    fn ssl_modes_map_to_sqlx_certificate_policies() {
+        assert!(matches!(
+            mysql_ssl_mode(SslMode::Disable),
+            MySqlSslMode::Disabled
+        ));
+        assert!(matches!(
+            mysql_ssl_mode(SslMode::Prefer),
+            MySqlSslMode::Preferred
+        ));
+        assert!(matches!(
+            mysql_ssl_mode(SslMode::Require),
+            MySqlSslMode::Required
+        ));
+        assert!(matches!(
+            mysql_ssl_mode(SslMode::VerifyCa),
+            MySqlSslMode::VerifyCa
+        ));
+        assert!(matches!(
+            mysql_ssl_mode(SslMode::VerifyFull),
+            MySqlSslMode::VerifyIdentity
+        ));
     }
 
     #[tokio::test]

@@ -376,13 +376,47 @@ impl DataSourceKind {
     /// host/port/database/file_path/ssl block. Drives `extra_params`.
     pub fn extra_params_schema(self) -> Vec<ExtraParamField> {
         match self {
-            Self::OceanBase => vec![ExtraParamField {
-                key: "ob_mode",
-                label: "OceanBase mode",
-                kind: ExtraParamKind::Choice(&["mysql", "oracle"]),
+            Self::MySql
+            | Self::MariaDb
+            | Self::TiDb
+            | Self::Doris
+            | Self::SelectDb
+            | Self::StarRocks
+            | Self::GoldenDb
+            | Self::PostgreSql
+            | Self::TimescaleDb
+            | Self::Redshift
+            | Self::CockroachDb
+            | Self::OpenGauss
+            | Self::GaussDb
+            | Self::KwDb
+            | Self::KingbaseEs
+            | Self::Vastbase
+            | Self::HighGo
+            | Self::UxDb
+            | Self::SqlServer => vec![ExtraParamField {
+                key: "tls_ca_path",
+                label: "TLS CA certificate path",
+                kind: ExtraParamKind::Text,
                 required: false,
-                placeholder: Some("mysql"),
+                placeholder: Some("C:\\certs\\ca.pem"),
             }],
+            Self::OceanBase => vec![
+                ExtraParamField {
+                    key: "tls_ca_path",
+                    label: "TLS CA certificate path",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: Some("C:\\certs\\ca.pem"),
+                },
+                ExtraParamField {
+                    key: "ob_mode",
+                    label: "OceanBase mode",
+                    kind: ExtraParamKind::Choice(&["mysql", "oracle"]),
+                    required: false,
+                    placeholder: Some("mysql"),
+                },
+            ],
             Self::ClickHouse => vec![ExtraParamField {
                 key: "clickhouse_protocol",
                 label: "ClickHouse protocol",

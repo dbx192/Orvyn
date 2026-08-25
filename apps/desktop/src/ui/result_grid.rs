@@ -760,3 +760,64 @@ fn sampled_row_indexes(row_count: usize, limit: usize) -> Vec<usize> {
     }
     rows
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db_common::{Column, LogicalType, Row};
+    use eframe::egui::{CentralPanel, Context, RawInput};
+    use std::time::Instant;
+
+    fn large_result(rows: usize) -> QueryResult {
+        QueryResult {
+            statement: "SELECT * FROM benchmark_rows".to_string(),
+            columns: (0..10)
+                .map(|index| Column {
+                    name: format!("column_{index}"),
+                    database_type: "TEXT".to_string(),
+                    logical_type: LogicalType::Text,
+                    nullable: false,
+                    primary_key: false,
+                })
+                .collect(),
+            rows: (0..rows)
+                .map(|row| Row::new(vec![CellValue::Text(format!("row-{row}")); 10]))
+                .collect(),
+            affected_rows: 0,
+            execution_time_ms: 0,
+            notices: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
+    fn render_once(grid: &mut ResultSetGrid) {
+        let context = Context::default();
+        context.begin_frame(RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+            ..Default::default()
+        });
+        CentralPanel::default().show(&context, |ui| {
+            ui.set_min_size(vec2(1280.0, 800.0));
+            grid.ui(ui);
+        });
+        let _ = context.end_frame();
+    }
+
+    #[test]
+    #[ignore = "manual large-result grid benchmark"]
+    fn benchmark_large_result_grid() {
+        for row_count in [10_000, 100_000] {
+            let result = large_result(row_count);
+            let started = Instant::now();
+            let mut grid = ResultSetGrid::new(result);
+            let initialize = started.elapsed();
+            let started = Instant::now();
+            render_once(&mut grid);
+            eprintln!(
+                "result grid {row_count} rows: init={}ms render={}ms",
+                initialize.as_millis(),
+                started.elapsed().as_millis()
+            );
+        }
+    }
+}

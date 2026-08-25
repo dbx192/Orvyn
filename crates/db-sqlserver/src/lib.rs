@@ -11,7 +11,8 @@ use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
     DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryId, QueryResult,
-    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn, TableIndex,
+    RelationalMetadataReader, RelationalQueryExecutor, Result, Row, SslMode, TableColumn,
+    TableIndex,
 };
 use futures_util::TryStreamExt;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
@@ -26,7 +27,7 @@ pub const ADAPTER_NAME: &str = "sqlserver";
 /// adapter (tiberius requires `futures_io` streams).
 type SqlServerClient = Client<tokio_util::compat::Compat<TcpStream>>;
 
-type SqlServerPoolKey = (ConnectionId, Option<String>);
+type SqlServerPoolKey = (ConnectionId, Option<String>, SslMode, Option<String>);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SqlServerConnectionTester;
@@ -783,7 +784,10 @@ fn build_config(
     let mut config = tiberius::Config::new();
     config.host(profile.required_host()?);
     config.port(profile.required_port()?);
-    config.encryption(EncryptionLevel::NotSupported);
+    config.encryption(sqlserver_encryption(profile.security.ssl_mode));
+    if let Some(ca_path) = tls_ca_path(profile) {
+        config.trust_cert_ca(ca_path);
+    }
     if let Some(username) = profile
         .username
         .as_deref()
@@ -836,6 +840,20 @@ fn selected_database(profile: &ConnectionProfile, database: Option<&str>) -> Opt
         .map(ToOwned::to_owned)
 }
 
+fn sqlserver_encryption(mode: SslMode) -> EncryptionLevel {
+    match mode {
+        SslMode::Disable => EncryptionLevel::NotSupported,
+        SslMode::Prefer => EncryptionLevel::On,
+        SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => EncryptionLevel::Required,
+    }
+}
+
+fn tls_ca_path(profile: &ConnectionProfile) -> Option<&str> {
+    profile
+        .extra_param("tls_ca_path")
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn sqlserver_pool_key(profile: &ConnectionProfile) -> SqlServerPoolKey {
     (
         profile.id,
@@ -844,6 +862,8 @@ fn sqlserver_pool_key(profile: &ConnectionProfile) -> SqlServerPoolKey {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(ToOwned::to_owned),
+        profile.security.ssl_mode,
+        tls_ca_path(profile).map(ToOwned::to_owned),
     )
 }
 
@@ -853,4 +873,21 @@ fn quote(identifier: &str) -> String {
 
 fn query_error(error: tiberius::error::Error) -> AppError {
     AppError::new(ErrorKind::Query, "SQL Server query failed").with_detail(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlserver_tls_policy_maps_to_tiberius_encryption() {
+        assert_eq!(
+            sqlserver_encryption(SslMode::Disable),
+            EncryptionLevel::NotSupported
+        );
+        assert_eq!(sqlserver_encryption(SslMode::Prefer), EncryptionLevel::On);
+        for mode in [SslMode::Require, SslMode::VerifyCa, SslMode::VerifyFull] {
+            assert_eq!(sqlserver_encryption(mode), EncryptionLevel::Required);
+        }
+    }
 }
