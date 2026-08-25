@@ -958,7 +958,7 @@ impl RedisConnectorWithAuth {
         command: &str,
     ) -> Result<RedisValue> {
         select_database(conn, database).await?;
-        let tokens = split_command(command)?;
+        let tokens = normalize_cli_tokens(split_command(command)?);
         let Some((head, tail)) = tokens.split_first() else {
             return Err(AppError::validation("Redis command cannot be empty"));
         };
@@ -978,17 +978,28 @@ fn split_command(command: &str) -> Result<Vec<String>> {
     let mut current = String::new();
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
+    let mut token_started = false;
 
-    for ch in command.chars() {
+    for ch in command.trim_end().trim_end_matches(';').chars() {
         if escaped {
-            current.push(ch);
+            token_started = true;
+            current.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
             escaped = false;
             continue;
         }
 
         match ch {
-            '\\' => escaped = true,
+            '\\' => {
+                token_started = true;
+                escaped = true;
+            }
             '\'' | '"' => {
+                token_started = true;
                 if let Some(quote) = in_quote {
                     if quote == ch {
                         in_quote = None;
@@ -1000,23 +1011,53 @@ fn split_command(command: &str) -> Result<Vec<String>> {
                 }
             }
             c if c.is_whitespace() && in_quote.is_none() => {
-                if !current.is_empty() {
+                if token_started {
                     tokens.push(std::mem::take(&mut current));
+                    token_started = false;
                 }
             }
-            _ => current.push(ch),
+            _ => {
+                token_started = true;
+                current.push(ch);
+            }
         }
     }
 
-    if escaped || in_quote.is_some() {
-        return Err(AppError::validation("Unterminated Redis command"));
+    if escaped {
+        return Err(AppError::validation("Redis command ends with an escape"));
     }
-
-    if !current.is_empty() {
+    if in_quote.is_some() {
+        return Err(AppError::validation(
+            "Redis command has an unterminated quote",
+        ));
+    }
+    if token_started {
         tokens.push(current);
     }
 
     Ok(tokens)
+}
+
+/// The console accepts the common `SET key=value` shorthand in addition to
+/// Redis CLI's canonical `SET key value` syntax.
+fn normalize_cli_tokens(mut tokens: Vec<String>) -> Vec<String> {
+    if !tokens
+        .first()
+        .is_some_and(|command| command.eq_ignore_ascii_case("SET"))
+    {
+        return tokens;
+    }
+
+    let Some((key, value)) = tokens
+        .get(1)
+        .and_then(|argument| argument.split_once('='))
+        .filter(|(key, _)| !key.is_empty())
+    else {
+        return tokens;
+    };
+
+    tokens.splice(1..2, [key.to_string(), value.to_string()]);
+    tokens
 }
 
 fn redis_value_from_raw(value: redis::Value) -> Result<RedisValue> {
@@ -1090,6 +1131,46 @@ mod tests {
         assert_eq!(
             redis_cell(vec![0, 0xFF, 0x01]),
             CellValue::Bytes(vec![0, 0xFF, 0x01])
+        );
+    }
+
+    #[test]
+    fn parses_cli_arguments_with_quotes_escapes_and_semicolon() {
+        assert_eq!(
+            split_command(r#"SET "" "Ada \"Lovelace\"";"#).unwrap(),
+            vec!["SET", "", "Ada \"Lovelace\""]
+        );
+        assert_eq!(
+            split_command(r#"SET note "line\nnext""#).unwrap(),
+            vec!["SET", "note", "line\nnext"]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_cli_arguments() {
+        assert_eq!(
+            split_command(r#"GET "unterminated"#).unwrap_err().message,
+            "Redis command has an unterminated quote"
+        );
+        assert_eq!(
+            split_command("GET key\\").unwrap_err().message,
+            "Redis command ends with an escape"
+        );
+    }
+
+    #[test]
+    fn supports_set_key_value_shorthand() {
+        assert_eq!(
+            normalize_cli_tokens(split_command("set aa=22").unwrap()),
+            vec!["set", "aa", "22"]
+        );
+        assert_eq!(
+            normalize_cli_tokens(split_command("SET aa=hello=world EX 10").unwrap()),
+            vec!["SET", "aa", "hello=world", "EX", "10"]
+        );
+        assert_eq!(
+            normalize_cli_tokens(split_command("GET aa=22").unwrap()),
+            vec!["GET", "aa=22"]
         );
     }
 }

@@ -2438,20 +2438,31 @@ fn highlight_layout_job(
     let mut job = LayoutJob::default();
     let mut cursor = 0;
     for token in tokens {
-        let start = token.range.start.min(text.len());
-        let end = token.range.end.min(text.len());
+        // Highlighting is debounced, so tokens can briefly belong to the
+        // previous editor value. Clamp stale byte ranges to valid UTF-8
+        // boundaries before slicing the current text.
+        let start = floor_char_boundary(text, token.range.start).max(cursor);
+        let end = floor_char_boundary(text, token.range.end);
         if start > cursor {
             job.append(&text[cursor..start], 0.0, default_format.clone());
         }
         if start < end {
             job.append(&text[start..end], 0.0, token_format(token.kind, dialect));
         }
-        cursor = end;
+        cursor = cursor.max(end);
     }
     if cursor < text.len() {
         job.append(&text[cursor..], 0.0, default_format);
     }
     job
+}
+
+fn floor_char_boundary(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 fn token_format(kind: SqlTokenKind, dialect: Option<DataSourceKind>) -> TextFormat {

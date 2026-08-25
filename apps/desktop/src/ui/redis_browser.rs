@@ -1911,8 +1911,16 @@ impl RedisBrowserUi {
                             self.status = "Redis command executed".to_string();
                         }
                         Err(error) => {
-                            self.cli_result = Some(format!("ERROR: {}", error.message));
-                            self.error = Some(format!("Redis command failed: {}", error.message));
+                            let diagnostic = error
+                                .detail
+                                .filter(|detail| !detail.trim().is_empty())
+                                .map(|detail| format!(": {detail}"))
+                                .unwrap_or_default();
+                            self.cli_result = Some(format!("ERROR: {}{diagnostic}", error.message));
+                            self.error = Some(format!(
+                                "Redis command failed: {}{diagnostic}",
+                                error.message
+                            ));
                         }
                     }
                 }
