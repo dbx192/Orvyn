@@ -213,18 +213,21 @@ fn elasticsearch_auth<'a>(profile: &'a ConnectionProfile, password: Option<&'a s
     }
 }
 
-/// Compute the Elasticsearch base URL, honoring the optional `http_path` prefix.
-fn elasticsearch_base_url(profile: &ConnectionProfile) -> Result<String> {
+/// Return the HTTP origin for the profile. All HTTP-backed data sources use
+/// the same SSL policy so a saved security setting has consistent behavior.
+fn http_origin(profile: &ConnectionProfile) -> Result<String> {
     let host = profile.required_host()?;
     let port = profile.required_port()?;
-    // Elasticsearch 8 enables TLS by default. The connection form already
-    // exposes the SSL mode, so honor it instead of always sending cleartext
-    // HTTP. `Prefer` follows the secure default used by Elasticsearch.
     let scheme = match profile.security.ssl_mode {
         SslMode::Disable => "http",
         SslMode::Prefer | SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => "https",
     };
-    let origin = format!("{scheme}://{host}:{port}");
+    Ok(format!("{scheme}://{host}:{port}"))
+}
+
+/// Compute the Elasticsearch base URL, honoring the optional `http_path` prefix.
+fn elasticsearch_base_url(profile: &ConnectionProfile) -> Result<String> {
+    let origin = http_origin(profile)?;
     match profile.extra_param("http_path") {
         Some(path) if !path.trim().is_empty() => {
             let prefix = path.trim_matches('/');
@@ -515,12 +518,11 @@ impl SearchConnector for MeilisearchSearchConnector {
         password: Option<&str>,
     ) -> Result<()> {
         profile.validate()?;
-        let host = profile.required_host()?;
-        let port = profile.required_port()?;
+        let origin = http_origin(profile)?;
         let auth = meilisearch_auth(profile, password);
         let json = make_request(HttpRequest::new(
             Method::GET,
-            format!("http://{host}:{port}/health"),
+            format!("{origin}/health"),
             auth,
             "failed to reach Meilisearch",
         ))
@@ -535,12 +537,11 @@ impl SearchConnector for MeilisearchSearchConnector {
         profile: &ConnectionProfile,
         password: Option<&str>,
     ) -> Result<Vec<SearchIndex>> {
-        let host = profile.required_host()?;
-        let port = profile.required_port()?;
+        let origin = http_origin(profile)?;
         let auth = meilisearch_auth(profile, password);
         let json = make_request(HttpRequest::new(
             Method::GET,
-            format!("http://{host}:{port}/indexes"),
+            format!("{origin}/indexes"),
             auth,
             "failed to list Meilisearch indexes",
         ))
@@ -576,12 +577,11 @@ impl SearchConnector for MeilisearchSearchConnector {
         password: Option<&str>,
         index: &str,
     ) -> Result<serde_json::Value> {
-        let host = profile.required_host()?;
-        let port = profile.required_port()?;
+        let origin = http_origin(profile)?;
         let auth = meilisearch_auth(profile, password);
         make_request(HttpRequest::new(
             Method::GET,
-            format!("http://{host}:{port}/indexes/{index}"),
+            format!("{origin}/indexes/{index}"),
             auth,
             "failed to fetch Meilisearch index settings",
         ))
@@ -596,8 +596,7 @@ impl SearchConnector for MeilisearchSearchConnector {
         query: &serde_json::Value,
         limit: u32,
     ) -> Result<SearchResult> {
-        let host = profile.required_host()?;
-        let port = profile.required_port()?;
+        let origin = http_origin(profile)?;
         let auth = meilisearch_auth(profile, password);
 
         let mut body = query.clone();
@@ -616,7 +615,7 @@ impl SearchConnector for MeilisearchSearchConnector {
 
         let mut req = HttpRequest::new(
             Method::POST,
-            format!("http://{host}:{port}/indexes/{index}/search"),
+            format!("{origin}/indexes/{index}/search"),
             auth,
             "failed to run Meilisearch search",
         );
@@ -657,12 +656,11 @@ impl ConnectionTester for MeilisearchConnectionTester {
     ) -> Result<ConnectionTestReport> {
         profile.validate()?;
         let started_at = std::time::Instant::now();
-        let host = profile.required_host()?;
-        let port = profile.required_port()?;
+        let origin = http_origin(profile)?;
         let auth = meilisearch_auth(profile, password);
         make_request(HttpRequest::new(
             Method::GET,
-            format!("http://{host}:{port}/health"),
+            format!("{origin}/health"),
             auth,
             "failed to reach Meilisearch",
         ))
@@ -688,12 +686,11 @@ async fn manticore_sql(
     password: Option<&str>,
     sql: &str,
 ) -> Result<serde_json::Value> {
-    let host = profile.required_host()?;
-    let port = profile.required_port()?;
+    let origin = http_origin(profile)?;
     let username = profile.username.as_deref().unwrap_or_default();
     let mut req = HttpRequest::new(
         Method::POST,
-        format!("http://{host}:{port}/sql"),
+        format!("{origin}/sql"),
         Auth::Basic(username, password),
         "failed to run Manticore SQL",
     );
@@ -774,8 +771,7 @@ impl SearchConnector for ManticoreSearchConnector {
         query: &serde_json::Value,
         limit: u32,
     ) -> Result<SearchResult> {
-        let host = profile.required_host()?;
-        let port = profile.required_port()?;
+        let origin = http_origin(profile)?;
         let username = profile.username.as_deref().unwrap_or_default();
 
         let search_body = match query {
@@ -808,7 +804,7 @@ impl SearchConnector for ManticoreSearchConnector {
 
         let mut req = HttpRequest::new(
             Method::POST,
-            format!("http://{host}:{port}/search"),
+            format!("{origin}/search"),
             Auth::Basic(username, password),
             "failed to run Manticore search",
         );

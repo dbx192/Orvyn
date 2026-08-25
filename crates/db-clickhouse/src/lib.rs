@@ -11,8 +11,8 @@ use db_common::{
     is_result_set_statement, AppError, CellValue, Column, ConnectionId, ConnectionPoolConfig,
     ConnectionPoolStats, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind,
     DatabaseFunction, DatabaseObject, DatabaseObjectKind, ErrorKind, LogicalType, QueryId,
-    QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, TableColumn,
-    TableForeignKey, TableIndex, TableTrigger,
+    QueryResult, RelationalMetadataReader, RelationalQueryExecutor, Result, Row, SslMode,
+    TableColumn, TableForeignKey, TableIndex, TableTrigger,
 };
 use std::{
     collections::BTreeMap,
@@ -35,6 +35,7 @@ pub struct ClickHouseQueryExecutor;
 fn http_client(_profile: &ConnectionProfile, _password: Option<&str>) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| {
             AppError::new(ErrorKind::Connection, "failed to build HTTP client")
@@ -44,8 +45,12 @@ fn http_client(_profile: &ConnectionProfile, _password: Option<&str>) -> Result<
 
 /// Assemble the ClickHouse HTTP endpoint URL.
 fn endpoint_url(profile: &ConnectionProfile) -> Result<String> {
+    let scheme = match profile.security.ssl_mode {
+        SslMode::Disable => "http",
+        SslMode::Prefer | SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => "https",
+    };
     Ok(format!(
-        "http://{}:{}/",
+        "{scheme}://{}:{}/",
         profile.required_host()?,
         profile.required_port()?
     ))

@@ -19,9 +19,17 @@ use tracing::{debug, info, instrument};
 /// busy.
 #[cfg(not(test))]
 const CONNECTION_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+const CONNECTION_TEST_RETRIES: u8 = 1;
+#[cfg(not(test))]
+const CONNECTION_TEST_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[cfg(test)]
 const CONNECTION_TEST_TIMEOUT: Duration = Duration::from_millis(20);
+#[cfg(test)]
+const CONNECTION_TEST_RETRIES: u8 = 0;
+#[cfg(test)]
+const CONNECTION_TEST_RETRY_DELAY: Duration = Duration::from_millis(1);
 
 #[derive(Clone)]
 pub struct ConnectionManager {
@@ -156,21 +164,42 @@ impl ConnectionManager {
         let password = runtime_password.or(stored_password.as_deref());
 
         debug!(kind = ?profile.kind, "testing connection");
-        tokio::time::timeout(
-            CONNECTION_TEST_TIMEOUT,
-            tester.test_connection(profile, password),
-        )
-        .await
-        .map_err(|_| {
-            AppError::new(
-                ErrorKind::Timeout,
-                format!(
-                    "{} connection test timed out after {} seconds",
-                    profile.kind.display_label(),
-                    CONNECTION_TEST_TIMEOUT.as_secs()
-                ),
+        for attempt in 0..=CONNECTION_TEST_RETRIES {
+            let result = match tokio::time::timeout(
+                CONNECTION_TEST_TIMEOUT,
+                tester.test_connection(profile, password),
             )
-        })?
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(AppError::new(
+                    ErrorKind::Timeout,
+                    format!(
+                        "{} connection test timed out after {} seconds",
+                        profile.kind.display_label(),
+                        CONNECTION_TEST_TIMEOUT.as_secs()
+                    ),
+                )),
+            };
+
+            match result {
+                Ok(report) => return Ok(report),
+                Err(error)
+                    if attempt < CONNECTION_TEST_RETRIES
+                        && is_transient_connection_error(&error) =>
+                {
+                    debug!(
+                        kind = ?profile.kind,
+                        attempt = attempt + 1,
+                        "connection test failed transiently; retrying"
+                    );
+                    tokio::time::sleep(CONNECTION_TEST_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        unreachable!("connection test retry loop always returns")
     }
 
     pub async fn status_for(&self, id: ConnectionId) -> Result<ConnectionStatus> {
@@ -237,6 +266,13 @@ impl ConnectionManager {
 
         Ok((profile, password))
     }
+}
+
+fn is_transient_connection_error(error: &AppError) -> bool {
+    matches!(
+        error.kind,
+        ErrorKind::Connection | ErrorKind::Timeout | ErrorKind::Io
+    )
 }
 
 /// In-memory helper kept for tests and early UI prototypes.
@@ -332,7 +368,9 @@ mod tests {
             .expect_err("unresponsive tester should time out");
 
         assert_eq!(error.kind, ErrorKind::Timeout);
-        assert!(error.message.contains("PostgreSQL connection test timed out"));
+        assert!(error
+            .message
+            .contains("PostgreSQL connection test timed out"));
     }
 
     fn test_manager() -> ConnectionManager {

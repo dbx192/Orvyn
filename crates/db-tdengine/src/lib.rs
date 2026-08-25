@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use db_common::{
     AppError, ConnectionProfile, ConnectionTestReport, ConnectionTester, DataSourceKind, ErrorKind,
-    Result,
+    Result, SslMode,
 };
 use std::time::Duration;
 
@@ -24,8 +24,12 @@ async fn rest_query(
     password: Option<&str>,
     sql: &str,
 ) -> Result<serde_json::Value> {
+    let scheme = match profile.security.ssl_mode {
+        SslMode::Disable => "http",
+        SslMode::Prefer | SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => "https",
+    };
     let url = format!(
-        "http://{}:{}/rest/sql",
+        "{scheme}://{}:{}/rest/sql",
         profile.required_host()?,
         profile.required_port()?
     );
@@ -33,6 +37,7 @@ async fn rest_query(
     let username = profile.username.as_deref().unwrap_or_default();
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| {
             AppError::new(ErrorKind::Connection, "failed to build HTTP client")

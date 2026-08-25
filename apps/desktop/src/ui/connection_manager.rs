@@ -625,8 +625,22 @@ impl ConnectionManagerUi {
 
         ui.add_space(10.0);
         ui.horizontal_wrapped(|ui| {
+            let supports_connection_test = self.form.kind.capabilities().connection_test;
             if ui
-                .add_enabled(!self.busy, Button::new(tr("Test Connection")))
+                .add_enabled(
+                    !self.busy && supports_connection_test,
+                    Button::new(tr("Test Connection")),
+                )
+                .on_hover_text(if supports_connection_test {
+                    String::new()
+                } else {
+                    self.form
+                        .kind
+                        .capabilities()
+                        .notes
+                        .unwrap_or("Connection testing is not supported in this build")
+                        .to_string()
+                })
                 .clicked()
             {
                 self.test_connection();

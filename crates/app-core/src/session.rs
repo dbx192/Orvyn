@@ -14,15 +14,13 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct SessionManager {
     connections: ConnectionManager,
-    registry: DriverRegistry,
     sessions: Arc<RwLock<BTreeMap<ConnectionId, SessionInfo>>>,
 }
 
 impl SessionManager {
-    pub fn new(connections: ConnectionManager, testers: Vec<Arc<dyn ConnectionTester>>) -> Self {
+    pub fn new(connections: ConnectionManager, _testers: Vec<Arc<dyn ConnectionTester>>) -> Self {
         Self {
             connections: connections.clone(),
-            registry: DriverRegistry::from_testers(testers),
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
@@ -30,10 +28,9 @@ impl SessionManager {
     /// Preferred production constructor. The supplied registry is shared with
     /// other services (ConnectionManager, MetadataService, QueryService) so
     /// every brand routes through the same driver instance.
-    pub fn with_registry(connections: ConnectionManager, registry: DriverRegistry) -> Self {
+    pub fn with_registry(connections: ConnectionManager, _registry: DriverRegistry) -> Self {
         Self {
             connections,
-            registry,
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
@@ -53,15 +50,17 @@ impl SessionManager {
             .profile_with_password(id, runtime_password)
             .await?;
 
-        let tester = self.registry.tester(profile.kind)?.clone();
-
         let mut session = self.get_or_create_session(id).await;
         session.mark_connecting();
         self.update_session(session.clone()).await;
 
         info!(connection_id = %id, "connecting to database");
 
-        match tester.test_connection(&profile, password.as_deref()).await {
+        match self
+            .connections
+            .test_profile(&profile, password.as_deref())
+            .await
+        {
             Ok(report) => {
                 if report.success {
                     session.mark_connected();
@@ -178,8 +177,7 @@ impl SessionManager {
         profile: &ConnectionProfile,
         password: Option<&str>,
     ) -> Result<ConnectionTestReport> {
-        let tester = self.registry.tester(profile.kind)?.clone();
-        tester.test_connection(profile, password).await
+        self.connections.test_profile(profile, password).await
     }
 
     pub async fn test_saved_profile(
