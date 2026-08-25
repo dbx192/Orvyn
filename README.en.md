@@ -112,7 +112,7 @@ Install the Rust MSVC toolchain, the `x86_64-pc-windows-msvc` target, the Window
 The script builds `orvyn` and produces:
 
 ```text
-dist/windows/orvyn-0.1.0-windows-x86_64-setup.exe
+dist/windows/orvyn-1.0.0-windows-x86_64-setup.exe
 ```
 
 When distributing the executable directly, distribute `duckdb.dll` from the same directory as well. The installer is the recommended distribution format.

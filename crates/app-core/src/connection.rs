@@ -10,8 +10,18 @@ use db_common::{
     ConnectionTester, ErrorKind, PasswordUpdate, Result,
 };
 use secure_store::SecureStore;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tracing::{debug, info, instrument};
+
+/// A connection test must always return control to the UI. Individual drivers
+/// may use shorter transport timeouts, but this covers every registered tester
+/// and prevents an unresponsive server from leaving the editor permanently
+/// busy.
+#[cfg(not(test))]
+const CONNECTION_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+const CONNECTION_TEST_TIMEOUT: Duration = Duration::from_millis(20);
 
 #[derive(Clone)]
 pub struct ConnectionManager {
@@ -146,7 +156,21 @@ impl ConnectionManager {
         let password = runtime_password.or(stored_password.as_deref());
 
         debug!(kind = ?profile.kind, "testing connection");
-        tester.test_connection(profile, password).await
+        tokio::time::timeout(
+            CONNECTION_TEST_TIMEOUT,
+            tester.test_connection(profile, password),
+        )
+        .await
+        .map_err(|_| {
+            AppError::new(
+                ErrorKind::Timeout,
+                format!(
+                    "{} connection test timed out after {} seconds",
+                    profile.kind.display_label(),
+                    CONNECTION_TEST_TIMEOUT.as_secs()
+                ),
+            )
+        })?
     }
 
     pub async fn status_for(&self, id: ConnectionId) -> Result<ConnectionStatus> {
@@ -289,12 +313,52 @@ mod tests {
         assert!(created.password_ref.is_some());
     }
 
+    #[tokio::test]
+    async fn test_profile_times_out_unresponsive_drivers() {
+        let manager = ConnectionManager::new(
+            Arc::new(MemoryConnectionProfileStore::default()),
+            Arc::new(MemorySecureStore::default()),
+            vec![Arc::new(UnresponsiveTester)],
+        );
+        let profile = ConnectionProfile::builder(DataSourceKind::PostgreSql, "slow")
+            .host("localhost")
+            .username("postgres")
+            .build()
+            .expect("profile");
+
+        let error = manager
+            .test_profile(&profile, None)
+            .await
+            .expect_err("unresponsive tester should time out");
+
+        assert_eq!(error.kind, ErrorKind::Timeout);
+        assert!(error.message.contains("PostgreSQL connection test timed out"));
+    }
+
     fn test_manager() -> ConnectionManager {
         ConnectionManager::new(
             Arc::new(MemoryConnectionProfileStore::default()),
             Arc::new(MemorySecureStore::default()),
             Vec::new(),
         )
+    }
+
+    struct UnresponsiveTester;
+
+    #[async_trait]
+    impl ConnectionTester for UnresponsiveTester {
+        fn kind(&self) -> DataSourceKind {
+            DataSourceKind::PostgreSql
+        }
+
+        async fn test_connection(
+            &self,
+            _profile: &ConnectionProfile,
+            _password: Option<&str>,
+        ) -> Result<ConnectionTestReport> {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            unreachable!("the test timeout should cancel this future")
+        }
     }
 
     #[derive(Default)]

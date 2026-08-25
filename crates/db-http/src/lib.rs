@@ -13,7 +13,7 @@ use base64::engine::Engine;
 use db_common::{
     AppError, CellValue, Column, ConnectionProfile, ConnectionTestReport, ConnectionTester,
     DataSourceKind, DatabaseObject, DatabaseObjectKind, ErrorKind, HttpSqlConnector, QueryResult,
-    Result, Row, SearchConnector, SearchIndex, SearchResult, TableColumn,
+    Result, Row, SearchConnector, SearchIndex, SearchResult, SslMode, TableColumn,
 };
 use reqwest::Method;
 use std::collections::BTreeMap;
@@ -64,6 +64,11 @@ impl<'a> HttpRequest<'a> {
 async fn make_request(req: HttpRequest<'_>) -> Result<serde_json::Value> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
+        // `connect_timeout` does not cover a server that accepts the TCP
+        // connection but never sends a response. Without a total deadline the
+        // connection dialog remains busy indefinitely and its actions stay
+        // disabled.
+        .timeout(Duration::from_secs(10))
         .user_agent(format!("orvyn/{ADAPTER_NAME}"))
         .build()
         .map_err(|error| {
@@ -212,13 +217,56 @@ fn elasticsearch_auth<'a>(profile: &'a ConnectionProfile, password: Option<&'a s
 fn elasticsearch_base_url(profile: &ConnectionProfile) -> Result<String> {
     let host = profile.required_host()?;
     let port = profile.required_port()?;
-    let origin = format!("http://{host}:{port}");
+    // Elasticsearch 8 enables TLS by default. The connection form already
+    // exposes the SSL mode, so honor it instead of always sending cleartext
+    // HTTP. `Prefer` follows the secure default used by Elasticsearch.
+    let scheme = match profile.security.ssl_mode {
+        SslMode::Disable => "http",
+        SslMode::Prefer | SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => "https",
+    };
+    let origin = format!("{scheme}://{host}:{port}");
     match profile.extra_param("http_path") {
         Some(path) if !path.trim().is_empty() => {
             let prefix = path.trim_matches('/');
             Ok(format!("{origin}/{prefix}/"))
         }
         _ => Ok(format!("{origin}/")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elasticsearch_url_honors_ssl_mode_and_path() {
+        let profile = ConnectionProfile::builder(DataSourceKind::Elasticsearch, "es")
+            .host("search.example.test")
+            .port(9200)
+            .ssl_mode(SslMode::Require)
+            .extra_param("http_path", "/elastic/")
+            .build()
+            .expect("valid Elasticsearch profile");
+
+        assert_eq!(
+            elasticsearch_base_url(&profile).expect("valid URL"),
+            "https://search.example.test:9200/elastic/"
+        );
+    }
+
+    #[test]
+    fn elasticsearch_url_uses_http_when_ssl_is_disabled() {
+        let profile = ConnectionProfile::builder(DataSourceKind::Elasticsearch, "es")
+            .host("localhost")
+            .port(9200)
+            .ssl_mode(SslMode::Disable)
+            .build()
+            .expect("valid Elasticsearch profile");
+
+        assert_eq!(
+            elasticsearch_base_url(&profile).expect("valid URL"),
+            "http://localhost:9200/"
+        );
     }
 }
 
