@@ -1,17 +1,16 @@
 use super::{
     export_sql::qualified_table_label,
-    payloads::{ClearRequest, DropObjectKind, DropTableRequest, ImportTableRequest, TableExportRequest},
+    payloads::{
+        ClearRequest, DropObjectKind, DropTableRequest, ImportTableRequest, TableExportRequest,
+    },
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
-    connection_manager::ConnectionChange,
-    import_wizard::ImportWizard, object_tree::ObjectTreeAction, redis_browser::RedisBrowserUi,
-    search_browser::SearchBrowser,
+    connection_manager::ConnectionChange, import_wizard::ImportWizard,
+    object_tree::ObjectTreeAction, redis_browser::RedisBrowserUi, search_browser::SearchBrowser,
 };
 use db_common::ConnectionId;
-use eframe::egui::{
-    Align, Color32, Context, Layout, RichText, SidePanel,
-};
+use eframe::egui::{Align, Color32, Context, Layout, RichText, SidePanel};
 use import_export::ExportFormat;
 
 const LEFT_PANEL_MIN_WIDTH: f32 = 200.0;

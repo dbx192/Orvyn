@@ -1,148 +1,160 @@
-# Orvyn
+# Orvyn 1.0.0
 
 [中文](README.md)
 
-Orvyn is a cross-platform desktop database client built with Rust, covering daily querying, data browsing, and light maintenance across relational, document, key-value, and search databases. The UI is a native `egui/eframe` implementation on top of a layered Rust workspace, with no ODBC/JDBC/sidecar dependencies.
+Orvyn is a Rust cross-platform desktop database client for connecting to, querying, browsing, and lightly maintaining relational, document, key-value, and search services. Its native egui/eframe UI has no ODBC, JDBC, or sidecar dependency.
 
-## Highlights
+## Features
 
-- **Pure Rust**: native `egui/eframe` interface backed by a Tokio async core.
-- **Unified driver registry**: 35 `DataSourceKind` variants are routed over `ProtocolFamily` to shared protocol drivers, with a capability matrix (`SupportLevel` / `ConnectorCapabilities`).
-- **Brand sharing**: multiple brands inside the MySQL family and PostgreSQL family share one underlying driver, with brand switches for dialect, port, and capability differences.
-- **Capability-driven UI**: connection form fields, query editor availability, and dedicated panels are all driven by the capability matrix.
+- Create, edit, test, group, delete, import, and export connections. Password saving is opt-in and encrypted locally with ChaCha20-Poly1305.
+- Connection timeouts and one retry for transient network failures.
+- PostgreSQL, MySQL, and SQL Server TLS modes: Disable, Prefer, Require, Verify CA, and Verify Full, with an optional CA certificate path. Strict modes do not silently fall back to plaintext.
+- SQL tabs, execute all/current/selection, cancellation, syntax highlighting, keyword and schema table/column completion, history, and favorites.
+- Server-side result paging, sorting, copy, and CSV/JSON/Excel-compatible TSV export. Only visible grid rows are painted; pages range from 25 to 1,000 rows.
+- Browse metadata and maintain table data. Views live in a localized Views folder; views and saved queries have context-menu deletion.
+- Redis browser and data operations; MongoDB browsing, document queries, and basic CRUD.
+- Elasticsearch, Easysearch, Meilisearch, Manticore Search index/JSON queries, plus Cloudflare D1 HTTP SQL.
 
-## Supported Data Sources
+## Supported Sources
 
-Grouped by protocol family:
+| Family | Sources |
+| --- | --- |
+| MySQL protocol | MySQL, MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, GoldenDB |
+| PostgreSQL protocol | PostgreSQL, TimescaleDB, Redshift, CockroachDB, OpenGauss, GaussDB, KwDb, KingbaseES, Vastbase, HighGo, UXDB |
+| Relational/analytics | SQLite, DuckDB, ClickHouse, SQL Server |
+| Document/key-value | MongoDB, Redis |
+| Search | Elasticsearch, Easysearch, Meilisearch, Manticore Search |
+| HTTP SQL | Cloudflare D1 |
+| Restricted | TDengine has an HTTP probe only. Access, Oracle, DM, and XuguDB profiles can be saved but have no usable driver. |
 
-- **MySQL family**: MySQL, TiDB, MariaDB, OceanBase, Doris, SelectDB, StarRocks, GoldenDB
-- **PostgreSQL family**: PostgreSQL, TimescaleDB, Redshift, CockroachDB, OpenGauss, GaussDB, KDB, KingbaseES, Vastbase, HighGo, UXDB
-- **Standalone relational/analytics**: SQLite, DuckDB, ClickHouse, SQL Server
-- **Document/key-value**: MongoDB, Redis
-- **Search (HTTP)**: Elasticsearch, Easysearch, Meilisearch, Manticore Search
-- **HTTP-SQL**: Cloudflare D1
-- **Restricted**: TDengine (connection probe only); Access, Oracle, Dameng (DM), XuguDB — can be created/saved, tests return a structured "not yet supported" message
+The capability matrix disables metadata, DDL, and editing actions that a particular backend does not support.
 
-Local integration services can reuse `F:\dnmp\docker-compose.orvyn.yml` from the DNMP directory:
-`docker compose -f docker-compose.yml -f docker-compose.orvyn.yml up -d mongodb clickhouse sqlserver tidb`.
-TimescaleDB uses the existing PostgreSQL service; TiDB listens on `127.0.0.1:4000`, ClickHouse exposes `8123/9000`.
+## Run From Source
 
-## Architecture
+Install Rust 1.78 or newer and the C/C++ toolchain for the host platform.
 
-- `DriverRegistry` (app-core): centrally registers and routes each protocol family, removing scattered `match kind` branches.
-- `ProtocolFamily` + `ConnectorCapabilities` (db-common): express protocol-family membership and support levels, with clear errors for unknown types.
-- Query/document/search/HTTP-SQL go through `RelationalQueryExecutor`, `DocumentConnector`, `SearchConnector`, and `HttpSqlConnector` traits respectively, decoupling the UI from the underlying drivers.
+~~~powershell
+cargo run -p orvyn --locked
+cargo check --workspace --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+~~~
 
-## Current Capabilities
+## TLS Policy
 
-### Connections and Security
+Select SSL mode in the connection form. PostgreSQL, MySQL, and SQL Server expose TLS CA certificate path; it stores a file path only, never certificate contents or private keys.
 
-- Create, edit, test, group, and delete connections; import or export all or selected connections (imports can overwrite conflicts or rename automatically).
-- Optionally store passwords locally with ChaCha20-Poly1305 encryption. Passwords are not saved by default.
-- Mark individual connections as read-only. Read-only connections reject write statements and transactions.
-- The type selector groups by protocol family and shows support level; form fields are driven by the capability matrix.
+| Mode | Behavior |
+| --- | --- |
+| Disable | Explicitly disables TLS. |
+| Prefer | Negotiates TLS first and may fall back where the protocol permits it. |
+| Require | Requires TLS without an additional CA file. |
+| Verify CA | Requires TLS and validates the server certificate chain. |
+| Verify Full | Also validates the certificate hostname against the connected host. |
 
-### Relational Databases
+Use the database DNS name and a CA file from the organization or cloud provider in strict modes. Supply the appropriate CA for self-signed deployments instead of using Disable.
 
-- Browse databases, schemas, tables, views, and their metadata (columns, indexes, foreign keys, triggers, functions, CREATE TABLE SQL — adapter-dependent).
-- Multi-tab SQL editor: execute all statements, the current statement, or the selected SQL; cancellable execution; query history, favorites, result paging and column sorting.
-- Table data browse, filter, sort, insert, edit, and delete rows; tables without a primary key are read-only by default.
-- Inspect and edit table structure; export structure SQL, or structure-and-data SQL, for a table or database.
-- SQL Server (tiberius) and ClickHouse (HTTP) provide query and metadata support.
+## Configuration
 
-### Document / Key-Value
+- Windows: %APPDATA%\Orvyn
+- Linux/macOS: $XDG_CONFIG_HOME/orvyn, or orvyn in the working directory when unset
 
-- **MongoDB**: browse databases and collections, query documents, basic CRUD.
-- **Redis**: logical-database browsing, paginated `SCAN` key lookup, type/TTL/size/value inspection, String/Hash/List/Set/Sorted Set management, and command execution.
+The directory holds profiles, query history, favorites, settings, logs, and encryption material. Override it with ORVYN_CONFIG_DIR and ORVYN_MASTER_KEY. Without the latter, Orvyn creates master.key in the configuration directory; protect both.
 
-### Search / HTTP-SQL
+## Shared Packaging Preparation
 
-- **Elasticsearch / Easysearch / Meilisearch / Manticore Search**: index browsing and a JSON/DSL query panel.
-- **Cloudflare D1**: executes SQL over the HTTP API.
+Package on the target operating system. System SDKs, signing, and the DuckDB dynamic library make cross-system desktop packaging unreliable.
 
-### Import and Export
+The local DuckDB library is not downloaded during builds. Put matching target files in:
 
-- Export query results as CSV, JSON, or Excel-compatible tab-separated text; CSV uses a UTF-8 BOM so Excel on Windows recognizes Chinese correctly.
-- CSV preview, automatic field mapping, type validation, and batched INSERT SQL generation.
-
-## Run from Source
-
-Prerequisites: Rust `1.78` or newer and the C/C++ build toolchain for the current platform.
-
-```powershell
-cargo run -p orvyn
-```
-
-Useful checks:
-
-```powershell
-cargo fmt --all -- --check
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-## Configuration and Credentials
-
-Default configuration location:
-
-- Windows: `%APPDATA%\Orvyn`
-- Other platforms: `$XDG_CONFIG_HOME/orvyn`; when it is unset, `orvyn` under the current directory
-
-The directory holds connection profiles, query history, favorites, and the encryption key. Override it with environment variables:
-
-```powershell
-$env:ORVYN_CONFIG_DIR = "D:\\path\\to\\orvyn-config"
-$env:ORVYN_MASTER_KEY = "replace-with-a-strong-private-key"
-```
-
-When `ORVYN_MASTER_KEY` is not set, the app creates and uses `master.key` in the configuration directory. Protect that directory and key.
-
-## Local DuckDB Library
-
-The project links a local DuckDB library through `libduckdb-sys`; it does not download DuckDB during builds. The default location is:
-
-```text
+~~~text
 target/duckdb-download/local/1.5.4
-```
+~~~
 
-The directory must contain the files for the target platform:
+- Windows x64 MSVC: duckdb.lib, duckdb.dll, duckdb.h
+- Linux x64: libduckdb.so, duckdb.h
+- macOS: libduckdb.dylib, duckdb.h
 
-- Linux x64: `libduckdb.so`, `duckdb.h`
-- Windows x64 MSVC: `duckdb.lib`, `duckdb.dll`, `duckdb.h`
+Restore the correct files after changing DuckDB, architecture, or cleaning target. Use --locked for release builds.
 
-After changing the DuckDB version or target platform, or removing this directory, restore the matching local library before building.
+## Windows Installer
 
-## Release and Packaging
+Install the Rust MSVC toolchain, Visual Studio Build Tools with Desktop development with C++, and [Inno Setup 6](https://jrsoftware.org/isinfo.php). Prepare the Windows DuckDB files, then run from the repository root:
 
-Build each platform on its native OS; do not cross-compile all three systems on Linux (GUI, system SDKs, signing, and the DuckDB dynamic library make that unreliable). Release artifacts must carry the matching DuckDB dynamic library and an appropriate installer:
+~~~powershell
+rustup target add x86_64-pc-windows-msvc
+.\packaging\windows\build-installer.ps1
+~~~
 
-- **Windows x64**: install the Rust MSVC toolchain, the `x86_64-pc-windows-msvc` target, the Windows DuckDB local library, and Inno Setup 6, then run `.\packaging\windows\build-installer.ps1` from the repository root — output is `dist/windows/orvyn-0.1.0-windows-x86_64-setup.exe`.
-- **Linux x86_64**: build with `--locked` on an as-old-as-possible base distribution (e.g., Ubuntu 22.04); produces a portable tar.gz, `.AppImage`, or `.deb`.
-- **macOS**: produce `.app` and `.dmg` for Apple Silicon and Intel separately; sign and notarize for end-user distribution.
+The supplied script builds the x64 binary, includes duckdb.dll, invokes Inno Setup, and writes an installer similar to dist\windows\orvyn-1.0.0-windows-x86_64-<icon-hash>-setup.exe. Authenticode-sign it before public distribution.
 
-When distributing an executable directly, ship the matching DuckDB dynamic library in the same directory (`duckdb.dll` / `libduckdb.so` / `libduckdb.dylib`). Distributing an installer is generally recommended.
+## Linux .deb
 
-## Workspace Layout
+Build on an older baseline such as Ubuntu 22.04:
 
-```text
-apps/desktop           Desktop entry point and egui UI
-crates/app-core        Connection, session, metadata, query, Redis/Search services, and DriverRegistry
-crates/db-common       Shared models, traits, errors, capability matrix, and utilities
-crates/db-mysql        MySQL protocol family (brand sharing: MariaDB/TiDB/OceanBase/Doris/SelectDB/StarRocks/GoldenDB)
-crates/db-postgres     PostgreSQL protocol family (brand sharing: TimescaleDB/Redshift/CockroachDB/OpenGauss/...)
-crates/db-sqlite       SQLite adapter
-crates/db-duckdb       DuckDB adapter
-crates/db-redis        Redis adapter
-crates/db-sqlserver    SQL Server adapter (tiberius)
-crates/db-clickhouse   ClickHouse HTTP adapter
-crates/db-mongodb      MongoDB document adapter
-crates/db-http         HTTP search (Elasticsearch/Easysearch/Meilisearch/Manticore) and HTTP-SQL (Cloudflare D1)
-crates/db-tdengine     TDengine restricted HTTP connection probe
-crates/import-export   CSV/JSON import and export utilities
-crates/secure-store    Encrypted credential storage
-packaging/windows      Windows installer scripts and assets
-```
+~~~bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev
+rustup target add x86_64-unknown-linux-gnu
+cargo build -p orvyn --release --locked --target x86_64-unknown-linux-gnu
+~~~
+
+Assemble a Debian package. Its launcher explicitly locates the bundled DuckDB library:
+
+~~~bash
+PKG=dist/linux/orvyn_1.0.0_amd64
+rm -rf "$PKG"
+mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/orvyn" "$PKG/usr/bin" "$PKG/usr/share/applications"
+cp target/x86_64-unknown-linux-gnu/release/orvyn "$PKG/usr/lib/orvyn/"
+cp target/duckdb-download/local/1.5.4/libduckdb.so "$PKG/usr/lib/orvyn/"
+printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/usr/lib/orvyn /usr/lib/orvyn/orvyn "$@"\n' > "$PKG/usr/bin/orvyn"
+chmod 755 "$PKG/usr/bin/orvyn"
+printf 'Package: orvyn\nVersion: 1.0.0\nSection: database\nPriority: optional\nArchitecture: amd64\nMaintainer: Orvyn\nDescription: Cross-platform desktop database client\n' > "$PKG/DEBIAN/control"
+printf '[Desktop Entry]\nType=Application\nName=Orvyn\nExec=orvyn\nCategories=Development;Database;\nTerminal=false\n' > "$PKG/usr/share/applications/orvyn.desktop"
+dpkg-deb --build "$PKG"
+sudo apt install ./dist/linux/orvyn_1.0.0_amd64.deb
+orvyn
+~~~
+
+An AppImage can reuse this layout through an AppDir and appimagetool; its AppRun needs the same library path. No automated Linux packaging script is included.
+
+## macOS .app and .dmg
+
+Build separately on matching hardware: aarch64-apple-darwin for Apple Silicon and x86_64-apple-darwin for Intel.
+
+~~~bash
+xcode-select --install
+rustup target add aarch64-apple-darwin # use x86_64-apple-darwin on Intel
+cargo build -p orvyn --release --locked --target aarch64-apple-darwin
+TARGET=aarch64-apple-darwin
+APP=dist/macos/Orvyn.app
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
+cp "target/$TARGET/release/orvyn" "$APP/Contents/MacOS/Orvyn"
+cp target/duckdb-download/local/1.5.4/libduckdb.dylib "$APP/Contents/Frameworks/"
+cat > "$APP/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Orvyn</string>
+<key>CFBundleIdentifier</key><string>io.orvyn.desktop</string>
+<key>CFBundleName</key><string>Orvyn</string>
+<key>CFBundleShortVersionString</key><string>1.0.0</string>
+</dict></plist>
+EOF
+install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/Orvyn"
+hdiutil create -volname Orvyn -srcfolder "$APP" -ov -format UDZO dist/macos/Orvyn-1.0.0.dmg
+~~~
+
+Check otool -L "$APP/Contents/MacOS/Orvyn" for the DuckDB reference. Public distribution requires Developer ID signing and notarization:
+
+~~~bash
+codesign --force --deep --options runtime --sign "Developer ID Application: Your Name (TEAMID)" "$APP"
+xcrun notarytool submit dist/macos/Orvyn-1.0.0.dmg --keychain-profile "notary-profile" --wait
+xcrun stapler staple dist/macos/Orvyn-1.0.0.dmg
+~~~
+
+There is no automated macOS packaging script or .icns icon in this repository.
 
 ## License
 

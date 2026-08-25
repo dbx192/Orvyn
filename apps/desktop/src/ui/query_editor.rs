@@ -1054,7 +1054,23 @@ impl QueryEditor {
             }
 
             if let Some(error) = &tab.execution_error {
-                ui.colored_label(Color32::RED, error);
+                eframe::egui::Frame::none()
+                    .fill(Color32::from_rgb(64, 28, 30))
+                    .stroke(eframe::egui::Stroke::new(
+                        1.0,
+                        Color32::from_rgb(190, 74, 78),
+                    ))
+                    .inner_margin(eframe::egui::Margin::same(8.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Query error").strong().color(Color32::RED));
+                        ui.add_space(4.0);
+                        let mut diagnostic = error.clone();
+                        eframe::egui::TextEdit::multiline(&mut diagnostic)
+                            .code_editor()
+                            .interactive(false)
+                            .desired_width(f32::INFINITY)
+                            .show(ui);
+                    });
                 return;
             }
 
@@ -1723,7 +1739,8 @@ impl QueryEditor {
                                     tab.execution_error = Some("Execution cancelled".to_string());
                                     self.status = "Execution cancelled".to_string();
                                 } else {
-                                    tab.execution_error = Some(error.message.clone());
+                                    let diagnostic = error.diagnostic_message();
+                                    tab.execution_error = Some(diagnostic.clone());
                                     self.status = format!("Execution failed: {}", error.message);
                                 }
                             }
@@ -1775,7 +1792,8 @@ impl QueryEditor {
                                 }
                             }
                             Err(error) => {
-                                self.status = format!("Page load failed: {}", error.message);
+                                self.status =
+                                    format!("Page load failed: {}", error.diagnostic_message());
                             }
                         }
                     }
@@ -1785,8 +1803,9 @@ impl QueryEditor {
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
                         tab.execution_cancelling = false;
                         if let Err(error) = result {
-                            tab.execution_error = Some(error.message.clone());
-                            self.status = format!("Stop failed: {}", error.message);
+                            let diagnostic = error.diagnostic_message();
+                            tab.execution_error = Some(diagnostic.clone());
+                            self.status = format!("Stop failed: {diagnostic}");
                         } else {
                             self.status = "Cancellation requested".to_string();
                         }

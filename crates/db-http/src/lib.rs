@@ -109,8 +109,7 @@ async fn make_request(req: HttpRequest<'_>) -> Result<serde_json::Value> {
     })?;
 
     if !status.is_success() {
-        return Err(AppError::new(ErrorKind::Connection, req.context)
-            .with_detail(format!("HTTP {status}: {text}")));
+        return Err(http_response_error(req.context, status.as_u16(), &text));
     }
 
     serde_json::from_str(&text).map_err(|error| {
@@ -120,6 +119,66 @@ async fn make_request(req: HttpRequest<'_>) -> Result<serde_json::Value> {
         )
         .with_detail(error.to_string())
     })
+}
+
+/// Turns Elasticsearch-style structured error payloads into a concise
+/// diagnostic while retaining the original response for unknown formats.
+fn http_response_error(context: &str, status: u16, text: &str) -> AppError {
+    let kind = match status {
+        401 => ErrorKind::Authentication,
+        403 => ErrorKind::Permission,
+        400..=499 => ErrorKind::Query,
+        _ => ErrorKind::Connection,
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(text).ok();
+    let error = parsed.as_ref().and_then(|json| json.get("error"));
+    let object = error.and_then(|value| value.as_object());
+    let code = object
+        .and_then(|value| value.get("type"))
+        .and_then(|value| value.as_str());
+    let reason = object
+        .and_then(|value| value.get("reason"))
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|json| json.get("message"))
+                .and_then(|value| value.as_str())
+        });
+
+    let message = match reason {
+        Some(reason) => format!("{context}: {reason}"),
+        None => format!("{context}: HTTP {status}"),
+    };
+    let mut detail = format!("HTTP {status}");
+    if let Some(object) = object {
+        let line = object.get("line").and_then(|value| value.as_u64());
+        let column = object
+            .get("col")
+            .or_else(|| object.get("column"))
+            .and_then(|value| value.as_u64());
+        if let (Some(line), Some(column)) = (line, column) {
+            detail.push_str(&format!("; location: line {line}, column {column}"));
+        }
+        if let Some(cause) = object
+            .get("root_cause")
+            .and_then(|value| value.as_array())
+            .and_then(|causes| causes.first())
+            .and_then(|cause| cause.get("reason"))
+            .and_then(|value| value.as_str())
+        {
+            detail.push_str(&format!("; root cause: {cause}"));
+        }
+    }
+    if parsed.is_none() {
+        detail.push_str(&format!("; response: {text}"));
+    }
+
+    let error = AppError::new(kind, message).with_detail(detail);
+    match code {
+        Some(code) => error.with_code(code),
+        None => error,
+    }
 }
 
 /// Map a JSON value into a [`CellValue`] following D1's type coercion rules.
@@ -269,6 +328,26 @@ mod tests {
         assert_eq!(
             elasticsearch_base_url(&profile).expect("valid URL"),
             "http://localhost:9200/"
+        );
+    }
+
+    #[test]
+    fn elasticsearch_error_reports_code_reason_and_location() {
+        let error = http_response_error(
+            "failed to run Elasticsearch search",
+            400,
+            r#"{"error":{"type":"parsing_exception","reason":"unexpected token","line":2,"col":14,"root_cause":[{"reason":"expected END_OBJECT"}]},"status":400}"#,
+        );
+
+        assert_eq!(error.kind, ErrorKind::Query);
+        assert_eq!(error.code.as_deref(), Some("parsing_exception"));
+        assert_eq!(
+            error.message,
+            "failed to run Elasticsearch search: unexpected token"
+        );
+        assert_eq!(
+            error.detail.as_deref(),
+            Some("HTTP 400; location: line 2, column 14; root cause: expected END_OBJECT")
         );
     }
 }

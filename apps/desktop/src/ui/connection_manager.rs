@@ -617,6 +617,11 @@ impl ConnectionManagerUi {
                 // schema (e.g. OceanBase mode, ClickHouse protocol, Cloudflare
                 // D1 account id, MongoDB auth source, ...).
                 for field in self.form.kind.extra_params_schema() {
+                    if field.key == "tls_ca_path"
+                        && !matches!(self.form.ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull)
+                    {
+                        continue;
+                    }
                     ui.label(field.label);
                     render_extra_param_field(ui, &mut self.form.extra_params, &field);
                     ui.end_row();

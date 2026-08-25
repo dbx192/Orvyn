@@ -1,149 +1,182 @@
-# Orvyn
+# Orvyn 1.0.0
 
 [English](README.en.md)
 
-Orvyn 是一个使用 Rust 构建的跨平台桌面数据库客户端，覆盖关系型、文档、键值与搜索数据库的日常查询、数据浏览和轻量维护。界面采用 `egui/eframe` 原生实现，核心为一个分层的 Rust workspace，无 ODBC/JDBC/sidecar 依赖。
+Orvyn 是一个 Rust 跨平台桌面数据库客户端，用于连接、查询、浏览和轻量维护关系型、文档型、键值和搜索服务。原生 egui/eframe 界面不依赖 ODBC、JDBC 或外部 sidecar。
 
-## 功能亮点
+## 功能
 
-- **纯 Rust**：原生 `egui/eframe` 界面 + Tokio 异步核心。
-- **统一驱动注册表**：35 种 `DataSourceKind` 按 `ProtocolFamily` 路由到共享协议驱动，并带能力矩阵（`SupportLevel` / `ConnectorCapabilities`）。
-- **品牌共享**：MySQL 族、PostgreSQL 族的多品牌数据库共享同一底层驱动，以品牌开关处理方言、端口和能力差异。
-- **能力驱动的 UI**：连接表单字段、查询编辑器可用性、专用面板均由能力矩阵驱动。
+- 连接的新建、编辑、测试、分组、删除、导入和导出；密码默认不保存，保存时采用 ChaCha20-Poly1305 本地加密。
+- 连接和测试均有超时控制；瞬时网络错误自动重试一次。
+- PostgreSQL、MySQL、SQL Server 支持 Disable、Prefer、Require、Verify CA、Verify Full TLS 策略和可选 CA 文件路径；严格模式不会静默退回明文。
+- 多标签 SQL 编辑器：执行全部/当前/选中 SQL、取消执行、语法高亮、关键字及 schema 表/列补全、历史和收藏。
+- 结果集服务端分页、排序、复制、CSV/JSON/Excel 兼容 TSV 导出。网格只绘制可见行，每页为 25 到 1000 行。
+- 元数据与表维护：浏览数据库、schema、表、视图、列、索引、外键、触发器和函数（按适配器能力）；表数据浏览、筛选、排序、插入、编辑、删除。无主键表默认只读。
+- 左侧对象树：视图归入本地化的“视图”目录；视图和查询均可从右键菜单删除。
+- Redis：逻辑库、分页 SCAN、键检查及常见数据结构操作；MongoDB：集合浏览、文档查询和基础 CRUD。
+- Elasticsearch、Easysearch、Meilisearch、Manticore Search 的索引与 JSON/DSL 查询；Cloudflare D1 HTTP SQL。
 
-## 支持的数据源
+## 数据源
 
-按协议族分组：
+| 分类 | 数据源 |
+| --- | --- |
+| MySQL 协议族 | MySQL、MariaDB、TiDB、OceanBase、Doris、SelectDB、StarRocks、GoldenDB |
+| PostgreSQL 协议族 | PostgreSQL、TimescaleDB、Redshift、CockroachDB、OpenGauss、GaussDB、KwDb、KingbaseES、Vastbase、HighGo、UXDB |
+| 关系/分析 | SQLite、DuckDB、ClickHouse、SQL Server |
+| 文档/键值 | MongoDB、Redis |
+| 搜索 | Elasticsearch、Easysearch、Meilisearch、Manticore Search |
+| HTTP SQL | Cloudflare D1 |
+| 受限 | TDengine 仅 HTTP 连接测试；Access、Oracle、DM、XuguDB 可保存配置，但没有可用驱动 |
 
-- **MySQL 族**：MySQL、TiDB、MariaDB、OceanBase、Doris、SelectDB、StarRocks、GoldenDB
-- **PostgreSQL 族**：PostgreSQL、TimescaleDB、Redshift、CockroachDB、OpenGauss、GaussDB、KDB、KingbaseES、Vastbase、HighGo、UXDB
-- **独立关系/分析**：SQLite、DuckDB、ClickHouse、SQL Server
-- **文档/键值**：MongoDB、Redis
-- **搜索（HTTP）**：Elasticsearch、Easysearch、Meilisearch、Manticore Search
-- **HTTP-SQL**：Cloudflare D1
-- **受限**：TDengine（仅连接探测）；Access、Oracle、达梦（DM）、虚谷（XuguDB）——可创建/保存，测试返回结构化“暂不支持”提示
+注册支持不代表所有后端都有相同的元数据、DDL 或编辑能力；界面按能力矩阵禁用不适用操作。
 
-本地集成测试可复用 `F:\dnmp\docker-compose.orvyn.yml`（路径以你的环境为准）：在 DNMP 目录执行
-`docker compose -f docker-compose.yml -f docker-compose.orvyn.yml up -d mongodb clickhouse sqlserver tidb`。
-TimescaleDB 通过现有 PostgreSQL 服务配置，TiDB 使用 `127.0.0.1:4000`，ClickHouse 同时提供 `8123/9000`。
+## 运行源码
 
-## 架构
+前提：Rust 1.78 或更高版本，以及当前系统的 C/C++ 构建工具链。
 
-- `DriverRegistry`（app-core）：集中注册并路由各协议族驱动，消除散落的 `match kind` 分支。
-- `ProtocolFamily` + `ConnectorCapabilities`（db-common）：表达协议族归属与支持级别，未知类型有清晰错误。
-- 查询/文档/搜索/HTTP-SQL 分别走 `RelationalQueryExecutor`、`DocumentConnector`、`SearchConnector`、`HttpSqlConnector` trait，UI 与底层驱动解耦。
+~~~powershell
+cargo run -p orvyn --locked
+cargo check --workspace --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+~~~
 
-## 当前功能
+## TLS 策略
 
-### 连接与安全
+在连接表单选择 SSL 模式。PostgreSQL、MySQL 和 SQL Server 可填写 TLS CA certificate path；它只保存文件路径，不保存证书内容或私钥。
 
-- 新建、编辑、测试、分组和删除连接；导入或导出全部或选中的连接（导入时可覆盖冲突项或自动重命名）。
-- 可选地在本地加密保存密码（ChaCha20-Poly1305）；默认不保存密码。
-- 每个连接可设为只读；只读连接拒绝写语句与启动事务。
-- 类型选择器按协议族分组并显示支持级别，表单字段由能力矩阵驱动。
+| 模式 | 行为 |
+| --- | --- |
+| Disable | 明确禁用 TLS。 |
+| Prefer | 优先协商 TLS，协议允许时可回退。 |
+| Require | 必须 TLS，但不要求额外 CA 文件。 |
+| Verify CA | 必须 TLS，并校验服务器证书链。 |
+| Verify Full | 在 Verify CA 基础上校验证书主机名。 |
 
-### 关系型数据库
+严格模式应使用数据库 DNS 名称，并填写企业或云服务商提供的 CA 文件。自签名服务应提供对应 CA，而不是改用 Disable。
 
-- 浏览数据库、schema、表、视图及其元数据（列、索引、外键、触发器、函数、建表 SQL，视适配器而定）。
-- 多标签 SQL 编辑器：执行全部语句、当前语句或选中 SQL；可取消执行；查询历史、收藏、结果分页与列排序。
-- 表数据浏览、筛选、排序及新增、编辑、删除行；无主键表默认只读。
-- 表结构查看与编辑；导出表或数据库的结构 SQL、或结构及数据 SQL。
-- SQL Server（tiberius）与 ClickHouse（HTTP）提供查询与元数据支持。
+## 配置和凭据
 
-### 文档 / 键值
+- Windows：%APPDATA%\Orvyn
+- Linux/macOS：$XDG_CONFIG_HOME/orvyn；未设置时为当前目录下的 orvyn
 
-- **MongoDB**：浏览数据库与集合、查询文档、基础 CRUD。
-- **Redis**：逻辑库浏览、`SCAN` 分页查找 key、类型/TTL/大小/值查看、String/Hash/List/Set/Sorted Set 管理及命令执行。
+该目录保存连接、查询历史、收藏、设置、日志和加密材料。可覆盖：
 
-### 搜索 / HTTP-SQL
-
-- **Elasticsearch / Easysearch / Meilisearch / Manticore Search**：索引浏览与 JSON/DSL 查询面板。
-- **Cloudflare D1**：通过 HTTP API 执行 SQL。
-
-### 导入导出
-
-- 将查询结果导出为 CSV、JSON 或 Excel 兼容的制表符分隔文本；CSV 使用 UTF-8 BOM，便于 Windows 上的 Excel 识别中文。
-- 支持 CSV 预览、字段自动映射、类型校验和批量插入 SQL 生成。
-
-## 从源码运行
-
-前提：安装 Rust `1.78` 或更高版本，以及当前平台的 C/C++ 构建工具链。
-
-```powershell
-cargo run -p orvyn
-```
-
-常用检查命令：
-
-```powershell
-cargo fmt --all -- --check
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-## 配置与凭据
-
-默认配置位置：
-
-- Windows：`%APPDATA%\Orvyn`
-- 其他平台：`$XDG_CONFIG_HOME/orvyn`；未设置时使用当前目录下的 `orvyn`
-
-目录内包含连接配置、查询历史、收藏查询及加密密钥。可通过环境变量调整：
-
-```powershell
-$env:ORVYN_CONFIG_DIR = "D:\\path\\to\\orvyn-config"
+~~~powershell
+$env:ORVYN_CONFIG_DIR = "D:\path\to\orvyn-config"
 $env:ORVYN_MASTER_KEY = "replace-with-a-strong-private-key"
-```
+~~~
 
-未设置 `ORVYN_MASTER_KEY` 时，应用会在配置目录创建并使用 `master.key`。请妥善保护配置目录和该密钥。
+未设置 ORVYN_MASTER_KEY 时应用会创建 master.key。请保护配置目录和该密钥。
 
-## DuckDB 本地库
+## 打包共同准备
 
-项目通过 `libduckdb-sys` 链接本地 DuckDB 库，不在构建时自动下载。默认位置为：
+请在目标系统本机打包。系统 SDK、签名和 DuckDB 动态库使跨系统打包不可靠。
 
-```text
+项目使用本地 DuckDB 库，构建时不会自动下载。默认目录：
+
+~~~text
 target/duckdb-download/local/1.5.4
-```
+~~~
 
-该目录需包含目标平台所需文件：
+目录必须包含目标平台文件：
 
-- Linux x64：`libduckdb.so`、`duckdb.h`
-- Windows x64 MSVC：`duckdb.lib`、`duckdb.dll`、`duckdb.h`
+- Windows x64 MSVC：duckdb.lib、duckdb.dll、duckdb.h
+- Linux x64：libduckdb.so、duckdb.h
+- macOS：libduckdb.dylib、duckdb.h
 
-更换 DuckDB 版本、目标平台或清理该目录后，请重新放入对应的本地库文件再构建。
+更换 DuckDB 版本、目标架构或清理 target 后，须放回匹配库文件。发布构建一律使用 --locked。
 
-## 发布与打包
+## Windows：生成安装程序
 
-不同平台应在各自的原生系统上构建；不要在 Linux 上做三系统交叉编译（GUI、系统 SDK、签名与 DuckDB 动态库会让方案不稳定）。发布产物需携带对应平台的 DuckDB 动态库，并构建相应安装包：
+仓库内置脚本会构建 MSVC x64、附带 duckdb.dll，并调用 Inno Setup 6。
 
-- **Windows x64**：安装 Rust MSVC 工具链、`x86_64-pc-windows-msvc` target、Windows DuckDB 本地库与 Inno Setup 6 后，在仓库根目录运行 `.\packaging\windows\build-installer.ps1`，产物为 `dist/windows/orvyn-0.1.0-windows-x86_64-setup.exe`。
-- **Linux x86_64**：在尽量老的基础发行版（如 Ubuntu 22.04）上用 `--locked` 构建，可产出便携 tar.gz、`.AppImage` 或 `.deb`。
-- **macOS**：Apple Silicon / Intel 分别产出 `.app` 与 `.dmg`，面向用户分发需签名与公证。
+1. 安装 Rust MSVC 工具链和 Visual Studio Build Tools 的 Desktop development with C++。
+2. 安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php)。
+3. 准备 Windows DuckDB 文件。
+4. 在仓库根目录执行：
 
-若直接分发可执行文件，务必同目录携带对应 DuckDB 动态库（`duckdb.dll` / `libduckdb.so` / `libduckdb.dylib`），通常建议直接分发安装包。
+~~~powershell
+rustup target add x86_64-pc-windows-msvc
+.\packaging\windows\build-installer.ps1
+~~~
 
-## Workspace 结构
+产物在 dist\windows\，名称类似：
 
-```text
-apps/desktop           桌面应用入口和 egui 界面
-crates/app-core        连接、会话、元数据、查询、Redis/Search 服务和 DriverRegistry
-crates/db-common       共享模型、trait、错误、能力矩阵和工具
-crates/db-mysql        MySQL 协议族（品牌共享：MariaDB/TiDB/OceanBase/Doris/SelectDB/StarRocks/GoldenDB）
-crates/db-postgres     PostgreSQL 协议族（品牌共享：TimescaleDB/Redshift/CockroachDB/OpenGauss/...）
-crates/db-sqlite       SQLite 适配器
-crates/db-duckdb       DuckDB 适配器
-crates/db-redis        Redis 适配器
-crates/db-sqlserver    SQL Server 适配器（tiberius）
-crates/db-clickhouse   ClickHouse HTTP 适配器
-crates/db-mongodb      MongoDB 文档适配器
-crates/db-http         HTTP 搜索（Elasticsearch/Easysearch/Meilisearch/Manticore）与 HTTP-SQL（Cloudflare D1）
-crates/db-tdengine     TDengine 受限 HTTP 连接探测
-crates/import-export   CSV/JSON 导入导出能力
-crates/secure-store    加密凭据存储
-packaging/windows      Windows 安装包脚本和资源
-```
+~~~text
+orvyn-1.0.0-windows-x86_64-<icon-hash>-setup.exe
+~~~
+
+公开发布前应对 .exe 做 Authenticode 签名，否则可能触发 SmartScreen。
+
+## Linux：生成 .deb
+
+建议在 Ubuntu 22.04 一类较旧基线上构建，以提高 libc 兼容性：
+
+~~~bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev
+rustup target add x86_64-unknown-linux-gnu
+cargo build -p orvyn --release --locked --target x86_64-unknown-linux-gnu
+~~~
+
+组装 .deb。启动器设置 LD_LIBRARY_PATH，确保能找到随包的 DuckDB：
+
+~~~bash
+PKG=dist/linux/orvyn_1.0.0_amd64
+rm -rf "$PKG"
+mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/orvyn" "$PKG/usr/bin" "$PKG/usr/share/applications"
+cp target/x86_64-unknown-linux-gnu/release/orvyn "$PKG/usr/lib/orvyn/"
+cp target/duckdb-download/local/1.5.4/libduckdb.so "$PKG/usr/lib/orvyn/"
+printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/usr/lib/orvyn /usr/lib/orvyn/orvyn "$@"\n' > "$PKG/usr/bin/orvyn"
+chmod 755 "$PKG/usr/bin/orvyn"
+printf 'Package: orvyn\nVersion: 1.0.0\nSection: database\nPriority: optional\nArchitecture: amd64\nMaintainer: Orvyn\nDescription: Cross-platform desktop database client\n' > "$PKG/DEBIAN/control"
+printf '[Desktop Entry]\nType=Application\nName=Orvyn\nExec=orvyn\nCategories=Development;Database;\nTerminal=false\n' > "$PKG/usr/share/applications/orvyn.desktop"
+dpkg-deb --build "$PKG"
+sudo apt install ./dist/linux/orvyn_1.0.0_amd64.deb
+orvyn
+~~~
+
+AppImage 可复用该 usr 布局和 appimagetool；其 AppRun 也必须设置同样的库路径。仓库目前没有自动 Linux 打包脚本。
+
+## macOS：生成 .app 和 .dmg
+
+在相应架构的 Mac 上构建：Apple Silicon 用 aarch64-apple-darwin，Intel 用 x86_64-apple-darwin。
+
+~~~bash
+xcode-select --install
+rustup target add aarch64-apple-darwin # Intel 改为 x86_64-apple-darwin
+cargo build -p orvyn --release --locked --target aarch64-apple-darwin
+TARGET=aarch64-apple-darwin
+APP=dist/macos/Orvyn.app
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
+cp "target/$TARGET/release/orvyn" "$APP/Contents/MacOS/Orvyn"
+cp target/duckdb-download/local/1.5.4/libduckdb.dylib "$APP/Contents/Frameworks/"
+cat > "$APP/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Orvyn</string>
+<key>CFBundleIdentifier</key><string>io.orvyn.desktop</string>
+<key>CFBundleName</key><string>Orvyn</string>
+<key>CFBundleShortVersionString</key><string>1.0.0</string>
+</dict></plist>
+EOF
+install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/Orvyn"
+hdiutil create -volname Orvyn -srcfolder "$APP" -ov -format UDZO dist/macos/Orvyn-1.0.0.dmg
+~~~
+
+用 otool -L "$APP/Contents/MacOS/Orvyn" 检查 DuckDB 动态库引用。外部发布需要 Developer ID 签名和公证：
+
+~~~bash
+codesign --force --deep --options runtime --sign "Developer ID Application: Your Name (TEAMID)" "$APP"
+xcrun notarytool submit dist/macos/Orvyn-1.0.0.dmg --keychain-profile "notary-profile" --wait
+xcrun stapler staple dist/macos/Orvyn-1.0.0.dmg
+~~~
+
+仓库目前没有 macOS 自动打包脚本或 .icns 图标。
 
 ## 许可证
 
-本项目采用 [MIT OR Apache-2.0](Cargo.toml) 双许可证。
+采用 [MIT OR Apache-2.0](Cargo.toml) 双许可证。

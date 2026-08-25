@@ -1,8 +1,8 @@
 use super::{style::apply_app_style, ActivePanel, DesktopApp};
 use crate::ui::i18n::{self, text as tr, Locale};
 use eframe::egui::{
-    vec2, Align, Button, CentralPanel, Context, Frame, Layout, Margin, RichText,
-    Spinner, Stroke, TopBottomPanel, Ui,
+    vec2, Align, Button, CentralPanel, Context, Frame, Layout, Margin, RichText, Spinner, Stroke,
+    TopBottomPanel, Ui,
 };
 use std::time::Duration;
 
@@ -405,8 +405,7 @@ impl DesktopApp {
                 let compact = ui.available_width() < 960.0;
                 ui.horizontal(|ui| {
                     // ---- Brand ----
-                    let (brand_rect, _) =
-                        ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
+                    let (brand_rect, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
                     ui.painter()
                         .rect_filled(brand_rect, Rounding::same(6.0), palette.info);
                     ui.painter().text(
@@ -440,7 +439,8 @@ impl DesktopApp {
                             ui.close_menu();
                         }
                         ui.separator();
-                        self.object_tree.connection_transfer_menu(ui, &mut connection_actions);
+                        self.object_tree
+                            .connection_transfer_menu(ui, &mut connection_actions);
                     });
                     if !connection_actions.is_empty() {
                         self.handle_tree_actions(connection_actions);

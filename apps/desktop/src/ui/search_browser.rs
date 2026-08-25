@@ -200,7 +200,7 @@ async fn run_query(
         let result = service
             .search(connection_id, None, object, &query, limit)
             .await
-            .map_err(|error| error.message)?;
+            .map_err(|error| error.diagnostic_message())?;
         serde_json::to_string_pretty(&result).map_err(|error| error.to_string())
     } else if kind.is_document() {
         let filter: serde_json::Value = serde_json::from_str(query_text)
@@ -215,13 +215,13 @@ async fn run_query(
                 limit,
             )
             .await
-            .map_err(|error| error.message)?;
+            .map_err(|error| error.diagnostic_message())?;
         serde_json::to_string_pretty(&documents).map_err(|error| error.to_string())
     } else if kind.is_http_sql() {
         let results = service
             .execute_sql(connection_id, None, database, query_text)
             .await
-            .map_err(|error| error.message)?;
+            .map_err(|error| error.diagnostic_message())?;
         serde_json::to_string_pretty(&results).map_err(|error| error.to_string())
     } else {
         Err(format!(

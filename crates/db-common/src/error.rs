@@ -61,6 +61,26 @@ impl AppError {
         self.code = Some(code.into());
         self
     }
+
+    /// User-facing diagnostic that keeps server and driver context.
+    pub fn diagnostic_message(&self) -> String {
+        let mut lines = vec![self.message.clone()];
+        if let Some(code) = self
+            .code
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            lines.push(format!("Code: {code}"));
+        }
+        if let Some(detail) = self
+            .detail
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            lines.push(detail.to_string());
+        }
+        lines.join("\n")
+    }
 }
 
 impl From<std::io::Error> for AppError {
@@ -72,5 +92,22 @@ impl From<std::io::Error> for AppError {
 impl From<serde_json::Error> for AppError {
     fn from(error: serde_json::Error) -> Self {
         Self::new(ErrorKind::Serialization, "serialization failed").with_detail(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_message_keeps_code_and_server_detail() {
+        let error = AppError::new(ErrorKind::Query, "Query failed")
+            .with_code("42601")
+            .with_detail("syntax error at character 18");
+
+        assert_eq!(
+            error.diagnostic_message(),
+            "Query failed\nCode: 42601\nsyntax error at character 18"
+        );
     }
 }

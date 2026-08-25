@@ -12,8 +12,8 @@ use crate::ui::{
 };
 use db_common::ConnectionId;
 use eframe::egui::{
-    vec2, Align, Button, Color32, Context, Frame, Layout, Margin, RichText, Stroke,
-    TextEdit, TopBottomPanel, Window,
+    vec2, Align, Button, Color32, Context, Frame, Layout, Margin, RichText, Stroke, TextEdit,
+    TopBottomPanel, Window,
 };
 use import_export::ExportFormat;
 
@@ -365,10 +365,7 @@ impl DesktopApp {
             .show(ctx, |ui| {
                 if ui.visuals().dark_mode {
                     ui.painter().line_segment(
-                        [
-                            ui.max_rect().left_top(),
-                            ui.max_rect().right_top(),
-                        ],
+                        [ui.max_rect().left_top(), ui.max_rect().right_top()],
                         Stroke::new(1.0, palette.border),
                     );
                 }
