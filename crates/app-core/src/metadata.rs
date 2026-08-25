@@ -759,14 +759,14 @@ async fn append_schema_objects(
     let views = reader
         .list_views(profile, password, parent.database.as_deref(), schema)
         .await?;
-    nodes.extend(direct_object_nodes(
-        profile.id,
-        parent,
-        views,
-        MetadataNodeKind::View,
-        schema,
-        show_schema_prefix,
-    ));
+    if !views.is_empty() {
+        nodes.push(folder_node(
+            profile.id,
+            parent,
+            MetadataNodeKind::ViewsFolder,
+            "Views",
+        ));
+    }
 
     Ok(())
 }

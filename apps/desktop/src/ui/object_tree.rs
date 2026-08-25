@@ -65,6 +65,14 @@ fn node_key_id(key: &NodeKey) -> String {
     )
 }
 
+fn localized_node_label(node: &MetadataNode) -> String {
+    match node.kind {
+        MetadataNodeKind::ViewsFolder => tr("Views"),
+        MetadataNodeKind::QueriesFolder => tr("Queries"),
+        _ => node.label.clone(),
+    }
+}
+
 #[derive(Clone)]
 struct TreeNode {
     node: MetadataNode,
@@ -92,6 +100,7 @@ enum TreeEvent {
     RootLoaded(Result<Vec<MetadataNode>, AppError>),
     ChildrenLoaded(NodeKey, Result<Vec<MetadataNode>, AppError>),
     FavoritesLoaded(Vec<FavoriteQuery>),
+    FavoriteDeleted(Result<(), AppError>),
     Connected(ConnectionId, Result<(), AppError>),
     StatusPolled(Vec<(ConnectionId, ConnectionStatus)>),
 }
@@ -172,6 +181,12 @@ pub enum ObjectTreeAction {
         database: Option<String>,
         schema: Option<String>,
         table: String,
+    },
+    DropView {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        view: String,
     },
     ClearTable {
         connection_id: ConnectionId,
@@ -449,7 +464,7 @@ impl ObjectTree {
                 id_source: &key_str,
                 depth: 0,
                 kind: node.kind,
-                label: &node.label,
+                label: &localized_node_label(&node),
                 detail: node.detail.as_deref(),
                 expanded,
                 leaf: false,
@@ -544,7 +559,7 @@ impl ObjectTree {
                 id_source: &key_str,
                 depth,
                 kind: node.kind,
-                label: &node.label,
+                label: &localized_node_label(node),
                 detail: node.detail.as_deref(),
                 expanded,
                 leaf: is_leaf,
@@ -651,7 +666,7 @@ impl ObjectTree {
 
         Some(MetadataNode::new(
             path,
-            "查询",
+            "Queries",
             MetadataNodeKind::QueriesFolder,
         ))
     }
@@ -949,12 +964,32 @@ impl ObjectTree {
                     ui.close_menu();
                 }
                 ui.separator();
+                if ui.button(tr("Delete")).clicked() {
+                    self.emit_table_action(
+                        node,
+                        |conn_id, db, schema, view| ObjectTreeAction::DropView {
+                            connection_id: conn_id,
+                            database: db,
+                            schema,
+                            view,
+                        },
+                        actions,
+                    );
+                    ui.close_menu();
+                }
             }
             MetadataNodeKind::Query => {
                 if ui.button(tr("Open Query")).clicked() {
                     self.emit_saved_query_action(node, actions);
                     *message = Some(format!("Opening query {}", node.label));
                     ui.close_menu();
+                }
+                if ui.button(tr("Delete")).clicked() {
+                    if let Some(favorite) = self.favorite_for_node(node) {
+                        self.delete_favorite(favorite.id);
+                        *message = Some(format!("Deleting query {}", node.label));
+                        ui.close_menu();
+                    }
                 }
                 ui.separator();
             }
@@ -1202,6 +1237,15 @@ impl ObjectTree {
         self.favorite_queries
             .iter()
             .find(|favorite| favorite.id.to_string() == favorite_id)
+    }
+
+    fn delete_favorite(&self, id: db_common::QueryId) {
+        let tx = self.tx.clone();
+        let service = self.query_service.clone();
+        self.runtime.spawn(async move {
+            let result = service.remove_favorite(id).await;
+            let _ = tx.send(TreeEvent::FavoriteDeleted(result));
+        });
     }
 
     fn connection_node(&self, connection_id: ConnectionId) -> Option<MetadataNode> {
@@ -1580,6 +1624,15 @@ impl ObjectTree {
                     self.child_cache
                         .retain(|key, _| key.path_kind != MetadataNodeKind::QueriesFolder);
                 }
+                TreeEvent::FavoriteDeleted(result) => match result {
+                    Ok(()) => {
+                        self.status = "Saved query deleted".to_string();
+                        self.reload_favorites();
+                    }
+                    Err(error) => {
+                        self.status = format!("Delete saved query failed: {}", error.message);
+                    }
+                },
                 TreeEvent::Connected(id, result) => {
                     if let Some((_, status)) = self.connections.get_mut(&id) {
                         *status = match &result {

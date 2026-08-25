@@ -290,12 +290,16 @@ impl DesktopApp {
                                 self.active_structure = self.active_table_editor;
                             }
                             self.object_tree.reload_root();
+                            let object_label = match payload.object_kind {
+                                super::payloads::DropObjectKind::Table => "table",
+                                super::payloads::DropObjectKind::View => "view",
+                            };
                             self.state
-                                .set_status(format!("Dropped table: {table_name}"));
+                                .set_status(format!("Dropped {object_label}: {table_name}"));
                         }
                         Err(error) => {
                             self.state
-                                .set_status(format!("Drop table failed: {}", error.message));
+                                .set_status(format!("Drop object failed: {}", error.message));
                         }
                     }
                 }
@@ -845,7 +849,13 @@ impl DesktopApp {
                             connection_id: request.connection_id,
                             database: request.database.clone(),
                             schema: request.schema.clone(),
-                            sql: format!("DROP TABLE {table_sql}"),
+                            sql: format!(
+                                "DROP {} {table_sql}",
+                                match request.object_kind {
+                                    super::payloads::DropObjectKind::Table => "TABLE",
+                                    super::payloads::DropObjectKind::View => "VIEW",
+                                }
+                            ),
                             mode: QueryExecutionMode::All,
                             cursor_offset: 0,
                             selection: None,
@@ -861,6 +871,7 @@ impl DesktopApp {
                     database: request.database,
                     schema: request.schema,
                     table: request.table,
+                    object_kind: request.object_kind,
                 })
             }
             .await;

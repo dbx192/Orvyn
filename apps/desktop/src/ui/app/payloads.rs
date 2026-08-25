@@ -80,12 +80,20 @@ pub(super) struct DropTableRequest {
     pub(super) database: Option<String>,
     pub(super) schema: Option<String>,
     pub(super) table: String,
+    pub(super) object_kind: DropObjectKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DropObjectKind {
+    Table,
+    View,
 }
 
 pub(super) struct DropTablePayload {
     pub(super) database: Option<String>,
     pub(super) schema: Option<String>,
     pub(super) table: String,
+    pub(super) object_kind: DropObjectKind,
 }
 
 #[derive(Clone)]

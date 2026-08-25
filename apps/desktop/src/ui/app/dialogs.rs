@@ -241,22 +241,25 @@ impl DesktopApp {
                 }),
             &request.table,
         );
+        let is_view = matches!(request.object_kind, super::payloads::DropObjectKind::View);
+        let object_name = if is_view { tr("View") } else { tr("Table") };
         let mut open = true;
         let mut confirm = false;
         let mut cancel = false;
 
-        Window::new(tr("Drop Table"))
+        Window::new(format!("{} {}", tr("Delete"), object_name))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label(RichText::new(tr("Drop this table?")).strong());
+                ui.label(RichText::new(format!("{} {}?", tr("Delete"), object_name)).strong());
                 ui.add_space(8.0);
                 ui.label(RichText::new(&table_name).monospace());
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new(tr(
-                        "This will execute DROP TABLE and cannot be undone here.",
+                    RichText::new(format!(
+                        "This will execute DROP {} and cannot be undone here.",
+                        object_name.to_uppercase()
                     ))
                     .small()
                     .color(ui.visuals().warn_fg_color),
@@ -266,7 +269,7 @@ impl DesktopApp {
                     if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button(tr("Drop Table")).clicked() {
+                    if ui.button(tr("Delete")).clicked() {
                         confirm = true;
                     }
                 });

@@ -1,6 +1,6 @@
 use super::{
     export_sql::qualified_table_label,
-    payloads::{ClearRequest, DropTableRequest, ImportTableRequest, TableExportRequest},
+    payloads::{ClearRequest, DropObjectKind, DropTableRequest, ImportTableRequest, TableExportRequest},
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
@@ -222,9 +222,25 @@ impl DesktopApp {
                         database,
                         schema,
                         table,
+                        object_kind: DropObjectKind::Table,
                     });
                     self.state
                         .set_status(format!("Confirm drop table: {}", table_name));
+                }
+                ObjectTreeAction::DropView {
+                    connection_id,
+                    database,
+                    schema,
+                    view,
+                } => {
+                    self.drop_table_request = Some(DropTableRequest {
+                        connection_id,
+                        database,
+                        schema,
+                        table: view.clone(),
+                        object_kind: DropObjectKind::View,
+                    });
+                    self.state.set_status(format!("Confirm drop view: {view}"));
                 }
                 ObjectTreeAction::ClearTable {
                     connection_id,
