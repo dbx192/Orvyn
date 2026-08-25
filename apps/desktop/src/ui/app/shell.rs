@@ -331,6 +331,11 @@ impl DesktopApp {
                             let message = view.ui(ui);
                             let create_index = view.take_create_index_request();
                             let alter_requests = view.take_alter_requests();
+                            // Capture the refresh target (owned data) up front so
+                            // the `view` borrow ends before the `self` calls below.
+                            let refresh = view.take_refresh_request();
+                            let refresh_target = refresh.then(|| view.load_target());
+                            let refresh_name = refresh.then(|| view.table_name());
                             if let Some(msg) = message {
                                 if !msg.is_empty() {
                                     self.state.set_status(msg);
@@ -342,6 +347,18 @@ impl DesktopApp {
                             if !alter_requests.is_empty() {
                                 self.alter_queue.extend(alter_requests);
                                 self.pump_alter_queue();
+                            }
+                            if let Some((connection_id, database, schema, table)) = refresh_target {
+                                if let Some(name) = refresh_name {
+                                    self.state
+                                        .set_status(format!("Refreshing structure for {}", name));
+                                }
+                                self.spawn_structure_load(
+                                    connection_id,
+                                    database,
+                                    schema,
+                                    table,
+                                );
                             }
                         }
                         None => {

@@ -25,7 +25,7 @@ impl DesktopApp {
         // content-driven sizing implementation are not restored.
         SidePanel::left("connection_object_tree_resizable_v2")
             .resizable(true)
-            .default_width(210.0)
+            .default_width(200.0)
             .width_range(LEFT_PANEL_MIN_WIDTH..=LEFT_PANEL_MAX_WIDTH)
             .show(ctx, |ui| {
                 let (message, actions) = self.object_tree.ui(ctx, ui);

@@ -8,8 +8,8 @@ use db_common::{
     TableForeignKey, TableIndex, TableTrigger,
 };
 use eframe::egui::{
-    Button, Color32, ComboBox, Frame, Grid, Margin, RichText, ScrollArea, TextEdit, TextStyle, Ui,
-    Window,
+    self, Button, Color32, ComboBox, Frame, Grid, Margin, RichText, ScrollArea, TextEdit, TextStyle,
+    Ui, Window,
 };
 
 #[derive(Debug, Clone)]
@@ -424,6 +424,62 @@ fn dialect_for_kind(kind: DataSourceKind) -> Box<dyn Dialect> {
     }
 }
 
+/// Serialize a column to a single text line for the OS clipboard, in a form
+/// `parse_clipboard_column` understands, so a column copied in the designer can
+/// be pasted back (or into a SQL editor / another table designer).
+fn column_to_clipboard_text(col: &TableColumn) -> String {
+    let mut s = format!("{} {}", col.name, col.database_type);
+    if !col.nullable {
+        s.push_str(" NOT NULL");
+    }
+    if let Some(default) = &col.default_value {
+        s.push_str(" DEFAULT ");
+        s.push_str(default);
+    }
+    s
+}
+
+/// Best-effort parse of clipboard text into a column definition.
+/// Returns `(name, type, nullable, default_value)`.
+fn parse_clipboard_column(text: &str) -> Option<(String, String, bool, Option<String>)> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return None;
+    }
+    let name = tokens[0].to_string();
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    // The type runs from the second token up to the first SQL keyword.
+    const KEYWORDS: [&str; 9] = [
+        "NOT", "NULL", "DEFAULT", "PRIMARY", "KEY", "UNIQUE", "AUTO_INCREMENT", "COMMENT",
+        "REFERENCES",
+    ];
+    let upper: Vec<String> = tokens.iter().map(|t| t.to_ascii_uppercase()).collect();
+    let mut type_tokens: Vec<&str> = Vec::new();
+    for (i, token) in tokens.iter().enumerate().skip(1) {
+        if KEYWORDS.contains(&upper[i].as_str()) {
+            break;
+        }
+        type_tokens.push(token);
+    }
+    if type_tokens.is_empty() {
+        return None;
+    }
+    let nullable = !(upper.iter().any(|t| t == "NOT") && upper.iter().any(|t| t == "NULL"));
+    let default_value = upper.iter().position(|t| t == "DEFAULT").and_then(|pos| {
+        tokens.get(pos + 1).map(|v| {
+            v.trim_matches(|c| c == '\'' || c == '"')
+                .to_string()
+        })
+    });
+    Some((name, type_tokens.join(" "), nullable, default_value))
+}
+
 /// A dedicated tab that displays the structure of a database table.
 pub struct TableStructureView {
     connection_id: ConnectionId,
@@ -485,6 +541,12 @@ pub struct TableStructureView {
     // The structure edits waiting to be picked up by the shell. A Save runs
     // a whole batch (add / rename / modify / drop) in one go.
     pending_alter_batch: Vec<AlterTableRequest>,
+    /// Set when the user clicks Refresh and there are no staged changes; the
+    /// shell picks it up and re-loads the structure from the database.
+    refresh_requested: bool,
+    /// Set when Refresh is clicked with staged changes, asking for confirmation
+    /// before discarding them.
+    confirm_refresh: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -560,6 +622,8 @@ impl TableStructureView {
             draft_fk_on_delete: String::new(),
             add_fk_error: None,
             pending_alter_batch: Vec::new(),
+            refresh_requested: false,
+            confirm_refresh: false,
         }
     }
 
@@ -619,6 +683,8 @@ impl TableStructureView {
             draft_fk_on_delete: String::new(),
             add_fk_error: None,
             pending_alter_batch: Vec::new(),
+            refresh_requested: false,
+            confirm_refresh: false,
         }
     }
 
@@ -641,6 +707,29 @@ impl TableStructureView {
 
     pub fn take_alter_requests(&mut self) -> Vec<AlterTableRequest> {
         std::mem::take(&mut self.pending_alter_batch)
+    }
+
+    /// True once the user asked to re-load the structure from the database.
+    pub fn take_refresh_request(&mut self) -> bool {
+        let requested = self.refresh_requested;
+        self.refresh_requested = false;
+        requested
+    }
+
+    /// Pick a column name that does not collide with any row currently in the
+    /// designer, derived from `base` (e.g. `name_2`, `name_3`, ...).
+    fn unique_column_name(&self, base: &str) -> String {
+        if !self.columns.iter().any(|c| c.name == base) {
+            return base.to_string();
+        }
+        let mut counter = 2;
+        loop {
+            let candidate = format!("{base}_{counter}");
+            if !self.columns.iter().any(|c| c.name == candidate) {
+                return candidate;
+            }
+            counter += 1;
+        }
     }
 
     fn queue_alter(&mut self, request: AlterTableRequest) {
@@ -749,6 +838,7 @@ impl TableStructureView {
         self.modify_column_dialog(ui, &mut message);
         self.drop_index_dialog(ui, &mut message);
         self.add_fk_dialog(ui, &mut message);
+        self.refresh_dialog(ui, &mut message);
 
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(self.table_name()).strong().size(15.0));
@@ -799,6 +889,18 @@ impl TableStructureView {
             }
             ui.separator();
             let has_changes = self.has_pending_changes();
+            if ui
+                .add_enabled(self.details_loaded, Button::new(tr("Refresh")))
+                .on_hover_text(tr("Reload the table structure from the database"))
+                .clicked()
+            {
+                if self.has_pending_changes() {
+                    self.confirm_refresh = true;
+                } else {
+                    self.refresh_requested = true;
+                    message = Some("Refreshing structure...".to_string());
+                }
+            }
             if ui
                 .add_enabled(has_changes, Button::new(tr("Save")))
                 .on_hover_text(tr("Apply all pending structure changes"))
@@ -1458,6 +1560,43 @@ impl TableStructureView {
         }
     }
 
+    /// Confirmation shown when Refresh is clicked while there are staged
+    /// (unsaved) structure changes, since reloading would discard them.
+    fn refresh_dialog(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+        if !self.confirm_refresh {
+            return;
+        }
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        Window::new(tr("Confirm Refresh"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.colored_label(
+                    Color32::from_rgb(220, 150, 60),
+                    tr("Discard unsaved changes and reload the table structure?"),
+                );
+                ui.add_space(8.0);
+                ui.label(format!("Table: {}", self.table_name()));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Cancel")).clicked() {
+                        cancel = true;
+                    }
+                    if ui.button(tr("Refresh")).clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+        if confirm {
+            self.refresh_requested = true;
+            *message = Some("Refreshing structure...".to_string());
+        }
+        self.confirm_refresh = !confirm && !cancel && open;
+    }
+
     /// Renders the columns section as a table, returning an optional status
     /// message (e.g. when the user copies a name or reorders a column).
     fn columns_table(&mut self, ui: &mut Ui) -> Option<String> {
@@ -1509,11 +1648,23 @@ impl TableStructureView {
                             let name = self.columns[idx].name.clone();
 
                             // ---- Name: inline editable, focused after copy/paste ----
-                            let name_edit = TextEdit::singleline(&mut self.columns[idx].name)
-                                .desired_width(150.0);
-                            let name_resp = ui.add_sized([150.0, 22.0], name_edit);
+                            let name_out = TextEdit::singleline(&mut self.columns[idx].name)
+                                .desired_width(150.0)
+                                .show(ui);
+                            let name_resp = name_out.response;
                             if self.editing_name == Some(idx) {
                                 name_resp.request_focus();
+                                // Navicat-style: select the whole (generated) name
+                                // so typing immediately replaces it.
+                                let char_count = self.columns[idx].name.chars().count();
+                                let mut state = name_out.state;
+                                state.cursor.set_char_range(Some(
+                                    egui::text::CCursorRange::two(
+                                        egui::text::CCursor::new(0),
+                                        egui::text::CCursor::new(char_count),
+                                    ),
+                                ));
+                                state.store(ui.ctx(), name_resp.id);
                                 self.editing_name = None;
                             }
                             name_resp.context_menu(|ui| {
@@ -1627,34 +1778,70 @@ impl TableStructureView {
                             self.pending_modify_column = Some(self.columns[idx].name.clone());
                         }
                         if let Some(idx) = copy_requested {
+                            let col = self.columns[idx].clone();
                             self.copied_column = Some(StagedColumn {
-                                column_type: self.columns[idx].database_type.clone(),
-                                nullable: self.columns[idx].nullable,
-                                default_value: self.columns[idx].default_value.clone(),
+                                column_type: col.database_type.clone(),
+                                nullable: col.nullable,
+                                default_value: col.default_value.clone(),
                             });
-                            self.editing_name = Some(idx);
-                            status = Some("Column definition copied".to_string());
+                            // Mirror the definition to the OS clipboard too, so it
+                            // can be pasted into a SQL editor or another table.
+                            ui.ctx().output_mut(|o| {
+                                o.copied_text = column_to_clipboard_text(&col);
+                            });
+                            // Insert a duplicate right below the source and focus
+                            // its name cell so the user can rename it immediately.
+                            let new_name = self.unique_column_name(&col.name);
+                            let insert_at = idx + 1;
+                            self.columns.insert(
+                                insert_at,
+                                TableColumn {
+                                    name: new_name,
+                                    database_type: col.database_type,
+                                    nullable: col.nullable,
+                                    default_value: col.default_value,
+                                    primary_key: false,
+                                    comment: None,
+                                },
+                            );
+                            self.col_original_name.insert(insert_at, None);
+                            self.editing_name = Some(insert_at);
+                            status = Some("Column duplicated; rename the new column".to_string());
                         }
                         if paste_requested {
-                            if let Some(staged) = self.copied_column.clone() {
-                                let mut new_name = format!("column_{}", self.columns.len() + 1);
-                                let mut counter = 2;
-                                while self.columns.iter().any(|c| c.name == new_name) {
-                                    new_name =
-                                        format!("column_{}", self.columns.len() + counter);
-                                    counter += 1;
+                            // Prefer a definition parsed from the OS clipboard
+                            // (egui 0.27 does not expose clipboard reading, so we
+                            // read it directly with arboard, the same backend
+                            // eframe uses for clipboard writes).
+                            let mut pasted: Option<(String, String, bool, Option<String>)> =
+                                arboard::Clipboard::new()
+                                    .and_then(|mut clipboard| clipboard.get_text())
+                                    .ok()
+                                    .and_then(|text| parse_clipboard_column(&text));
+                            // Fall back to the last column copied in the designer.
+                            if pasted.is_none() {
+                                if let Some(staged) = self.copied_column.clone() {
+                                    pasted = Some((
+                                        self.unique_column_name("column"),
+                                        staged.column_type,
+                                        staged.nullable,
+                                        staged.default_value,
+                                    ));
                                 }
+                            }
+                            if let Some((name, col_type, nullable, default_value)) = pasted {
+                                let new_name = self.unique_column_name(&name);
                                 self.columns.push(TableColumn {
                                     name: new_name,
-                                    database_type: staged.column_type,
-                                    nullable: staged.nullable,
-                                    default_value: staged.default_value,
+                                    database_type: col_type,
+                                    nullable,
+                                    default_value,
                                     primary_key: false,
                                     comment: None,
                                 });
                                 self.col_original_name.push(None);
                                 self.editing_name = Some(self.columns.len() - 1);
-                                status = Some("Column pasted; edit its name".to_string());
+                                status = Some("Column pasted from clipboard; rename it".to_string());
                             }
                         }
                     });

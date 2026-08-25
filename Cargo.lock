@@ -3965,6 +3965,7 @@ name = "orvyn"
 version = "1.0.0"
 dependencies = [
  "app-core",
+ "arboard",
  "chrono",
  "db-clickhouse",
  "db-common",
