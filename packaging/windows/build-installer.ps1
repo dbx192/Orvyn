@@ -15,6 +15,7 @@ if (-not (Test-Path $Icon)) {
 }
 $IconHash = (Get-FileHash -Algorithm SHA256 $Icon).Hash.Substring(0, 12).ToLowerInvariant()
 cargo build -p orvyn --release --locked --target x86_64-pc-windows-msvc
+if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
 if (-not $Iscc) {
   throw 'Inno Setup 6 is required. Install it from https://jrsoftware.org/isinfo.php and rerun this script.'
 }

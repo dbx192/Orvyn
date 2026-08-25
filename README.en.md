@@ -2,56 +2,68 @@
 
 [中文](README.md)
 
-Orvyn is a cross-platform desktop database client built with Rust. It supports everyday querying, data browsing, light data maintenance, and Redis key management through an `egui/eframe` interface and a layered Rust workspace.
+Orvyn is a cross-platform desktop database client built with Rust, covering daily querying, data browsing, and light maintenance across relational, document, key-value, and search databases. The UI is a native `egui/eframe` implementation on top of a layered Rust workspace, with no ODBC/JDBC/sidecar dependencies.
+
+## Highlights
+
+- **Pure Rust**: native `egui/eframe` interface backed by a Tokio async core.
+- **Unified driver registry**: 35 `DataSourceKind` variants are routed over `ProtocolFamily` to shared protocol drivers, with a capability matrix (`SupportLevel` / `ConnectorCapabilities`).
+- **Brand sharing**: multiple brands inside the MySQL family and PostgreSQL family share one underlying driver, with brand switches for dialect, port, and capability differences.
+- **Capability-driven UI**: connection form fields, query editor availability, and dedicated panels are all driven by the capability matrix.
 
 ## Supported Data Sources
 
-- MySQL
-- PostgreSQL
-- SQLite
-- DuckDB
-- Redis
-- MongoDB
-- SQL Server
-- ClickHouse
-- TiDB (MySQL protocol)
-- TimescaleDB (PostgreSQL protocol)
+Grouped by protocol family:
+
+- **MySQL family**: MySQL, TiDB, MariaDB, OceanBase, Doris, SelectDB, StarRocks, GoldenDB
+- **PostgreSQL family**: PostgreSQL, TimescaleDB, Redshift, CockroachDB, OpenGauss, GaussDB, KDB, KingbaseES, Vastbase, HighGo, UXDB
+- **Standalone relational/analytics**: SQLite, DuckDB, ClickHouse, SQL Server
+- **Document/key-value**: MongoDB, Redis
+- **Search (HTTP)**: Elasticsearch, Easysearch, Meilisearch, Manticore Search
+- **HTTP-SQL**: Cloudflare D1
+- **Restricted**: TDengine (connection probe only); Access, Oracle, Dameng (DM), XuguDB — can be created/saved, tests return a structured "not yet supported" message
 
 Local integration services can reuse `F:\dnmp\docker-compose.orvyn.yml` from the DNMP directory:
 `docker compose -f docker-compose.yml -f docker-compose.orvyn.yml up -d mongodb clickhouse sqlserver tidb`.
-TimescaleDB uses the existing PostgreSQL service; TiDB listens on `127.0.0.1:4000`, and ClickHouse exposes `8123/9000`.
+TimescaleDB uses the existing PostgreSQL service; TiDB listens on `127.0.0.1:4000`, ClickHouse exposes `8123/9000`.
+
+## Architecture
+
+- `DriverRegistry` (app-core): centrally registers and routes each protocol family, removing scattered `match kind` branches.
+- `ProtocolFamily` + `ConnectorCapabilities` (db-common): express protocol-family membership and support levels, with clear errors for unknown types.
+- Query/document/search/HTTP-SQL go through `RelationalQueryExecutor`, `DocumentConnector`, `SearchConnector`, and `HttpSqlConnector` traits respectively, decoupling the UI from the underlying drivers.
 
 ## Current Capabilities
 
 ### Connections and Security
 
-- Create, edit, test, group, and delete connections.
-- Import or export all or selected connections. Imports can overwrite conflicts or rename them automatically.
+- Create, edit, test, group, and delete connections; import or export all or selected connections (imports can overwrite conflicts or rename automatically).
 - Optionally store passwords locally with ChaCha20-Poly1305 encryption. Passwords are not saved by default.
 - Mark individual connections as read-only. Read-only connections reject write statements and transactions.
-- Test connections for MySQL, PostgreSQL, SQLite, DuckDB, and Redis.
+- The type selector groups by protocol family and shows support level; form fields are driven by the capability matrix.
 
 ### Relational Databases
 
-- Browse databases, schemas, tables, views, and metadata.
-- Inspect columns, indexes, foreign keys, triggers, functions, and CREATE TABLE SQL. Available objects depend on the database adapter.
-- Use a single-SQL workspace to execute all SQL, the current statement, or selected SQL; running queries can be cancelled.
-- Keep query history and favorites; page and sort result sets.
-- Browse, filter, sort, insert, edit, and delete table rows. Tables without a primary key are read-only by default.
-- Inspect and edit table structure, including columns, indexes, and foreign keys. DDL support varies by database.
-- Export database or table SQL as structure only, or structure plus data.
+- Browse databases, schemas, tables, views, and their metadata (columns, indexes, foreign keys, triggers, functions, CREATE TABLE SQL — adapter-dependent).
+- Multi-tab SQL editor: execute all statements, the current statement, or the selected SQL; cancellable execution; query history, favorites, result paging and column sorting.
+- Table data browse, filter, sort, insert, edit, and delete rows; tables without a primary key are read-only by default.
+- Inspect and edit table structure; export structure SQL, or structure-and-data SQL, for a table or database.
+- SQL Server (tiberius) and ClickHouse (HTTP) provide query and metadata support.
 
-### Redis
+### Document / Key-Value
 
-- Browse logical databases and find keys through paginated `SCAN` operations.
-- Inspect key type, TTL, size, and value.
-- Manage String, Hash, List, Set, and Sorted Set values, and execute Redis commands.
+- **MongoDB**: browse databases and collections, query documents, basic CRUD.
+- **Redis**: logical-database browsing, paginated `SCAN` key lookup, type/TTL/size/value inspection, String/Hash/List/Set/Sorted Set management, and command execution.
+
+### Search / HTTP-SQL
+
+- **Elasticsearch / Easysearch / Meilisearch / Manticore Search**: index browsing and a JSON/DSL query panel.
+- **Cloudflare D1**: executes SQL over the HTTP API.
 
 ### Import and Export
 
-- Export query results as CSV, JSON, or Excel-compatible tab-separated text.
-- CSV output includes a UTF-8 BOM so Excel on Windows recognizes Chinese text correctly.
-- Preview CSV files, map fields automatically, validate types, and generate batched INSERT SQL.
+- Export query results as CSV, JSON, or Excel-compatible tab-separated text; CSV uses a UTF-8 BOM so Excel on Windows recognizes Chinese correctly.
+- CSV preview, automatic field mapping, type validation, and batched INSERT SQL generation.
 
 ## Run from Source
 
@@ -99,35 +111,34 @@ The directory must contain the files for the target platform:
 - Linux x64: `libduckdb.so`, `duckdb.h`
 - Windows x64 MSVC: `duckdb.lib`, `duckdb.dll`, `duckdb.h`
 
-After changing DuckDB version or target platform, or removing this directory, restore the matching local library before building.
+After changing the DuckDB version or target platform, or removing this directory, restore the matching local library before building.
 
-## Windows x64 Installer
+## Release and Packaging
 
-Install the Rust MSVC toolchain, the `x86_64-pc-windows-msvc` target, the Windows DuckDB local library, and Inno Setup 6. Then run this from the repository root:
+Build each platform on its native OS; do not cross-compile all three systems on Linux (GUI, system SDKs, signing, and the DuckDB dynamic library make that unreliable). Release artifacts must carry the matching DuckDB dynamic library and an appropriate installer:
 
-```powershell
-.\packaging\windows\build-installer.ps1
-```
+- **Windows x64**: install the Rust MSVC toolchain, the `x86_64-pc-windows-msvc` target, the Windows DuckDB local library, and Inno Setup 6, then run `.\packaging\windows\build-installer.ps1` from the repository root — output is `dist/windows/orvyn-0.1.0-windows-x86_64-setup.exe`.
+- **Linux x86_64**: build with `--locked` on an as-old-as-possible base distribution (e.g., Ubuntu 22.04); produces a portable tar.gz, `.AppImage`, or `.deb`.
+- **macOS**: produce `.app` and `.dmg` for Apple Silicon and Intel separately; sign and notarize for end-user distribution.
 
-The script builds `orvyn` and produces:
-
-```text
-dist/windows/orvyn-1.0.0-windows-x86_64-setup.exe
-```
-
-When distributing the executable directly, distribute `duckdb.dll` from the same directory as well. The installer is the recommended distribution format.
+When distributing an executable directly, ship the matching DuckDB dynamic library in the same directory (`duckdb.dll` / `libduckdb.so` / `libduckdb.dylib`). Distributing an installer is generally recommended.
 
 ## Workspace Layout
 
 ```text
 apps/desktop           Desktop entry point and egui UI
-crates/app-core        Connection, session, metadata, query, Redis, and task services
-crates/db-common       Shared models, traits, errors, and utilities
-crates/db-mysql        MySQL adapter
-crates/db-postgres     PostgreSQL adapter
+crates/app-core        Connection, session, metadata, query, Redis/Search services, and DriverRegistry
+crates/db-common       Shared models, traits, errors, capability matrix, and utilities
+crates/db-mysql        MySQL protocol family (brand sharing: MariaDB/TiDB/OceanBase/Doris/SelectDB/StarRocks/GoldenDB)
+crates/db-postgres     PostgreSQL protocol family (brand sharing: TimescaleDB/Redshift/CockroachDB/OpenGauss/...)
 crates/db-sqlite       SQLite adapter
 crates/db-duckdb       DuckDB adapter
 crates/db-redis        Redis adapter
+crates/db-sqlserver    SQL Server adapter (tiberius)
+crates/db-clickhouse   ClickHouse HTTP adapter
+crates/db-mongodb      MongoDB document adapter
+crates/db-http         HTTP search (Elasticsearch/Easysearch/Meilisearch/Manticore) and HTTP-SQL (Cloudflare D1)
+crates/db-tdengine     TDengine restricted HTTP connection probe
 crates/import-export   CSV/JSON import and export utilities
 crates/secure-store    Encrypted credential storage
 packaging/windows      Windows installer scripts and assets
