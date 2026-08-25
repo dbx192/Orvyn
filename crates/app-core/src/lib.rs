@@ -8,9 +8,13 @@ pub mod connection;
 pub mod metadata;
 pub mod query;
 pub mod redis_service;
+pub mod registry;
+pub mod search_service;
 pub mod session;
 pub mod storage;
 pub mod task;
+
+pub use registry::{BrandConnectionTester, DriverRegistry, RestrictedConnectionTester};
 
 pub const fn app_name() -> &'static str {
     "Orvyn"

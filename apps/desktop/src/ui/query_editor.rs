@@ -2817,14 +2817,15 @@ fn completion_column_tables(
     let qualifier = qualifier.map(normalize_identifier);
     references
         .iter()
-        .filter(|reference| {
-            qualifier.as_ref().is_none_or(|qualifier| {
+        .filter(|reference| match qualifier.as_ref() {
+            None => true,
+            Some(qualifier) => {
                 normalize_identifier(&reference.table) == *qualifier
                     || reference
                         .alias
                         .as_deref()
                         .is_some_and(|alias| normalize_identifier(alias) == *qualifier)
-            })
+            }
         })
         .map(|reference| reference.table.clone())
         .collect()
@@ -2866,7 +2867,7 @@ fn sql_completion_tokens(sql: &str) -> Vec<String> {
             tokens.push(std::mem::take(&mut current));
         } else if matches!(ch, '`' | '"' | '[') {
             let closing = if ch == '[' { ']' } else { ch };
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if next == closing {
                     break;
                 }
@@ -2878,6 +2879,10 @@ fn sql_completion_tokens(sql: &str) -> Vec<String> {
         } else if matches!(ch, '.' | ',' | ';' | '(' | ')') {
             tokens.push(ch.to_string());
         } else if ch == '\'' {
+            // Single-quoted string with `''` escape: skip the closing quote,
+            // consume the doubled quote, continue scanning. `for` doesn't work
+            // here because we need `peek()` + `next()` for the escape.
+            #[allow(clippy::while_let_on_iterator)]
             while let Some(next) = chars.next() {
                 if next == '\'' {
                     if chars.peek() == Some(&'\'') {
@@ -2893,7 +2898,7 @@ fn sql_completion_tokens(sql: &str) -> Vec<String> {
 }
 
 fn is_sql_identifier_token(token: &str) -> bool {
-    !token.is_empty() && token.chars().all(|ch| is_completion_char(ch))
+    !token.is_empty() && token.chars().all(is_completion_char)
 }
 
 fn is_sql_clause_keyword(token: &str) -> bool {

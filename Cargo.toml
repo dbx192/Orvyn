@@ -11,6 +11,8 @@ members = [
     "crates/db-postgres",
     "crates/db-redis",
     "crates/db-sqlite",
+    "crates/db-tdengine",
+    "crates/db-http",
     "crates/import-export",
     "crates/secure-store",
 ]

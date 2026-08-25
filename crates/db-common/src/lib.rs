@@ -4,12 +4,14 @@
 //! helpers. Concrete database drivers belong in their own adapter crates.
 
 pub mod bytes;
+pub mod capabilities;
 pub mod connection;
 pub mod dialect;
 pub mod error;
 pub mod id;
 pub mod paging;
 pub mod pool;
+pub mod protocol_family;
 pub mod query;
 pub mod redaction;
 pub mod result_set;
@@ -20,6 +22,7 @@ pub mod traits;
 pub mod validation;
 
 pub use bytes::{base64_preview, human_bytes};
+pub use capabilities::{ConnectorCapabilities, ExtraParamField, ExtraParamKind, SupportLevel};
 pub use connection::{
     unsupported_kind, ConnectionProfile, ConnectionProfileBuilder, ConnectionSecurity,
     ConnectionStatus, ConnectionTestReport, CredentialRef, DataSourceKind, PasswordUpdate, SslMode,
@@ -29,6 +32,7 @@ pub use error::{AppError, ErrorKind, Result};
 pub use id::{ConnectionId, ObjectId, QueryId, SessionId, TaskId};
 pub use paging::{PageRequest, PageSize};
 pub use pool::{ConnectionPoolConfig, ConnectionPoolStats};
+pub use protocol_family::ProtocolFamily;
 pub use query::{
     FavoriteQuery, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
     QueryHistoryEntry, QueryTab, SqlHighlightToken, SqlTokenKind, TextRange,
@@ -47,8 +51,10 @@ pub use sql::{
 };
 pub use time::{elapsed_ms, now_utc};
 pub use traits::{
-    ConnectionTester, DatabaseFunction, DatabaseObject, DatabaseObjectKind, MetadataNode,
-    MetadataNodeKind, MetadataPath, RedisConnector, RedisDatabase, RedisKeyInfo, RedisKeyScan,
-    RedisMetadataReader, RedisValue, RelationalConnector, RelationalMetadataReader,
-    RelationalQueryExecutor, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+    ConnectionTester, DatabaseFunction, DatabaseObject, DatabaseObjectKind, DocumentCollection,
+    DocumentConnector, DocumentDatabase, HttpSqlConnector, MetadataNode, MetadataNodeKind,
+    MetadataPath, RedisConnector, RedisDatabase, RedisKeyInfo, RedisKeyScan, RedisMetadataReader,
+    RedisValue, RelationalConnector, RelationalMetadataReader, RelationalQueryExecutor,
+    SearchConnector, SearchIndex, SearchResult, TableColumn, TableForeignKey, TableIndex,
+    TableTrigger,
 };

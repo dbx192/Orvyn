@@ -508,6 +508,7 @@ fn active_panel_label(panel: ActivePanel) -> &'static str {
         ActivePanel::TableStructure => "Structure",
         ActivePanel::ImportWizard => "Import",
         ActivePanel::RedisBrowser => "Redis",
+        ActivePanel::SearchBrowser => "Browse",
     }
 }
 

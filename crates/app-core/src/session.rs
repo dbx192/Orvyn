@@ -1,8 +1,8 @@
 use crate::connection::ConnectionManager;
+use crate::registry::DriverRegistry;
 use db_common::{
-    unsupported_kind, AppError, ConnectionId, ConnectionProfile, ConnectionStatus,
-    ConnectionTestReport, ConnectionTester, DataSourceKind, ErrorKind, Result, SessionInfo,
-    SessionState,
+    AppError, ConnectionId, ConnectionProfile, ConnectionStatus, ConnectionTestReport,
+    ConnectionTester, ErrorKind, Result, SessionInfo, SessionState,
 };
 use std::time::Duration;
 use std::{collections::BTreeMap, sync::Arc};
@@ -14,42 +14,32 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct SessionManager {
     connections: ConnectionManager,
-    testers: Arc<BTreeMap<DataSourceKind, Arc<dyn ConnectionTester>>>,
+    registry: DriverRegistry,
     sessions: Arc<RwLock<BTreeMap<ConnectionId, SessionInfo>>>,
 }
 
 impl SessionManager {
     pub fn new(connections: ConnectionManager, testers: Vec<Arc<dyn ConnectionTester>>) -> Self {
-        let testers = testers
-            .into_iter()
-            .map(|tester| (tester.kind(), tester))
-            .collect();
+        Self {
+            connections: connections.clone(),
+            registry: DriverRegistry::from_testers(testers),
+            sessions: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
 
+    /// Preferred production constructor. The supplied registry is shared with
+    /// other services (ConnectionManager, MetadataService, QueryService) so
+    /// every brand routes through the same driver instance.
+    pub fn with_registry(connections: ConnectionManager, registry: DriverRegistry) -> Self {
         Self {
             connections,
-            testers: Arc::new(testers),
+            registry,
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
     pub fn with_default_testers(connections: ConnectionManager) -> Self {
-        Self::new(
-            connections,
-            vec![
-                Arc::new(db_mysql::MySqlConnectionTester),
-                Arc::new(db_mysql::OceanBaseConnectionTester),
-                Arc::new(db_mysql::DorisConnectionTester),
-                Arc::new(db_mysql::TiDbConnectionTester),
-                Arc::new(db_postgres::PostgresConnectionTester),
-                Arc::new(db_postgres::TimescaleDbConnectionTester),
-                Arc::new(db_mongodb::MongoDbConnectionTester),
-                Arc::new(db_sqlserver::SqlServerConnectionTester),
-                Arc::new(db_clickhouse::ClickHouseConnectionTester),
-                Arc::new(db_sqlite::SqliteConnectionTester),
-                Arc::new(db_duckdb::DuckDbConnectionTester),
-                Arc::new(db_redis::RedisConnectionTester),
-            ],
-        )
+        Self::with_registry(connections, DriverRegistry::default())
     }
 
     #[instrument(skip(self, runtime_password), fields(connection_id = %id))]
@@ -63,10 +53,7 @@ impl SessionManager {
             .profile_with_password(id, runtime_password)
             .await?;
 
-        let tester = self
-            .testers
-            .get(&profile.kind)
-            .ok_or_else(|| unsupported_kind(profile.kind))?;
+        let tester = self.registry.tester(profile.kind)?.clone();
 
         let mut session = self.get_or_create_session(id).await;
         session.mark_connecting();
@@ -191,10 +178,7 @@ impl SessionManager {
         profile: &ConnectionProfile,
         password: Option<&str>,
     ) -> Result<ConnectionTestReport> {
-        let tester = self
-            .testers
-            .get(&profile.kind)
-            .ok_or_else(|| unsupported_kind(profile.kind))?;
+        let tester = self.registry.tester(profile.kind)?.clone();
         tester.test_connection(profile, password).await
     }
 
@@ -229,7 +213,7 @@ mod tests {
     use async_trait::async_trait;
     use db_common::{CredentialRef, DataSourceKind, PasswordUpdate};
     use secure_store::SecureStore;
-    use std::sync::Mutex;
+    use std::{collections::BTreeMap, sync::Mutex};
 
     #[tokio::test]
     async fn connect_and_disconnect() {

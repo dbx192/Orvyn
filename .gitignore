@@ -19,3 +19,5 @@ todo.md
 /.orvyn/
 connections.json
 orvyn-connections.json
+.codegraph
+.trae/

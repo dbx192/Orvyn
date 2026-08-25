@@ -1,5 +1,10 @@
 //! PostgreSQL adapter crate.
 
+mod brand;
+
+pub use brand::PostgresBrand;
+
+use crate::brand::brand_for;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use db_common::{
@@ -20,27 +25,6 @@ pub const ADAPTER_NAME: &str = "postgresql";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PostgresConnectionTester;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TimescaleDbConnectionTester;
-
-#[async_trait]
-impl ConnectionTester for TimescaleDbConnectionTester {
-    fn kind(&self) -> DataSourceKind {
-        DataSourceKind::TimescaleDb
-    }
-    async fn test_connection(
-        &self,
-        profile: &ConnectionProfile,
-        password: Option<&str>,
-    ) -> Result<ConnectionTestReport> {
-        let mut report = PostgresConnectionTester
-            .test_connection(profile, password)
-            .await?;
-        report.kind = DataSourceKind::TimescaleDb;
-        Ok(report)
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PostgresMetadataReader;
@@ -221,11 +205,13 @@ impl ConnectionTester for PostgresConnectionTester {
             })?;
         let version: String = row.get(0);
 
-        Ok(ConnectionTestReport::success(
-            DataSourceKind::PostgreSql,
-            started_at.elapsed().as_millis(),
+        let brand = brand_for(profile)
+            .map(PostgresBrand::kind)
+            .unwrap_or(DataSourceKind::PostgreSql);
+        Ok(
+            ConnectionTestReport::success(brand, started_at.elapsed().as_millis())
+                .with_server_version(version),
         )
-        .with_server_version(version))
     }
 }
 
@@ -608,6 +594,16 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
     ) -> Result<()> {
         let pool = self.pool_for(profile, password, pool_config).await?;
         let pooled = pool.acquire().await?;
+        // CockroachDB supports only SERIALIZABLE isolation and may abort with
+        // a retryable serialisation error; pin it so the client can safely
+        // retry the whole transaction on SQLSTATE 40001.
+        if brand_for(profile).is_some_and(PostgresBrand::uses_serializable_transactions) {
+            pooled
+                .client()?
+                .batch_execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                .await
+                .map_err(query_error)?;
+        }
         pooled
             .client()?
             .batch_execute("BEGIN")

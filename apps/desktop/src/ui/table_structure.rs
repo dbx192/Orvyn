@@ -4,8 +4,8 @@
 use crate::ui::i18n::text as tr;
 use db_common::{
     dialect::{BacktickDialect, Dialect, DoubleQuoteDialect, Identifier},
-    AppError, ConnectionId, DataSourceKind, DatabaseFunction, TableColumn, TableForeignKey,
-    TableIndex, TableTrigger,
+    AppError, ConnectionId, DataSourceKind, DatabaseFunction, ProtocolFamily, TableColumn,
+    TableForeignKey, TableIndex, TableTrigger,
 };
 use eframe::egui::{
     Button, Color32, ComboBox, Frame, Grid, Margin, RichText, ScrollArea, TextEdit, TextStyle, Ui,
@@ -185,11 +185,11 @@ pub fn build_alter_table_sql(
                 default_value.as_deref(),
             )?;
             // MySQL uses MODIFY COLUMN, PostgreSQL/SQLite/DuckDB use ALTER COLUMN ... TYPE
-            match kind {
-                DataSourceKind::MySql | DataSourceKind::OceanBase | DataSourceKind::Doris => Ok(
-                    format!("ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"),
-                ),
-                DataSourceKind::PostgreSql => {
+            match kind.protocol_family() {
+                ProtocolFamily::MySql => Ok(format!(
+                    "ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"
+                )),
+                ProtocolFamily::PostgreSql => {
                     let mut statements = vec![format!(
                         "ALTER TABLE {table_sql} ALTER COLUMN {column_sql} TYPE {new_type}"
                     )];
@@ -209,19 +209,16 @@ pub fn build_alter_table_sql(
                     }
                     Ok(statements.join("; "))
                 }
-                DataSourceKind::Sqlite | DataSourceKind::DuckDb => {
+                ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => {
                     // SQLite < 3.35 doesn't support full ALTER COLUMN; DuckDB does.
                     Ok(format!("ALTER TABLE {table_sql} ALTER COLUMN {column_sql} SET DATA TYPE {new_type}"))
                 }
-                DataSourceKind::TiDb => Ok(format!(
-                    "ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"
-                )),
-                DataSourceKind::TimescaleDb
-                | DataSourceKind::SqlServer
-                | DataSourceKind::ClickHouse => Err(AppError::unsupported(
+                ProtocolFamily::SqlServer
+                | ProtocolFamily::ClickHouse
+                | ProtocolFamily::Tdengine => Err(AppError::unsupported(
                     "ALTER COLUMN is not available for this data source yet",
                 )),
-                DataSourceKind::Redis | DataSourceKind::MongoDb => Err(AppError::validation(
+                _ => Err(AppError::validation(
                     "unsupported data source for ALTER TABLE",
                 )),
             }
@@ -231,8 +228,8 @@ pub fn build_alter_table_sql(
         } => {
             let _ = table;
             let index_sql = quote_id(dialect.as_ref(), index_name)?;
-            match kind {
-                DataSourceKind::MySql | DataSourceKind::OceanBase | DataSourceKind::Doris => {
+            match kind.protocol_family() {
+                ProtocolFamily::MySql => {
                     let table_sql = qualified_table_sql(
                         dialect.as_ref(),
                         kind,
@@ -242,7 +239,7 @@ pub fn build_alter_table_sql(
                     )?;
                     Ok(format!("DROP INDEX {index_sql} ON {table_sql}"))
                 }
-                DataSourceKind::PostgreSql => {
+                ProtocolFamily::PostgreSql => {
                     // PostgreSQL: DROP INDEX [IF EXISTS] name [CASCADE|RESTRICT]
                     // Index name may be schema-qualified
                     let full_name = match request.schema() {
@@ -253,25 +250,15 @@ pub fn build_alter_table_sql(
                     };
                     Ok(format!("DROP INDEX IF EXISTS {full_name}"))
                 }
-                DataSourceKind::Sqlite | DataSourceKind::DuckDb => {
+                ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => {
                     Ok(format!("DROP INDEX IF EXISTS {index_sql}"))
                 }
-                DataSourceKind::TiDb => {
-                    let table_sql = qualified_table_sql(
-                        dialect.as_ref(),
-                        kind,
-                        request.database(),
-                        request.schema(),
-                        table,
-                    )?;
-                    Ok(format!("DROP INDEX {index_sql} ON {table_sql}"))
-                }
-                DataSourceKind::TimescaleDb
-                | DataSourceKind::SqlServer
-                | DataSourceKind::ClickHouse => Err(AppError::unsupported(
+                ProtocolFamily::SqlServer
+                | ProtocolFamily::ClickHouse
+                | ProtocolFamily::Tdengine => Err(AppError::unsupported(
                     "DROP INDEX is not available for this data source yet",
                 )),
-                DataSourceKind::Redis | DataSourceKind::MongoDb => Err(AppError::validation(
+                _ => Err(AppError::validation(
                     "unsupported data source for DROP INDEX",
                 )),
             }
@@ -361,8 +348,8 @@ fn qualified_table_sql(
     table: &str,
 ) -> Result<String, AppError> {
     let table_sql = quote_id(dialect, table)?;
-    let qualifier = match kind {
-        DataSourceKind::MySql => database.or(schema),
+    let qualifier = match kind.protocol_family() {
+        ProtocolFamily::MySql => database.or(schema),
         _ => schema,
     };
     match qualifier.filter(|value| !value.is_empty()) {
@@ -372,8 +359,8 @@ fn qualified_table_sql(
 }
 
 fn dialect_for_kind(kind: DataSourceKind) -> Box<dyn Dialect> {
-    match kind {
-        DataSourceKind::MySql => Box::new(BacktickDialect),
+    match kind.protocol_family() {
+        ProtocolFamily::MySql => Box::new(BacktickDialect),
         _ => Box::new(DoubleQuoteDialect),
     }
 }
@@ -994,7 +981,7 @@ impl TableStructureView {
                         );
                         ui.end_row();
                     });
-                if self.kind == DataSourceKind::Sqlite {
+                if self.kind.protocol_family() == ProtocolFamily::Sqlite {
                     ui.colored_label(
                         Color32::from_rgb(220, 150, 60),
                         "提示：SQLite 不支持原生 ALTER COLUMN，修改类型可能失败；请使用迁移 SQL 重建表。",

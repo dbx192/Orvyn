@@ -7,6 +7,12 @@ pub enum WorkspaceTabKind {
     Query,
     TableData,
     ResultSet,
+    /// Search-index browser (Elasticsearch/Easysearch/Meilisearch/Manticore).
+    Search,
+    /// Document-collection browser (MongoDB).
+    Document,
+    /// HTTP-SQL browser (Cloudflare D1).
+    HttpSql,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +21,20 @@ pub struct WorkspaceTab {
     pub title: String,
     pub kind: WorkspaceTabKind,
     pub dirty: bool,
+    /// Connection the tab is bound to (set when opened from the object tree).
+    pub connection_id: Option<ConnectionId>,
+    /// Index / collection / table name the tab targets.
+    pub object_name: Option<String>,
+    /// Optional database qualifier (MongoDB / D1).
+    pub database: Option<String>,
+    /// The query JSON DSL or SQL entered by the user.
+    pub query_text: String,
+    /// Local JSON results rendered in the panel.
+    pub results: Vec<serde_json::Value>,
+    /// The pretty-printed result string shown to the user.
+    pub result_text: String,
+    /// Latest execution error, if any.
+    pub error: Option<String>,
 }
 
 impl WorkspaceTab {
@@ -24,6 +44,13 @@ impl WorkspaceTab {
             title: title.into(),
             kind,
             dirty: false,
+            connection_id: None,
+            object_name: None,
+            database: None,
+            query_text: String::new(),
+            results: Vec::new(),
+            result_text: String::new(),
+            error: None,
         }
     }
 }

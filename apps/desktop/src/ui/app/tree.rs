@@ -5,7 +5,7 @@ use super::{
 };
 use crate::ui::{
     connection_manager::ConnectionChange, import_wizard::ImportWizard,
-    object_tree::ObjectTreeAction, redis_browser::RedisBrowserUi,
+    object_tree::ObjectTreeAction, redis_browser::RedisBrowserUi, search_browser::SearchBrowser,
 };
 use db_common::ConnectionId;
 use eframe::egui::{Align, Color32, Context, Layout, RichText, SidePanel};
@@ -95,6 +95,24 @@ impl DesktopApp {
                     self.active_panel = ActivePanel::QueryEditor;
                     self.state
                         .set_status(format!("New query on {}", connection_id));
+                }
+                ObjectTreeAction::OpenDataBrowser {
+                    connection_id,
+                    kind,
+                    database,
+                    object,
+                } => {
+                    self.search_browser = Some(SearchBrowser::new(
+                        self.search_service.clone(),
+                        self.runtime.clone(),
+                        connection_id,
+                        kind,
+                        database,
+                        object.clone(),
+                    ));
+                    self.active_panel = ActivePanel::SearchBrowser;
+                    self.state
+                        .set_status(format!("Browse {} on {}", object, connection_id));
                 }
                 ObjectTreeAction::OpenSavedQuery {
                     connection_id,

@@ -2,10 +2,12 @@ use crate::ui::i18n::text as tr;
 use app_core::connection::ConnectionManager;
 use db_common::{
     redact_connection_url, AppError, ConnectionId, ConnectionProfile, ConnectionSecurity,
-    ConnectionTestReport, DataSourceKind, PasswordUpdate, SslMode,
+    ConnectionTestReport, DataSourceKind, ExtraParamField, ExtraParamKind, PasswordUpdate,
+    ProtocolFamily, SslMode, SupportLevel,
 };
 use eframe::egui::{
-    Button, Checkbox, ComboBox, DragValue, Grid, RichText, ScrollArea, TextEdit, Ui, Window,
+    Button, Checkbox, Color32, ComboBox, DragValue, Grid, RichText, ScrollArea, Separator,
+    TextEdit, Ui, Window,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -39,12 +41,16 @@ struct ConnectionForm {
     password_modified: bool,
     read_only: bool,
     ssl_mode: SslMode,
+    /// Brand-specific fields rendered from `DataSourceKind::extra_params_schema`.
+    /// Stored as strings regardless of underlying type; Choice kinds store the
+    /// selected option verbatim.
+    extra_params: BTreeMap<String, String>,
 }
 
 impl ConnectionForm {
     fn new() -> Self {
         let kind = DataSourceKind::PostgreSql;
-        Self {
+        let mut form = Self {
             mode: EditorMode::New,
             name: String::new(),
             group: String::new(),
@@ -60,7 +66,10 @@ impl ConnectionForm {
             password_modified: false,
             read_only: false,
             ssl_mode: SslMode::Prefer,
-        }
+            extra_params: BTreeMap::new(),
+        };
+        form.apply_kind_defaults();
+        form
     }
 
     fn from_profile(profile: &ConnectionProfile) -> Self {
@@ -82,6 +91,7 @@ impl ConnectionForm {
             password_modified: false,
             read_only: profile.security.read_only,
             ssl_mode: profile.security.ssl_mode,
+            extra_params: profile.extra_params.clone(),
         }
     }
 
@@ -96,9 +106,26 @@ impl ConnectionForm {
         } else if self.host.is_empty() {
             self.host = "localhost".to_string();
         }
+        // Drop brand-specific fields that no longer apply, but keep values for
+        // fields the new kind also recognises (so toggling MariaDB<->MySQL
+        // doesn't nuke user input).
+        let schema = self.kind.extra_params_schema();
+        self.extra_params
+            .retain(|key, _| schema.iter().any(|field| field.key == key));
+        // Pre-fill defaults from the schema so Choice fields always have a
+        // sensible value.
+        for field in schema {
+            self.extra_params
+                .entry(field.key.to_string())
+                .or_insert_with(|| field.placeholder.map(ToOwned::to_owned).unwrap_or_default());
+        }
     }
 
     fn to_profile(&self) -> ConnectionProfile {
+        let mut extra_params = self.extra_params.clone();
+        // Drop empty-string entries so they don't get serialised as noise.
+        extra_params.retain(|_, value| !value.is_empty());
+
         ConnectionProfile {
             id: match self.mode {
                 EditorMode::New => ConnectionId::new(),
@@ -130,7 +157,7 @@ impl ConnectionForm {
                 read_only: self.read_only,
                 save_password: self.save_password,
             },
-            extra_params: BTreeMap::new(),
+            extra_params,
         }
     }
 }
@@ -406,29 +433,66 @@ impl ConnectionManagerUi {
             .show(ui, |ui| {
                 ui.label(tr("Type"));
                 let old_kind = self.form.kind;
+                let selected_label = format!(
+                    "{} ({})",
+                    self.form.kind.display_label(),
+                    self.form.kind.capabilities().support.as_str()
+                );
                 ComboBox::from_id_source("connection_kind")
-                    .selected_text(self.form.kind.as_str())
+                    .selected_text(selected_label)
                     .show_ui(ui, |ui| {
-                        for kind in [
-                            DataSourceKind::Redis,
-                            DataSourceKind::MySql,
-                            DataSourceKind::OceanBase,
-                            DataSourceKind::Doris,
-                            DataSourceKind::TiDb,
-                            DataSourceKind::PostgreSql,
-                            DataSourceKind::TimescaleDb,
-                            DataSourceKind::SqlServer,
-                            DataSourceKind::ClickHouse,
-                            DataSourceKind::MongoDb,
-                            DataSourceKind::Sqlite,
-                            DataSourceKind::DuckDb,
-                        ] {
-                            ui.selectable_value(&mut self.form.kind, kind, kind.as_str());
+                        // Group kinds by protocol family so users can find brands
+                        // without scrolling a flat 35-item list.
+                        let mut current_family: Option<ProtocolFamily> = None;
+                        for &kind in DataSourceKind::ALL {
+                            let family = kind.protocol_family();
+                            if current_family != Some(family) {
+                                if current_family.is_some() {
+                                    ui.add(Separator::default());
+                                }
+                                ui.label(RichText::new(family.display_label()).strong().small());
+                                current_family = Some(family);
+                            }
+                            let caps = kind.capabilities();
+                            ui.selectable_value(
+                                &mut self.form.kind,
+                                kind,
+                                format!(
+                                    "{}   [{}]",
+                                    kind.display_label(),
+                                    caps.support.display_label()
+                                ),
+                            );
+                            if let Some(notes) = caps.notes {
+                                ui.indent("kind_notes", |ui| {
+                                    ui.label(
+                                        RichText::new(notes)
+                                            .small()
+                                            .color(ui.visuals().weak_text_color()),
+                                    );
+                                });
+                            }
                         }
                     });
                 if old_kind != self.form.kind {
                     self.form.apply_kind_defaults();
                 }
+                ui.end_row();
+
+                // Capability hint line: tells users why certain operations may
+                // be disabled before they save and test.
+                ui.label(tr("Support"));
+                let caps = self.form.kind.capabilities();
+                let color = support_level_color(caps.support, ui);
+                ui.colored_label(
+                    color,
+                    RichText::new(format!(
+                        "{} — {}",
+                        caps.support.display_label(),
+                        caps.notes.unwrap_or("full support")
+                    ))
+                    .small(),
+                );
                 ui.end_row();
 
                 ui.label(tr("Name"));
@@ -448,13 +512,21 @@ impl ConnectionManagerUi {
                                 rfd::FileDialog::new().set_title(match self.form.kind {
                                     DataSourceKind::DuckDb => "Select DuckDB database",
                                     DataSourceKind::Sqlite => "Select SQLite database",
+                                    DataSourceKind::Access => "Select Access database",
                                     _ => "Select database file",
                                 });
-                            if matches!(self.form.kind, DataSourceKind::DuckDb) {
-                                dialog = dialog.add_filter("DuckDB database", &["duckdb", "db"]);
-                            } else if matches!(self.form.kind, DataSourceKind::Sqlite) {
-                                dialog = dialog
-                                    .add_filter("SQLite database", &["sqlite", "sqlite3", "db"]);
+                            match self.form.kind {
+                                DataSourceKind::DuckDb => {
+                                    dialog =
+                                        dialog.add_filter("DuckDB database", &["duckdb", "db"]);
+                                }
+                                DataSourceKind::Sqlite => {
+                                    dialog = dialog.add_filter(
+                                        "SQLite database",
+                                        &["sqlite", "sqlite3", "db"],
+                                    );
+                                }
+                                _ => {}
                             }
                             if let Some(path) = dialog.pick_file() {
                                 self.form.file_path = path.to_string_lossy().into_owned();
@@ -479,16 +551,14 @@ impl ConnectionManagerUi {
                     ui.end_row();
                 }
 
-                if matches!(
-                    self.form.kind,
-                    DataSourceKind::MySql | DataSourceKind::Doris | DataSourceKind::PostgreSql
-                ) {
+                // Show username/password for everything that's not file-based.
+                // Restricted/unsupported kinds still let users store credentials
+                // so we don't gate on `is_relational()` here.
+                if !self.form.kind.is_file_based() {
                     ui.label(tr("Username"));
                     ui.add(TextEdit::singleline(&mut self.form.username).desired_width(260.0));
                     ui.end_row();
-                }
 
-                if !self.form.kind.is_file_based() {
                     ui.label(tr("Password"));
                     let response = ui.add(
                         TextEdit::singleline(&mut self.form.password)
@@ -542,6 +612,15 @@ impl ConnectionManagerUi {
                     ));
                 });
                 ui.end_row();
+
+                // Brand-specific fields rendered from the kind's extra_params
+                // schema (e.g. OceanBase mode, ClickHouse protocol, Cloudflare
+                // D1 account id, MongoDB auth source, ...).
+                for field in self.form.kind.extra_params_schema() {
+                    ui.label(field.label);
+                    render_extra_param_field(ui, &mut self.form.extra_params, &field);
+                    ui.end_row();
+                }
             });
 
         ui.add_space(10.0);
@@ -1181,6 +1260,63 @@ fn non_empty(value: &str) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+/// Pick a color that signals capability level at a glance.
+/// - Full: theme's success-ish green
+/// - Compatible: muted blue (protocol-shared)
+/// - Restricted: amber
+/// - Unsupported: faded red
+fn support_level_color(level: SupportLevel, ui: &Ui) -> eframe::egui::Color32 {
+    match level {
+        SupportLevel::Full => Color32::from_rgb(80, 170, 90),
+        SupportLevel::Compatible => Color32::from_rgb(70, 120, 200),
+        SupportLevel::Restricted => Color32::from_rgb(220, 150, 60),
+        SupportLevel::Unsupported => ui.visuals().error_fg_color.gamma_multiply(0.85),
+    }
+}
+
+/// Render a single brand-specific form field, writing the value back into
+/// `extra_params` under the field's `key`.
+fn render_extra_param_field(
+    ui: &mut Ui,
+    extra_params: &mut BTreeMap<String, String>,
+    field: &ExtraParamField,
+) {
+    let entry = extra_params
+        .entry(field.key.to_string())
+        .or_insert_with(|| field.placeholder.map(ToOwned::to_owned).unwrap_or_default());
+    match field.kind {
+        ExtraParamKind::Text => {
+            ui.add(
+                TextEdit::singleline(entry)
+                    .desired_width(260.0)
+                    .hint_text(field.placeholder.unwrap_or("")),
+            );
+        }
+        ExtraParamKind::Password => {
+            ui.add(
+                TextEdit::singleline(entry)
+                    .password(true)
+                    .desired_width(260.0)
+                    .hint_text(field.placeholder.unwrap_or("")),
+            );
+        }
+        ExtraParamKind::Choice(options) => {
+            let selected = entry.clone();
+            ComboBox::from_id_source(format!("extra_{}", field.key))
+                .selected_text(if selected.is_empty() {
+                    field.placeholder.unwrap_or("—").to_string()
+                } else {
+                    selected.clone()
+                })
+                .show_ui(ui, |ui| {
+                    for option in options {
+                        ui.selectable_value(entry, (*option).to_string(), *option);
+                    }
+                });
+        }
     }
 }
 

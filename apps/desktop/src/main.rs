@@ -7,8 +7,10 @@ use app_core::{
     metadata::MetadataService,
     query::QueryService,
     redis_service::RedisService,
+    search_service::SearchService,
     session::SessionManager,
     storage::{FileConnectionProfileStore, FileFavoriteQueryStore, FileQueryHistoryStore},
+    DriverRegistry,
 };
 use eframe::egui::{vec2, ViewportBuilder};
 use eframe::NativeOptions;
@@ -50,27 +52,29 @@ fn main() -> eframe::Result<()> {
         Runtime::new().expect("failed to create background async runtime for desktop app"),
     );
     ui::i18n::initialize(&config_dir);
-    let connection_manager = bootstrap_connection_manager(config_dir.clone());
-    let session_manager = SessionManager::with_default_testers(connection_manager.clone());
-    let metadata_service = MetadataService::with_default_readers(connection_manager.clone());
-    let query_service = QueryService::with_stores(
+    let registry = DriverRegistry::default();
+    let connection_manager = bootstrap_connection_manager(config_dir.clone(), registry.clone());
+    let session_manager =
+        SessionManager::with_registry(connection_manager.clone(), registry.clone());
+    let metadata_service = MetadataService::with_registry(
         connection_manager.clone(),
-        vec![
-            Arc::new(db_mysql::MySqlQueryExecutor::new()),
-            Arc::new(db_postgres::PostgresQueryExecutor::new()),
-            Arc::new(db_sqlite::SqliteQueryExecutor::new()),
-            Arc::new(db_duckdb::DuckDbQueryExecutor::new()),
-        ],
+        registry.clone(),
+        app_core::task::TaskManager::default(),
+    );
+    let query_service = QueryService::with_registry(
+        connection_manager.clone(),
+        registry.clone(),
         db_common::ConnectionPoolConfig::default(),
         app_core::task::TaskManager::default(),
-        Arc::new(FileQueryHistoryStore::new(
+        Some(Arc::new(FileQueryHistoryStore::new(
             config_dir.join("query-history.json"),
-        )),
-        Arc::new(FileFavoriteQueryStore::new(
+        ))),
+        Some(Arc::new(FileFavoriteQueryStore::new(
             config_dir.join("favorite-queries.json"),
-        )),
+        ))),
     );
     let redis_service = RedisService::new(connection_manager.clone());
+    let search_service = SearchService::new(connection_manager.clone(), Arc::new(registry));
     let native_options = NativeOptions {
         viewport: ViewportBuilder::default()
             .with_inner_size(vec2(1280.0, 800.0))
@@ -91,20 +95,25 @@ fn main() -> eframe::Result<()> {
                 session_manager,
                 query_service,
                 redis_service,
+                search_service,
                 runtime_handle.clone(),
             ))
         }),
     )
 }
 
-fn bootstrap_connection_manager(config_dir: PathBuf) -> ConnectionManager {
+fn bootstrap_connection_manager(
+    config_dir: PathBuf,
+    registry: DriverRegistry,
+) -> ConnectionManager {
     let profiles_path = config_dir.join("connections.json");
     let secrets_path = config_dir.join("secrets.json");
     let master_key =
         config::master_key(&config_dir).expect("failed to initialize Orvyn master key");
 
-    ConnectionManager::with_default_testers(
+    ConnectionManager::with_registry(
         Arc::new(FileConnectionProfileStore::new(profiles_path)),
         Arc::new(EncryptedFileStore::new(secrets_path, master_key)),
+        registry,
     )
 }

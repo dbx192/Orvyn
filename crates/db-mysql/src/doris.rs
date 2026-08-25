@@ -1,26 +1,39 @@
-//! Apache Doris compatibility for the MySQL wire adapter.
+//! Doris-family compatibility for the MySQL wire adapter.
+//!
+//! Doris, SelectDB and StarRocks all derive from Apache Doris and share its
+//! MySQL-protocol quirks: no `COM_STMT_PREPARE`, no `information_schema`, no
+//! routines / triggers / foreign keys, and the session `sql_mode` must be a
+//! literal instead of the SQLx-default `SELECT CONCAT(...)` expression. The
+//! helpers in this module are invoked from `MySqlMetadataReader` and
+//! `MySqlQueryExecutor` whenever [`crate::MysqlBrand::is_doris_family`] is
+//! true, so all three brands are covered by the same code path.
 
 use crate::{
-    is_result_set_statement, mysql_query_error, mysql_rows_to_query_result, QueryResult, Result,
+    is_result_set_statement, mysql_query_error, mysql_rows_to_query_result, mysql_string_at,
+    QueryResult, Result, TableIndex,
 };
-use sqlx::MySqlPool;
+use sqlx::{
+    mysql::{MySqlConnectOptions, MySqlRow},
+    MySqlPool, Row as SqlxRow,
+};
 use std::time::Instant;
 
-/// Executes literal SQL using COM_QUERY. Doris does not implement
-/// COM_STMT_PREPARE, so SQLx's normal prepared-query path cannot be used.
+/// Executes literal SQL using COM_QUERY. Doris-family servers do not
+/// implement `COM_STMT_PREPARE`, so SQLx's normal prepared-query path cannot
+/// be used.
 pub(super) async fn execute(pool: MySqlPool, statements: Vec<String>) -> Result<Vec<QueryResult>> {
     let mut results = Vec::with_capacity(statements.len());
 
     for statement in statements {
         let statement = normalize_doris_identifiers(&statement);
         let started_at = Instant::now();
-        tracing::info!(statement = %statement, "executing Doris text-protocol query");
+        tracing::info!(statement = %statement, "executing Doris-family text-protocol query");
         if is_result_set_statement(&statement) {
             let rows = sqlx::raw_sql(&statement)
                 .fetch_all(&pool)
                 .await
                 .map_err(|error| {
-                    tracing::error!(statement = %statement, error = %error, "Doris query failed");
+                    tracing::error!(statement = %statement, error = %error, "Doris-family query failed");
                     mysql_query_error(error)
                 })?;
             results.push(
@@ -40,9 +53,37 @@ pub(super) async fn execute(pool: MySqlPool, statements: Vec<String>) -> Result<
     Ok(results)
 }
 
-/// Doris speaks the MySQL dialect and treats double quotes as string literals.
-/// The desktop UI may produce ANSI-quoted identifiers, so normalize only those
-/// quoted sections before sending literal SQL over COM_QUERY.
+pub(super) fn configure_connect_options(options: MySqlConnectOptions) -> MySqlConnectOptions {
+    options.pipes_as_concat(false).no_engine_substitution(false)
+}
+
+pub(super) fn group_indexes(rows: Vec<MySqlRow>) -> Result<Vec<TableIndex>> {
+    let mut indexes = Vec::new();
+    for row in rows {
+        let name = mysql_string_at(&row, 2)?;
+        let column = mysql_string_at(&row, 4)?;
+        let non_unique: i8 = row.try_get(1).map_err(mysql_query_error)?;
+        if let Some(index) = indexes
+            .iter_mut()
+            .find(|index: &&mut TableIndex| index.name == name)
+        {
+            index.columns.push(column);
+        } else {
+            indexes.push(TableIndex {
+                primary: name.eq_ignore_ascii_case("PRIMARY"),
+                name,
+                columns: vec![column],
+                unique: non_unique == 0,
+            });
+        }
+    }
+    Ok(indexes)
+}
+
+/// Doris-family servers speak the MySQL dialect and treat double quotes as
+/// string literals. The desktop UI may produce ANSI-quoted identifiers, so
+/// normalize only those quoted sections before sending literal SQL over
+/// COM_QUERY.
 fn normalize_doris_identifiers(sql: &str) -> String {
     let mut output = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();

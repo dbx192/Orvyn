@@ -4,20 +4,21 @@
 //! database sessions yet; each request delegates to the matching adapter.
 
 use crate::connection::ConnectionManager;
+use crate::registry::DriverRegistry;
 use crate::task::TaskManager;
 use db_common::{
     unsupported_kind, AppError, ConnectionId, DataSourceKind, DatabaseFunction, DatabaseObject,
-    ErrorKind, MetadataNode, MetadataNodeKind, MetadataPath, RedisKeyInfo, RedisMetadataReader,
-    RelationalMetadataReader, Result, TableColumn, TableForeignKey, TableIndex, TableTrigger,
+    ErrorKind, MetadataNode, MetadataNodeKind, MetadataPath, ProtocolFamily, RedisKeyInfo,
+    RedisMetadataReader, RelationalMetadataReader, Result, TableColumn, TableForeignKey,
+    TableIndex, TableTrigger,
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 use tracing::instrument;
 
 #[derive(Clone)]
 pub struct MetadataService {
     connections: ConnectionManager,
-    relational_readers: Arc<BTreeMap<DataSourceKind, Arc<dyn RelationalMetadataReader>>>,
-    redis_readers: Arc<BTreeMap<DataSourceKind, Arc<dyn RedisMetadataReader>>>,
+    registry: DriverRegistry,
     _task_manager: TaskManager,
 }
 
@@ -28,34 +29,31 @@ impl MetadataService {
         redis_readers: Vec<Arc<dyn RedisMetadataReader>>,
         task_manager: TaskManager,
     ) -> Self {
+        let registry = DriverRegistry::default()
+            .override_relational_metadata(relational_readers)
+            .override_redis_metadata(redis_readers);
+        Self::with_registry(connections, registry, task_manager)
+    }
+
+    /// Preferred production constructor. The registry already covers every
+    /// [`DataSourceKind`] (brand-falling-back-to-protocol-family for metadata
+    /// readers); callers only need to pass a task manager.
+    pub fn with_registry(
+        connections: ConnectionManager,
+        registry: DriverRegistry,
+        task_manager: TaskManager,
+    ) -> Self {
         Self {
             connections,
-            relational_readers: Arc::new(
-                relational_readers
-                    .into_iter()
-                    .map(|reader| (reader.kind(), reader))
-                    .collect(),
-            ),
-            redis_readers: Arc::new(
-                redis_readers
-                    .into_iter()
-                    .map(|reader| (reader.kind(), reader))
-                    .collect(),
-            ),
+            registry,
             _task_manager: task_manager,
         }
     }
 
     pub fn with_default_readers(connections: ConnectionManager) -> Self {
-        Self::new(
+        Self::with_registry(
             connections,
-            vec![
-                Arc::new(db_mysql::MySqlMetadataReader::new()),
-                Arc::new(db_postgres::PostgresMetadataReader),
-                Arc::new(db_sqlite::SqliteMetadataReader),
-                Arc::new(db_duckdb::DuckDbMetadataReader),
-            ],
-            vec![Arc::new(db_redis::RedisMetadataReaderImpl)],
+            DriverRegistry::default(),
             TaskManager::default(),
         )
     }
@@ -67,6 +65,12 @@ impl MetadataService {
         task_manager: TaskManager,
     ) -> Self {
         Self::new(connections, relational_readers, redis_readers, task_manager)
+    }
+
+    /// Expose the underlying registry so the desktop shell can build sibling
+    /// services (QueryService, SessionManager, ...) from the same instance.
+    pub fn registry(&self) -> &DriverRegistry {
+        &self.registry
     }
 
     pub async fn root_nodes(&self) -> Result<Vec<MetadataNode>> {
@@ -98,6 +102,18 @@ impl MetadataService {
         match profile.kind {
             DataSourceKind::Redis => {
                 self.redis_children(&profile, password.as_deref(), path)
+                    .await
+            }
+            kind if kind.is_document() => {
+                self.document_children(&profile, password.as_deref(), path)
+                    .await
+            }
+            kind if kind.is_search() => {
+                self.search_children(&profile, password.as_deref(), path)
+                    .await
+            }
+            kind if kind.is_http_sql() => {
+                self.http_sql_children(&profile, password.as_deref(), path)
                     .await
             }
             kind if kind.is_relational() => {
@@ -437,7 +453,7 @@ impl MetadataService {
         let mut nodes = Vec::new();
         if schemas.is_empty() {
             append_schema_objects(reader, profile, password, path, None, false, &mut nodes).await?;
-        } else if matches!(profile.kind, DataSourceKind::PostgreSql)
+        } else if profile.kind.protocol_family() == ProtocolFamily::PostgreSql
             && schemas.iter().any(|schema| schema.name == "public")
         {
             append_schema_objects(
@@ -553,26 +569,138 @@ impl MetadataService {
         }
     }
 
+    async fn document_children(
+        &self,
+        profile: &db_common::ConnectionProfile,
+        password: Option<&str>,
+        path: &MetadataPath,
+    ) -> Result<Vec<MetadataNode>> {
+        let connector = self.registry.document(profile.kind)?;
+
+        match path.kind {
+            MetadataNodeKind::Connection => {
+                let databases = connector.list_databases(profile, password).await?;
+                Ok(databases
+                    .into_iter()
+                    .map(|database| {
+                        let path = MetadataPath::connection(profile.id)
+                            .child(MetadataNodeKind::Database)
+                            .with_database(database.name.clone());
+                        let mut node =
+                            MetadataNode::new(path, database.name, MetadataNodeKind::Database);
+                        if let Some(size_on_disk) = database.size_on_disk {
+                            node = node.detail(format!("{size_on_disk} bytes"));
+                        }
+                        node
+                    })
+                    .collect())
+            }
+            MetadataNodeKind::Database => Ok(vec![folder_node(
+                profile.id,
+                path,
+                MetadataNodeKind::TablesFolder,
+                "Collections",
+            )]),
+            MetadataNodeKind::TablesFolder => {
+                let database = required_database(profile.database.as_deref(), path)?;
+                let collections = connector
+                    .list_collections(profile, password, database)
+                    .await?;
+                Ok(collections
+                    .into_iter()
+                    .map(|collection| {
+                        let path = MetadataPath::connection(profile.id)
+                            .child(MetadataNodeKind::Table)
+                            .with_database(collection.database.clone())
+                            .with_object(collection.name.clone());
+                        let mut node = MetadataNode::new(
+                            path.clone(),
+                            collection.name,
+                            MetadataNodeKind::Table,
+                        )
+                        .leaf(true);
+                        if let Some(document_count) = collection.document_count {
+                            node = node.detail(format!("{document_count} docs"));
+                        }
+                        node
+                    })
+                    .collect())
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    async fn search_children(
+        &self,
+        profile: &db_common::ConnectionProfile,
+        password: Option<&str>,
+        path: &MetadataPath,
+    ) -> Result<Vec<MetadataNode>> {
+        let connector = self.registry.search(profile.kind)?;
+
+        match path.kind {
+            MetadataNodeKind::Connection => {
+                let indices = connector.list_indices(profile, password).await?;
+                Ok(indices
+                    .into_iter()
+                    .map(|index| {
+                        let path = MetadataPath::connection(profile.id)
+                            .child(MetadataNodeKind::Table)
+                            .with_object(index.name.clone());
+                        let mut node =
+                            MetadataNode::new(path, index.name, MetadataNodeKind::Table).leaf(true);
+                        if let Some(document_count) = index.document_count {
+                            node = node.detail(format!("{document_count} docs"));
+                        }
+                        if let Some(health) = index.health {
+                            node = node.detail(format!("{health}"));
+                        }
+                        node
+                    })
+                    .collect())
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    async fn http_sql_children(
+        &self,
+        profile: &db_common::ConnectionProfile,
+        password: Option<&str>,
+        path: &MetadataPath,
+    ) -> Result<Vec<MetadataNode>> {
+        let connector = self.registry.http_sql(profile.kind)?;
+
+        match path.kind {
+            MetadataNodeKind::Connection => {
+                let databases = connector.list_databases(profile, password).await?;
+                Ok(database_nodes(profile.id, databases))
+            }
+            MetadataNodeKind::Database => {
+                let database = required_database(profile.database.as_deref(), path)?;
+                let tables = connector
+                    .list_tables(profile, password, Some(database))
+                    .await?;
+                Ok(object_nodes(
+                    profile.id,
+                    path,
+                    tables,
+                    MetadataNodeKind::Table,
+                ))
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
     fn relational_reader(
         &self,
         kind: DataSourceKind,
     ) -> Result<&Arc<dyn RelationalMetadataReader>> {
-        let adapter_kind = match kind {
-            DataSourceKind::TiDb | DataSourceKind::OceanBase | DataSourceKind::Doris => {
-                DataSourceKind::MySql
-            }
-            DataSourceKind::TimescaleDb => DataSourceKind::PostgreSql,
-            other => other,
-        };
-        self.relational_readers
-            .get(&adapter_kind)
-            .ok_or_else(|| unsupported_kind(kind))
+        self.registry.relational_metadata(kind)
     }
 
     fn redis_reader(&self, kind: DataSourceKind) -> Result<&Arc<dyn RedisMetadataReader>> {
-        self.redis_readers
-            .get(&kind)
-            .ok_or_else(|| unsupported_kind(kind))
+        self.registry.redis_metadata(kind)
     }
 }
 
@@ -891,14 +1019,25 @@ fn required_object(path: &MetadataPath) -> Result<&str> {
         .ok_or_else(|| AppError::new(ErrorKind::Validation, "metadata object is required"))
 }
 
+fn required_database<'a>(
+    profile_database: Option<&'a str>,
+    path: &'a MetadataPath,
+) -> Result<&'a str> {
+    path.database
+        .as_deref()
+        .or(profile_database)
+        .filter(|database| !database.is_empty())
+        .ok_or_else(|| AppError::new(ErrorKind::Validation, "metadata database is required"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{connection::ConnectionManager, storage::MemoryConnectionProfileStore};
     use async_trait::async_trait;
-    use db_common::{ConnectionProfile, CredentialRef, PasswordUpdate};
+    use db_common::{ConnectionProfile, CredentialRef, DataSourceKind, PasswordUpdate};
     use secure_store::SecureStore;
-    use std::sync::Mutex;
+    use std::{collections::BTreeMap, sync::Mutex};
 
     #[tokio::test]
     async fn root_nodes_include_saved_connections() {

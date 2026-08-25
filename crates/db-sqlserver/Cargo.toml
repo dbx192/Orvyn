@@ -7,5 +7,7 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 db-common.workspace = true
-tokio.workspace = true
-
+futures-util = "0.3"
+tiberius.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }

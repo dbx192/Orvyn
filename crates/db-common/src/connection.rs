@@ -2,62 +2,319 @@ use crate::{validation, AppError, ConnectionId, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum DataSourceKind {
+    // MySQL protocol family
     MySql,
+    MariaDb,
+    TiDb,
     OceanBase,
     Doris,
-    TiDb,
+    SelectDb,
+    StarRocks,
+    GoldenDb,
+    // PostgreSQL protocol family
     PostgreSql,
     TimescaleDb,
-    SqlServer,
-    ClickHouse,
-    MongoDb,
+    Redshift,
+    CockroachDb,
+    OpenGauss,
+    GaussDb,
+    KwDb,
+    KingbaseEs,
+    Vastbase,
+    HighGo,
+    UxDb,
+    // Independent relational / analytical
     Sqlite,
     DuckDb,
+    ClickHouse,
+    SqlServer,
+    TDengine,
+    // Document / key-value / search
+    MongoDb,
     Redis,
+    Elasticsearch,
+    Easysearch,
+    Meilisearch,
+    ManticoreSearch,
+    CloudflareD1,
+    // Restricted (no reliable pure-Rust driver)
+    Access,
+    Oracle,
+    Dm,
+    XuguDb,
 }
 
 impl DataSourceKind {
+    /// All known kinds in a stable, family-grouped order. Used by registries
+    /// and the UI type picker.
+    pub const ALL: &'static [DataSourceKind] = &[
+        // MySQL family
+        Self::MySql,
+        Self::MariaDb,
+        Self::TiDb,
+        Self::OceanBase,
+        Self::Doris,
+        Self::SelectDb,
+        Self::StarRocks,
+        Self::GoldenDb,
+        // PostgreSQL family
+        Self::PostgreSql,
+        Self::TimescaleDb,
+        Self::Redshift,
+        Self::CockroachDb,
+        Self::OpenGauss,
+        Self::GaussDb,
+        Self::KwDb,
+        Self::KingbaseEs,
+        Self::Vastbase,
+        Self::HighGo,
+        Self::UxDb,
+        // Independent relational / analytical
+        Self::Sqlite,
+        Self::DuckDb,
+        Self::ClickHouse,
+        Self::SqlServer,
+        Self::TDengine,
+        // Document / key-value / search
+        Self::MongoDb,
+        Self::Redis,
+        Self::Elasticsearch,
+        Self::Easysearch,
+        Self::Meilisearch,
+        Self::ManticoreSearch,
+        Self::CloudflareD1,
+        // Restricted
+        Self::Access,
+        Self::Oracle,
+        Self::Dm,
+        Self::XuguDb,
+    ];
+
     pub const fn default_port(self) -> Option<u16> {
         match self {
-            Self::MySql => Some(3306),
-            Self::OceanBase => Some(2881),
-            Self::Doris => Some(9030),
+            // MySQL family
+            Self::MySql | Self::MariaDb => Some(3306),
             Self::TiDb => Some(4000),
-            Self::PostgreSql => Some(5432),
-            Self::TimescaleDb => Some(5432),
+            Self::OceanBase | Self::GoldenDb => Some(2883),
+            Self::Doris | Self::SelectDb | Self::StarRocks => Some(9030),
+            // PostgreSQL family
+            Self::PostgreSql
+            | Self::TimescaleDb
+            | Self::Redshift
+            | Self::OpenGauss
+            | Self::GaussDb
+            | Self::KwDb
+            | Self::Vastbase
+            | Self::HighGo
+            | Self::UxDb => Some(5432),
+            Self::CockroachDb => Some(26257),
+            Self::KingbaseEs => Some(54321),
+            // Independent relational / analytical
             Self::SqlServer => Some(1433),
             Self::ClickHouse => Some(8123),
+            Self::TDengine => Some(6041),
+            Self::Oracle => Some(1521),
+            Self::Dm => Some(5236),
+            Self::XuguDb => Some(5136),
+            // Document / key-value / search
             Self::MongoDb => Some(27017),
             Self::Redis => Some(6379),
-            Self::Sqlite | Self::DuckDb => None,
+            Self::Elasticsearch | Self::Easysearch => Some(9200),
+            Self::Meilisearch => Some(7700),
+            Self::ManticoreSearch => Some(9306),
+            // File-based or HTTP-only (no TCP port)
+            Self::Sqlite | Self::DuckDb | Self::Access | Self::CloudflareD1 => None,
         }
     }
 
     pub const fn is_file_based(self) -> bool {
-        matches!(self, Self::Sqlite | Self::DuckDb)
+        matches!(self, Self::Sqlite | Self::DuckDb | Self::Access)
     }
 
+    pub const fn is_document(self) -> bool {
+        matches!(self, Self::MongoDb)
+    }
+
+    pub const fn is_kv(self) -> bool {
+        matches!(self, Self::Redis)
+    }
+
+    pub const fn is_search(self) -> bool {
+        matches!(
+            self,
+            Self::Elasticsearch | Self::Easysearch | Self::Meilisearch | Self::ManticoreSearch
+        )
+    }
+
+    pub const fn is_http_sql(self) -> bool {
+        matches!(self, Self::CloudflareD1)
+    }
+
+    pub const fn is_restricted(self) -> bool {
+        matches!(self, Self::Access | Self::Oracle | Self::Dm | Self::XuguDb)
+    }
+
+    /// Relational SQL databases with a query editor. Excludes document,
+    /// key-value, search, HTTP-SQL and restricted types.
     pub const fn is_relational(self) -> bool {
-        !matches!(self, Self::Redis | Self::MongoDb)
+        !(self.is_document()
+            || self.is_kv()
+            || self.is_search()
+            || self.is_http_sql()
+            || self.is_restricted())
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            // MySQL family
             Self::MySql => "mysql",
+            Self::MariaDb => "mariadb",
+            Self::TiDb => "tidb",
             Self::OceanBase => "oceanbase",
             Self::Doris => "doris",
-            Self::TiDb => "tidb",
+            Self::SelectDb => "selectdb",
+            Self::StarRocks => "starrocks",
+            Self::GoldenDb => "goldendb",
+            // PostgreSQL family
             Self::PostgreSql => "postgresql",
             Self::TimescaleDb => "timescaledb",
-            Self::SqlServer => "sqlserver",
-            Self::ClickHouse => "clickhouse",
-            Self::MongoDb => "mongodb",
+            Self::Redshift => "redshift",
+            Self::CockroachDb => "cockroachdb",
+            Self::OpenGauss => "opengauss",
+            Self::GaussDb => "gaussdb",
+            Self::KwDb => "kwdb",
+            Self::KingbaseEs => "kingbasees",
+            Self::Vastbase => "vastbase",
+            Self::HighGo => "highgo",
+            Self::UxDb => "uxdb",
+            // Independent relational / analytical
             Self::Sqlite => "sqlite",
             Self::DuckDb => "duckdb",
+            Self::ClickHouse => "clickhouse",
+            Self::SqlServer => "sqlserver",
+            Self::TDengine => "tdengine",
+            // Document / key-value / search
+            Self::MongoDb => "mongodb",
             Self::Redis => "redis",
+            Self::Elasticsearch => "elasticsearch",
+            Self::Easysearch => "easysearch",
+            Self::Meilisearch => "meilisearch",
+            Self::ManticoreSearch => "manticoresearch",
+            Self::CloudflareD1 => "cloudflare_d1",
+            // Restricted
+            Self::Access => "access",
+            Self::Oracle => "oracle",
+            Self::Dm => "dm",
+            Self::XuguDb => "xugudb",
         }
+    }
+
+    /// Human-friendly display label (title-cased brand name).
+    pub const fn display_label(self) -> &'static str {
+        match self {
+            Self::MySql => "MySQL",
+            Self::MariaDb => "MariaDB",
+            Self::TiDb => "TiDB",
+            Self::OceanBase => "OceanBase",
+            Self::Doris => "Apache Doris",
+            Self::SelectDb => "SelectDB",
+            Self::StarRocks => "StarRocks",
+            Self::GoldenDb => "GoldenDB",
+            Self::PostgreSql => "PostgreSQL",
+            Self::TimescaleDb => "TimescaleDB",
+            Self::Redshift => "Redshift",
+            Self::CockroachDb => "CockroachDB",
+            Self::OpenGauss => "openGauss",
+            Self::GaussDb => "GaussDB",
+            Self::KwDb => "KWDB",
+            Self::KingbaseEs => "KingbaseES",
+            Self::Vastbase => "Vastbase",
+            Self::HighGo => "HighGo",
+            Self::UxDb => "UXDB",
+            Self::Sqlite => "SQLite",
+            Self::DuckDb => "DuckDB",
+            Self::ClickHouse => "ClickHouse",
+            Self::SqlServer => "SQL Server",
+            Self::TDengine => "TDengine",
+            Self::MongoDb => "MongoDB",
+            Self::Redis => "Redis",
+            Self::Elasticsearch => "Elasticsearch",
+            Self::Easysearch => "Easysearch",
+            Self::Meilisearch => "Meilisearch",
+            Self::ManticoreSearch => "Manticore Search",
+            Self::CloudflareD1 => "Cloudflare D1",
+            Self::Access => "Microsoft Access",
+            Self::Oracle => "Oracle",
+            Self::Dm => "DM (达梦)",
+            Self::XuguDb => "XuguDB (虚谷)",
+        }
+    }
+
+    /// Parse a kind from its serialized form. Accepts both the variant name
+    /// (e.g. `"MySql"`, the historical on-disk format) and the canonical
+    /// `as_str()` value (e.g. `"mysql"`). Returns `None` for unknown strings.
+    pub fn from_serialized(value: &str) -> Option<Self> {
+        // First try the canonical as_str mapping; then fall back to the
+        // PascalCase variant names used by serde's default derive.
+        for &kind in Self::ALL {
+            if kind.as_str() == value {
+                return Some(kind);
+            }
+        }
+        match value {
+            "MySql" => Some(Self::MySql),
+            "MariaDb" => Some(Self::MariaDb),
+            "TiDb" => Some(Self::TiDb),
+            "OceanBase" => Some(Self::OceanBase),
+            "Doris" => Some(Self::Doris),
+            "SelectDb" => Some(Self::SelectDb),
+            "StarRocks" => Some(Self::StarRocks),
+            "GoldenDb" => Some(Self::GoldenDb),
+            "PostgreSql" => Some(Self::PostgreSql),
+            "TimescaleDb" => Some(Self::TimescaleDb),
+            "Redshift" => Some(Self::Redshift),
+            "CockroachDb" => Some(Self::CockroachDb),
+            "OpenGauss" => Some(Self::OpenGauss),
+            "GaussDb" => Some(Self::GaussDb),
+            "KwDb" => Some(Self::KwDb),
+            "KingbaseEs" => Some(Self::KingbaseEs),
+            "Vastbase" => Some(Self::Vastbase),
+            "HighGo" => Some(Self::HighGo),
+            "UxDb" => Some(Self::UxDb),
+            "Sqlite" => Some(Self::Sqlite),
+            "DuckDb" => Some(Self::DuckDb),
+            "ClickHouse" => Some(Self::ClickHouse),
+            "SqlServer" => Some(Self::SqlServer),
+            "TDengine" => Some(Self::TDengine),
+            "MongoDb" => Some(Self::MongoDb),
+            "Redis" => Some(Self::Redis),
+            "Elasticsearch" => Some(Self::Elasticsearch),
+            "Easysearch" => Some(Self::Easysearch),
+            "Meilisearch" => Some(Self::Meilisearch),
+            "ManticoreSearch" => Some(Self::ManticoreSearch),
+            "CloudflareD1" => Some(Self::CloudflareD1),
+            "Access" => Some(Self::Access),
+            "Oracle" => Some(Self::Oracle),
+            "Dm" => Some(Self::Dm),
+            "XuguDb" => Some(Self::XuguDb),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DataSourceKind {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        DataSourceKind::from_serialized(&value).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown database kind '{value}'; supported kinds: mysql, mariadb, tidb, oceanbase, doris, selectdb, starrocks, goldendb, postgresql, timescaledb, redshift, cockroachdb, opengauss, gaussdb, kwdb, kingbasees, vastbase, highgo, uxdb, sqlite, duckdb, clickhouse, sqlserver, tdengine, mongodb, redis, elasticsearch, easysearch, meilisearch, manticoresearch, cloudflare_d1, access, oracle, dm, xugudb"
+            ))
+        })
     }
 }
 
@@ -135,21 +392,38 @@ impl ConnectionProfile {
             return Ok(());
         }
 
+        // Cloudflare D1 reaches the Cloudflare HTTP API using an account id,
+        // database id and token; it has no host/port.
+        if self.kind.is_http_sql() {
+            let missing = match self.kind {
+                DataSourceKind::CloudflareD1 => {
+                    let mut missing = Vec::new();
+                    if self.extra_param("cf_account").is_none() {
+                        missing.push("cf_account");
+                    }
+                    if self.extra_param("cf_database_id").is_none() {
+                        missing.push("cf_database_id");
+                    }
+                    missing
+                }
+                _ => Vec::new(),
+            };
+            if !missing.is_empty() {
+                return Err(AppError::validation(format!(
+                    "{} requires extra params: {}",
+                    self.kind.display_label(),
+                    missing.join(", ")
+                )));
+            }
+            return Ok(());
+        }
+
         validation::ensure_not_blank("host", self.host.as_deref().unwrap_or_default())?;
         validation::ensure_port(self.port.unwrap_or_default())?;
 
-        if matches!(
-            self.kind,
-            DataSourceKind::MySql
-                | DataSourceKind::OceanBase
-                | DataSourceKind::Doris
-                | DataSourceKind::TiDb
-                | DataSourceKind::PostgreSql
-                | DataSourceKind::TimescaleDb
-                | DataSourceKind::SqlServer
-                | DataSourceKind::ClickHouse
-                | DataSourceKind::MongoDb
-        ) {
+        // Relational TCP and document stores require a username. Search,
+        // key-value and HTTP-SQL services authenticate via tokens/API keys.
+        if (self.kind.is_relational() || self.kind.is_document()) && !self.kind.is_file_based() {
             validation::ensure_not_blank("username", self.username.as_deref().unwrap_or_default())?;
         }
 
@@ -178,6 +452,17 @@ impl ConnectionProfile {
 
     pub fn connection_label(&self) -> String {
         format!("{}:{}", self.kind.as_str(), self.name)
+    }
+
+    /// Read a brand-specific extra parameter (TLS, HTTP path, Cloudflare
+    /// account/token, MongoDB auth source, ClickHouse protocol, OceanBase
+    /// mode, ES API keys, ...).
+    pub fn extra_param(&self, key: &str) -> Option<&str> {
+        self.extra_params.get(key).map(String::as_str)
+    }
+
+    pub fn set_extra_param(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.extra_params.insert(key.into(), value.into());
     }
 }
 
@@ -373,5 +658,63 @@ mod tests {
         assert_eq!(DataSourceKind::TimescaleDb.default_port(), Some(5432));
         assert!(!DataSourceKind::MongoDb.is_relational());
         assert!(DataSourceKind::TiDb.is_relational());
+    }
+
+    #[test]
+    fn deserializes_legacy_variant_name_and_as_str() {
+        // Historical on-disk format stored the PascalCase variant name.
+        assert_eq!(
+            DataSourceKind::from_serialized("MySql"),
+            Some(DataSourceKind::MySql)
+        );
+        assert_eq!(
+            DataSourceKind::from_serialized("TiDb"),
+            Some(DataSourceKind::TiDb)
+        );
+        // Canonical as_str form is also accepted.
+        assert_eq!(
+            DataSourceKind::from_serialized("redis"),
+            Some(DataSourceKind::Redis)
+        );
+        assert_eq!(
+            DataSourceKind::from_serialized("cloudflare_d1"),
+            Some(DataSourceKind::CloudflareD1)
+        );
+    }
+
+    #[test]
+    fn unknown_kind_is_none() {
+        assert!(DataSourceKind::from_serialized("Cassandra").is_none());
+        assert!(DataSourceKind::from_serialized("").is_none());
+    }
+
+    #[test]
+    fn serde_round_trips_all_kinds() {
+        for &kind in DataSourceKind::ALL {
+            let json = serde_json::to_string(&kind).expect("serialize");
+            let back: DataSourceKind = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(kind, back, "round-trip failed for {kind:?}: {json}");
+        }
+    }
+
+    #[test]
+    fn serde_rejects_unknown_kind_with_message() {
+        let result = serde_json::from_str::<DataSourceKind>("\"Cassandra\"");
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string().to_lowercase();
+        assert!(message.contains("unknown database kind"), "{message}");
+        assert!(message.contains("cassandra"), "{message}");
+    }
+
+    #[test]
+    fn cloudflare_d1_requires_account_and_database_id() {
+        let profile = ConnectionProfile::builder(DataSourceKind::CloudflareD1, "d1").build();
+        assert!(profile.is_err());
+
+        let profile = ConnectionProfile::builder(DataSourceKind::CloudflareD1, "d1")
+            .extra_param("cf_account", "abc")
+            .extra_param("cf_database_id", "def")
+            .build();
+        assert!(profile.is_ok());
     }
 }

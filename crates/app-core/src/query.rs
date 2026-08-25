@@ -4,6 +4,7 @@
 //! execution selection, cancellation, history, favorites, and pool lifecycle.
 
 use crate::connection::ConnectionManager;
+use crate::registry::DriverRegistry;
 use crate::storage::{FavoriteQueryStore, QueryHistoryStore};
 use crate::task::TaskManager;
 use db_common::{
@@ -28,7 +29,7 @@ pub const DEFAULT_HISTORY_LIMIT: usize = 500;
 #[derive(Clone)]
 pub struct QueryService {
     connections: ConnectionManager,
-    executors: Arc<BTreeMap<DataSourceKind, Arc<dyn RelationalQueryExecutor>>>,
+    registry: DriverRegistry,
     pool_config: ConnectionPoolConfig,
     _task_manager: TaskManager,
     history_store: Option<Arc<dyn QueryHistoryStore>>,
@@ -45,14 +46,31 @@ impl QueryService {
         history_store: Option<Arc<dyn QueryHistoryStore>>,
         favorite_store: Option<Arc<dyn FavoriteQueryStore>>,
     ) -> Self {
+        let registry = DriverRegistry::default().override_relational_query(executors);
+        Self::with_registry(
+            connections,
+            registry,
+            pool_config,
+            task_manager,
+            history_store,
+            favorite_store,
+        )
+    }
+
+    /// Preferred production constructor: the supplied registry already covers
+    /// every brand via protocol-family fallback; callers only need to wire up
+    /// persistence stores.
+    pub fn with_registry(
+        connections: ConnectionManager,
+        registry: DriverRegistry,
+        pool_config: ConnectionPoolConfig,
+        task_manager: TaskManager,
+        history_store: Option<Arc<dyn QueryHistoryStore>>,
+        favorite_store: Option<Arc<dyn FavoriteQueryStore>>,
+    ) -> Self {
         let service = Self {
             connections,
-            executors: Arc::new(
-                executors
-                    .into_iter()
-                    .map(|executor| (executor.kind(), executor))
-                    .collect(),
-            ),
+            registry,
             pool_config,
             _task_manager: task_manager,
             history_store,
@@ -64,14 +82,9 @@ impl QueryService {
     }
 
     pub fn with_default_executors(connections: ConnectionManager) -> Self {
-        Self::new(
+        Self::with_registry(
             connections,
-            vec![
-                Arc::new(db_mysql::MySqlQueryExecutor::new()),
-                Arc::new(db_postgres::PostgresQueryExecutor::new()),
-                Arc::new(db_sqlite::SqliteQueryExecutor::new()),
-                Arc::new(db_duckdb::DuckDbQueryExecutor::new()),
-            ],
+            DriverRegistry::default(),
             ConnectionPoolConfig::default(),
             TaskManager::default(),
             None,
@@ -714,17 +727,7 @@ impl QueryService {
     }
 
     fn executor(&self, kind: DataSourceKind) -> Result<Arc<dyn RelationalQueryExecutor>> {
-        let adapter_kind = match kind {
-            DataSourceKind::TiDb | DataSourceKind::OceanBase | DataSourceKind::Doris => {
-                DataSourceKind::MySql
-            }
-            DataSourceKind::TimescaleDb => DataSourceKind::PostgreSql,
-            other => other,
-        };
-        self.executors
-            .get(&adapter_kind)
-            .cloned()
-            .ok_or_else(|| unsupported_kind(kind))
+        self.registry.relational_query(kind).cloned()
     }
 
     async fn record_history(

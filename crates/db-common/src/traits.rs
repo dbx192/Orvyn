@@ -421,3 +421,150 @@ pub trait RedisMetadataReader: Send + Sync {
         limit: u32,
     ) -> Result<RedisKeyScan>;
 }
+
+// ---- Document / search / HTTP-SQL connectors (Phases 4-5) ----
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentDatabase {
+    pub name: String,
+    pub size_on_disk: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentCollection {
+    pub name: String,
+    pub database: String,
+    pub document_count: Option<u64>,
+}
+
+/// Document store connector (MongoDB). Implemented in Phase 4.
+#[async_trait]
+pub trait DocumentConnector: Send + Sync {
+    fn kind(&self) -> DataSourceKind;
+
+    async fn test_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<()>;
+
+    async fn list_databases(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<Vec<DocumentDatabase>>;
+
+    async fn list_collections(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: &str,
+    ) -> Result<Vec<DocumentCollection>>;
+
+    async fn find_documents(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: &str,
+        collection: &str,
+        filter: Option<&serde_json::Value>,
+        limit: u32,
+    ) -> Result<Vec<serde_json::Value>>;
+
+    async fn delete_document(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: &str,
+        collection: &str,
+        document_id: &serde_json::Value,
+    ) -> Result<u64>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchIndex {
+    pub name: String,
+    pub document_count: Option<u64>,
+    pub health: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub total: Option<u64>,
+    pub documents: Vec<serde_json::Value>,
+}
+
+/// Search-service connector (Elasticsearch / Easysearch / Meilisearch /
+/// Manticore). Implemented in Phase 5.
+#[async_trait]
+pub trait SearchConnector: Send + Sync {
+    fn kind(&self) -> DataSourceKind;
+
+    async fn test_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<()>;
+
+    async fn list_indices(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<Vec<SearchIndex>>;
+
+    async fn get_mapping(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        index: &str,
+    ) -> Result<serde_json::Value>;
+
+    async fn search(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        index: &str,
+        query: &serde_json::Value,
+        limit: u32,
+    ) -> Result<SearchResult>;
+}
+
+/// HTTP-based SQL connector (Cloudflare D1). Implemented in Phase 5.
+#[async_trait]
+pub trait HttpSqlConnector: Send + Sync {
+    fn kind(&self) -> DataSourceKind;
+
+    async fn test_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<()>;
+
+    async fn execute(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        sql: &str,
+    ) -> Result<Vec<QueryResult>>;
+
+    async fn list_databases(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>>;
+
+    async fn list_tables(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>>;
+
+    async fn list_columns(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableColumn>>;
+}

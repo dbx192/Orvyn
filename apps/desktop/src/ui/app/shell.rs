@@ -17,6 +17,10 @@ impl eframe::App for DesktopApp {
             || self.pending_table_drop.is_some()
             || self.pending_clear.is_some()
             || self.pending_alter_table.is_some()
+            || self
+                .search_browser
+                .as_ref()
+                .is_some_and(|browser| browser.is_busy())
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -164,6 +168,14 @@ impl DesktopApp {
                     .unwrap_or_else(|| "Key Browser".to_string());
                 self.workspace_tab(ui, ActivePanel::RedisBrowser, &label);
             }
+            if matches!(self.active_panel, ActivePanel::SearchBrowser) {
+                let label = self
+                    .search_browser
+                    .as_ref()
+                    .map(|browser| browser.title())
+                    .unwrap_or_else(|| "Browse".to_string());
+                self.workspace_tab(ui, ActivePanel::SearchBrowser, &label);
+            }
         });
     }
 
@@ -240,6 +252,11 @@ impl DesktopApp {
             .show(ctx, |ui| {
                 if matches!(self.active_panel, ActivePanel::RedisBrowser)
                     && self.redis_browser.is_none()
+                {
+                    self.active_panel = ActivePanel::QueryEditor;
+                }
+                if matches!(self.active_panel, ActivePanel::SearchBrowser)
+                    && self.search_browser.is_none()
                 {
                     self.active_panel = ActivePanel::QueryEditor;
                 }
@@ -353,6 +370,18 @@ impl DesktopApp {
                     ActivePanel::RedisBrowser => {
                         if let Some(redis_browser) = &mut self.redis_browser {
                             redis_browser.ui(ctx, ui);
+                        } else {
+                            self.active_panel = ActivePanel::QueryEditor;
+                        }
+                    }
+                    ActivePanel::SearchBrowser => {
+                        if let Some(browser) = &mut self.search_browser {
+                            let status = browser.ui(ctx, ui);
+                            if let Some(message) = status {
+                                if !message.is_empty() {
+                                    self.state.set_status(message);
+                                }
+                            }
                         } else {
                             self.active_panel = ActivePanel::QueryEditor;
                         }

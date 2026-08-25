@@ -1,6 +1,9 @@
 //! MySQL adapter crate.
 
+mod brand;
 mod doris;
+
+pub use brand::MysqlBrand;
 
 use async_trait::async_trait;
 use db_common::{
@@ -24,73 +27,14 @@ use tokio::sync::Mutex;
 
 pub const ADAPTER_NAME: &str = "mysql";
 
+/// Resolves the MySQL-family brand for a profile. Returns `None` for non-MySQL
+/// kinds (which should not reach this adapter at all).
+fn brand_for(profile: &ConnectionProfile) -> Option<MysqlBrand> {
+    MysqlBrand::of(profile.kind)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MySqlConnectionTester;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TiDbConnectionTester;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DorisConnectionTester;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OceanBaseConnectionTester;
-
-#[async_trait]
-impl ConnectionTester for OceanBaseConnectionTester {
-    fn kind(&self) -> DataSourceKind {
-        DataSourceKind::OceanBase
-    }
-
-    async fn test_connection(
-        &self,
-        profile: &ConnectionProfile,
-        password: Option<&str>,
-    ) -> Result<ConnectionTestReport> {
-        let mut report = MySqlConnectionTester
-            .test_connection(profile, password)
-            .await?;
-        report.kind = DataSourceKind::OceanBase;
-        Ok(report)
-    }
-}
-
-#[async_trait]
-impl ConnectionTester for DorisConnectionTester {
-    fn kind(&self) -> DataSourceKind {
-        DataSourceKind::Doris
-    }
-
-    async fn test_connection(
-        &self,
-        profile: &ConnectionProfile,
-        password: Option<&str>,
-    ) -> Result<ConnectionTestReport> {
-        let mut report = MySqlConnectionTester
-            .test_connection(profile, password)
-            .await?;
-        report.kind = DataSourceKind::Doris;
-        Ok(report)
-    }
-}
-
-#[async_trait]
-impl ConnectionTester for TiDbConnectionTester {
-    fn kind(&self) -> DataSourceKind {
-        DataSourceKind::TiDb
-    }
-    async fn test_connection(
-        &self,
-        profile: &ConnectionProfile,
-        password: Option<&str>,
-    ) -> Result<ConnectionTestReport> {
-        let mut report = MySqlConnectionTester
-            .test_connection(profile, password)
-            .await?;
-        report.kind = DataSourceKind::TiDb;
-        Ok(report)
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct MySqlMetadataReader {
@@ -163,10 +107,11 @@ impl ConnectionTester for MySqlConnectionTester {
 
         let started_at = Instant::now();
         let pool = mysql_pool(profile, password, ConnectionPoolConfig::default()).await?;
-        let version: Option<String> = if profile.kind == DataSourceKind::Doris {
-            // Doris does not implement the MySQL prepared-statement command.
-            // `raw_sql` uses the text protocol and is sufficient here because
-            // this health check has no parameters.
+        let brand = brand_for(profile);
+        let version: Option<String> = if brand.is_some_and(MysqlBrand::uses_text_protocol) {
+            // Doris-family servers do not implement the MySQL prepared-statement
+            // command. `raw_sql` uses the text protocol and is sufficient here
+            // because this health check has no parameters.
             sqlx::raw_sql("SELECT VERSION()")
                 .fetch_one(&pool)
                 .await
@@ -257,7 +202,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
-        if profile.kind == DataSourceKind::Doris {
+        if brand_for(profile).is_some_and(|b| !b.supports_information_schema()) {
             let sql = format!("SHOW TABLES FROM `{}`", escape_mysql_identifier(database));
             let rows = sqlx::raw_sql(&sql)
                 .fetch_all(&pool)
@@ -292,7 +237,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
-        if profile.kind == DataSourceKind::Doris {
+        if brand_for(profile).is_some_and(|b| !b.supports_information_schema()) {
             let sql = format!(
                 "SHOW FULL TABLES FROM `{}` WHERE Table_type = 'VIEW'",
                 escape_mysql_identifier(database)
@@ -331,7 +276,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
-        let rows = if profile.kind == DataSourceKind::Doris {
+        let rows = if brand_for(profile).is_some_and(|b| !b.supports_information_schema()) {
             let sql = format!(
                 "SHOW COLUMNS FROM `{}`.`{}`",
                 escape_mysql_identifier(database),
@@ -356,15 +301,17 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         };
 
         let mut columns = Vec::new();
+        let is_doris_family = brand_for(profile).is_some_and(|b| b.is_doris_family());
         for row in rows {
             let (name, database_type, nullable, default_value, primary_key, comment) =
-                if profile.kind == DataSourceKind::Doris {
+                if is_doris_family {
                     let key = mysql_string_at(&row, 3)?;
                     (
                         mysql_string_at(&row, 0)?,
                         mysql_string_at(&row, 1)?,
                         mysql_string_at(&row, 2)?.eq_ignore_ascii_case("YES"),
-                        mysql_optional_string_at(&row, 5)?,
+                        // SHOW COLUMNS returns Field, Type, Null, Key, Default, Extra.
+                        mysql_optional_string_at(&row, 4)?,
                         key.eq_ignore_ascii_case("PRI"),
                         None,
                     )
@@ -406,7 +353,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
-        let rows = if profile.kind == DataSourceKind::Doris {
+        let rows = if brand_for(profile).is_some_and(|b| !b.supports_information_schema()) {
             let sql = format!(
                 "SHOW INDEX FROM `{}`.`{}`",
                 escape_mysql_identifier(database),
@@ -430,7 +377,11 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             .map_err(mysql_query_error)?
         };
 
-        group_mysql_indexes(rows)
+        if brand_for(profile).is_some_and(|b| b.is_doris_family()) {
+            doris::group_indexes(rows)
+        } else {
+            group_mysql_indexes(rows)
+        }
     }
 
     async fn list_foreign_keys(
@@ -441,6 +392,10 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         _schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableForeignKey>> {
+        if brand_for(profile).is_some_and(|b| !b.supports_routines_metadata()) {
+            // Doris-family servers do not expose MySQL referential constraints.
+            return Ok(Vec::new());
+        }
         let database = database.or(profile.database.as_deref()).ok_or_else(|| {
             AppError::new(
                 ErrorKind::Validation,
@@ -476,6 +431,9 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         _schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableTrigger>> {
+        if brand_for(profile).is_some_and(|b| !b.supports_routines_metadata()) {
+            return Ok(Vec::new());
+        }
         let database = database.or(profile.database.as_deref()).ok_or_else(|| {
             AppError::new(
                 ErrorKind::Validation,
@@ -514,6 +472,9 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         database: Option<&str>,
         _schema: Option<&str>,
     ) -> Result<Vec<DatabaseFunction>> {
+        if brand_for(profile).is_some_and(|b| !b.supports_routines_metadata()) {
+            return Ok(Vec::new());
+        }
         let database = database.or(profile.database.as_deref()).ok_or_else(|| {
             AppError::new(
                 ErrorKind::Validation,
@@ -560,10 +521,17 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         })?;
         let pool = self.pool_for(profile, password).await?;
         let sql = format!("SHOW CREATE TABLE `{}`.`{}`", database, table);
-        let row = sqlx::query(&sql)
-            .fetch_one(&pool)
-            .await
-            .map_err(mysql_query_error)?;
+        let row = if brand_for(profile).is_some_and(MysqlBrand::uses_text_protocol) {
+            sqlx::raw_sql(&sql)
+                .fetch_one(&pool)
+                .await
+                .map_err(mysql_query_error)?
+        } else {
+            sqlx::query(&sql)
+                .fetch_one(&pool)
+                .await
+                .map_err(mysql_query_error)?
+        };
 
         mysql_string_at(&row, 1)
     }
@@ -583,7 +551,7 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         pool_config: ConnectionPoolConfig,
     ) -> Result<Vec<QueryResult>> {
         let pool = self.pool_for(profile, password, pool_config).await?;
-        if profile.kind == DataSourceKind::Doris {
+        if brand_for(profile).is_some_and(MysqlBrand::uses_text_protocol) {
             return doris::execute(pool, statements.to_vec()).await;
         }
         let mut conn = pool.acquire().await.map_err(mysql_query_error)?;
@@ -644,6 +612,11 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
     ) -> Result<()> {
         let pool = self.pool_for(profile, password, pool_config).await?;
         let mut conn = pool.acquire().await.map_err(mysql_query_error)?;
+        if brand_for(profile).is_some_and(|b| !b.supports_transactions()) {
+            return Err(AppError::unsupported(
+                "transactions are not supported on this MySQL-family brand",
+            ));
+        }
         sqlx::query("BEGIN")
             .execute(&mut *conn)
             .await
@@ -776,21 +749,34 @@ async fn mysql_pool(
     config: ConnectionPoolConfig,
 ) -> Result<MySqlPool> {
     profile.validate()?;
+    // Reject brands that cannot be reached over the MySQL wire protocol
+    // before we even attempt to dial the server. OceanBase in Oracle mode is
+    // the main case: it speaks Oracle's proprietary protocol, so the MySQL
+    // driver would just hang or fail with a confusing handshake error.
+    if let Some(brand) = brand_for(profile) {
+        if !brand.is_connectable(profile) {
+            return Err(AppError::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "{} in this mode is not reachable via the MySQL protocol; switch the brand mode or use a dedicated Oracle driver",
+                    profile.kind.display_label()
+                ),
+            ));
+        }
+    }
     let url = mysql_url(profile, password)?;
-    // Doris speaks the MySQL wire protocol, but does not accept SQLx's
-    // default `SET sql_mode=(SELECT CONCAT(...))` session initialization.
-    // That expression is valid in MySQL but Doris requires SET values to be
-    // constants. Keep the MySQL defaults for MySQL-compatible servers and
-    // disable only the incompatible sql_mode additions for Doris.
+    // Doris-family servers speak the MySQL wire protocol but reject SQLx's
+    // default `SET sql_mode=(SELECT CONCAT(...))` session initialization:
+    // they require SET values to be literals. Apply the Doris-specific
+    // connect-options tweak to every Doris-family brand and keep the default
+    // SQLx options for the rest.
     let mut connect_options: MySqlConnectOptions =
         url.parse::<MySqlConnectOptions>().map_err(|error| {
             AppError::new(ErrorKind::Connection, "invalid MySQL connection URL")
                 .with_detail(error.to_string())
         })?;
-    if profile.kind == DataSourceKind::Doris {
-        connect_options = connect_options
-            .pipes_as_concat(false)
-            .no_engine_substitution(false);
+    if brand_for(profile).is_some_and(|b| b.is_doris_family()) {
+        connect_options = doris::configure_connect_options(connect_options);
     }
 
     MySqlPoolOptions::new()
@@ -857,7 +843,7 @@ fn escape_mysql_identifier(value: &str) -> String {
     value.replace('`', "``")
 }
 
-fn mysql_string_at(row: &MySqlRow, index: usize) -> Result<String> {
+pub(crate) fn mysql_string_at(row: &MySqlRow, index: usize) -> Result<String> {
     mysql_optional_string_at(row, index)?.ok_or_else(|| {
         AppError::new(ErrorKind::Query, "failed to query MySQL metadata")
             .with_detail(format!("column {index} was NULL"))
@@ -1123,5 +1109,43 @@ mod tests {
     fn mysql_temporal_types_are_classified_as_datetime() {
         assert_eq!(mysql_logical_type("TIMESTAMP"), LogicalType::DateTime);
         assert_eq!(mysql_logical_type("DATETIME"), LogicalType::DateTime);
+    }
+
+    #[tokio::test]
+    async fn oceanbase_oracle_mode_is_rejected_before_dial() {
+        let profile = ConnectionProfile::builder(DataSourceKind::OceanBase, "ob")
+            .host("localhost")
+            .port(2883)
+            .username("u")
+            .extra_param("ob_mode", "oracle")
+            .build()
+            .expect("profile");
+
+        let error = mysql_pool(&profile, None, ConnectionPoolConfig::default())
+            .await
+            .expect_err("oracle mode should be rejected");
+        assert_eq!(error.kind, ErrorKind::Unsupported, "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn oceanbase_mysql_mode_attempts_connection() {
+        let profile = ConnectionProfile::builder(DataSourceKind::OceanBase, "ob")
+            .host("localhost")
+            .port(2883)
+            .username("u")
+            .extra_param("ob_mode", "mysql")
+            .build()
+            .expect("profile");
+
+        let result = mysql_pool(&profile, None, ConnectionPoolConfig::default()).await;
+        // We don't have a live server, but the brand check must pass; the
+        // failure (if any) should come from the TCP layer, not Unsupported.
+        if let Err(error) = result {
+            assert_ne!(
+                error.kind,
+                ErrorKind::Unsupported,
+                "mysql mode must not be rejected as unsupported: {error:?}"
+            );
+        }
     }
 }

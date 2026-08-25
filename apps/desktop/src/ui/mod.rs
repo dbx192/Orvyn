@@ -10,6 +10,7 @@ pub mod query_editor;
 pub mod redis_browser;
 pub mod result_grid;
 pub mod samples;
+pub mod search_browser;
 pub mod shortcuts;
 pub mod sql_formatter;
 pub mod state;

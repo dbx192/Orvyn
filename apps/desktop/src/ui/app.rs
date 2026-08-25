@@ -19,6 +19,7 @@ use crate::ui::{
     object_tree::ObjectTree,
     query_editor::QueryEditor,
     redis_browser::RedisBrowserUi,
+    search_browser::SearchBrowser,
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
     state::{AppState, AppTheme},
     table_editor::TableEditor,
@@ -26,7 +27,7 @@ use crate::ui::{
 };
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
-    redis_service::RedisService, session::SessionManager,
+    redis_service::RedisService, search_service::SearchService, session::SessionManager,
 };
 use eframe::egui::{Context, Id, Key, Modifiers};
 use std::collections::HashMap;
@@ -44,6 +45,7 @@ pub struct DesktopApp {
     active_structure: Option<Id>,
     import_wizard: Option<ImportWizard>,
     redis_browser: Option<RedisBrowserUi>,
+    search_browser: Option<SearchBrowser>,
     last_tree_status: String,
     error_window_open: bool,
     active_panel: ActivePanel,
@@ -67,6 +69,7 @@ pub struct DesktopApp {
     metadata_service: MetadataService,
     query_service: QueryService,
     redis_service: RedisService,
+    search_service: SearchService,
     runtime: Handle,
 }
 
@@ -77,6 +80,7 @@ enum ActivePanel {
     TableStructure,
     ImportWizard,
     RedisBrowser,
+    SearchBrowser,
 }
 
 impl DesktopApp {
@@ -87,12 +91,14 @@ impl DesktopApp {
         session_manager: SessionManager,
         query_service: QueryService,
         redis_service: RedisService,
+        search_service: SearchService,
         runtime: Handle,
     ) -> Self {
         let cm = connection_manager.clone();
         let ms = metadata_service.clone();
         let qs = query_service.clone();
         let rs = redis_service.clone();
+        let ss = search_service.clone();
         let rt_cm_ui = runtime.clone();
         let rt_field = runtime.clone();
         Self {
@@ -136,6 +142,8 @@ impl DesktopApp {
             metadata_service: ms,
             query_service: qs,
             redis_service: rs,
+            search_browser: None,
+            search_service: ss,
             runtime: rt_field,
         }
     }

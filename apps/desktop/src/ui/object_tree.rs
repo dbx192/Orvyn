@@ -4,8 +4,8 @@
 use crate::ui::i18n::text as tr;
 use app_core::{metadata::MetadataService, query::QueryService, session::SessionManager};
 use db_common::{
-    AppError, ConnectionId, ConnectionStatus, FavoriteQuery, MetadataNode, MetadataNodeKind,
-    MetadataPath,
+    AppError, ConnectionId, ConnectionStatus, DataSourceKind, FavoriteQuery, MetadataNode,
+    MetadataNodeKind, MetadataPath,
 };
 use eframe::egui::{
     containers::scroll_area::ScrollBarVisibility, pos2, vec2, Align2, Button, Color32, Context,
@@ -129,6 +129,14 @@ pub enum ObjectTreeAction {
         schema: Option<String>,
         table: Option<String>,
     },
+    /// Open the search/document/http-sql browser for a non-relational node
+    /// (search index, Mongo collection or D1 table).
+    OpenDataBrowser {
+        connection_id: ConnectionId,
+        kind: DataSourceKind,
+        database: Option<String>,
+        object: String,
+    },
     OpenSavedQuery {
         connection_id: ConnectionId,
         database: Option<String>,
@@ -200,6 +208,7 @@ pub struct ObjectTree {
     tx: Sender<TreeEvent>,
     rx: Receiver<TreeEvent>,
     connections: BTreeMap<ConnectionId, (TreeNode, ConnectionStatus)>,
+    connection_kinds: BTreeMap<ConnectionId, DataSourceKind>,
     child_cache: BTreeMap<NodeKey, Vec<MetadataNode>>,
     child_load_errors: BTreeMap<NodeKey, String>,
     loading_children: BTreeSet<NodeKey>,
@@ -232,6 +241,7 @@ impl ObjectTree {
             tx,
             rx,
             connections: BTreeMap::new(),
+            connection_kinds: BTreeMap::new(),
             child_cache: BTreeMap::new(),
             child_load_errors: BTreeMap::new(),
             loading_children: BTreeSet::new(),
@@ -808,6 +818,16 @@ impl ObjectTree {
                 ui.separator();
             }
             MetadataNodeKind::Table => {
+                if let Some(kind) = self.connection_kinds.get(&node.path.connection_id).copied() {
+                    if let Some(action) = self.open_data_browser_action(node, kind) {
+                        if ui.button(tr("Browse")).clicked() {
+                            actions.push(action);
+                            *message = Some(format!("Opening {}", node.label));
+                            ui.close_menu();
+                        }
+                        return;
+                    }
+                }
                 if ui.button(tr("Open Table Data")).clicked() {
                     self.emit_table_action(
                         node,
@@ -1047,6 +1067,13 @@ impl ObjectTree {
     ) {
         match node.kind {
             MetadataNodeKind::Table => {
+                if let Some(kind) = self.connection_kinds.get(&node.path.connection_id).copied() {
+                    if let Some(action) = self.open_data_browser_action(node, kind) {
+                        actions.push(action);
+                        *message = Some(format!("Opening {}", node.label));
+                        return;
+                    }
+                }
                 self.emit_table_action(
                     node,
                     |conn_id, db, schema, table| ObjectTreeAction::OpenTableData {
@@ -1092,6 +1119,29 @@ impl ObjectTree {
                 *message = Some(format!("Selected: {}", node.label));
             }
         }
+    }
+
+    /// Build an `OpenDataBrowser` action for a search/document/http-sql tree
+    /// node, or `None` when the connection kind is relational.
+    fn open_data_browser_action(
+        &self,
+        node: &MetadataNode,
+        kind: DataSourceKind,
+    ) -> Option<ObjectTreeAction> {
+        if !(kind.is_search() || kind.is_document() || kind.is_http_sql()) {
+            return None;
+        }
+        let object = node
+            .path
+            .object
+            .clone()
+            .unwrap_or_else(|| node.label.clone());
+        Some(ObjectTreeAction::OpenDataBrowser {
+            connection_id: node.path.connection_id,
+            kind,
+            database: node.path.database.clone(),
+            object,
+        })
     }
 
     fn emit_table_action(
@@ -1461,6 +1511,15 @@ impl ObjectTree {
                 TreeEvent::RootLoaded(result) => match result {
                     Ok(nodes) => {
                         let previous_connections = std::mem::take(&mut self.connections);
+                        self.connection_kinds = nodes
+                            .iter()
+                            .filter_map(|n| {
+                                n.detail
+                                    .as_deref()
+                                    .and_then(DataSourceKind::from_serialized)
+                                    .map(|kind| (n.path.connection_id, kind))
+                            })
+                            .collect();
                         self.connections = nodes
                             .into_iter()
                             .map(|n| {

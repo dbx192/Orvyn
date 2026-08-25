@@ -99,8 +99,9 @@ impl Deref for SharedDuckDbConnection {
     }
 }
 
-static DUCKDB_DATABASES: OnceLock<Mutex<BTreeMap<(PathBuf, bool), Weak<SharedDuckDbDatabase>>>> =
-    OnceLock::new();
+type DuckDbDatabaseCache = Mutex<BTreeMap<(PathBuf, bool), Weak<SharedDuckDbDatabase>>>;
+
+static DUCKDB_DATABASES: OnceLock<DuckDbDatabaseCache> = OnceLock::new();
 
 impl BlockingDuckDbPool {
     fn new(profile: &ConnectionProfile, config: ConnectionPoolConfig) -> Result<Self> {
