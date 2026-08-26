@@ -499,6 +499,8 @@ pub struct TableStructureView {
     copied_column: Option<StagedColumn>,
     /// Row whose Name cell is being edited inline (Navicat designer style).
     editing_name: Option<usize>,
+    /// Currently selected row in the field designer.
+    selected_column: Option<usize>,
     indexes: Vec<TableIndex>,
     foreign_keys: Vec<TableForeignKey>,
     triggers: Vec<TableTrigger>,
@@ -512,21 +514,8 @@ pub struct TableStructureView {
     draft_index_columns: Vec<bool>,
     add_index_error: Option<String>,
     pending_create_index: Option<CreateIndexRequest>,
-    // Add-column dialog state
-    show_add_column: bool,
-    draft_column_name: String,
-    draft_column_type: String,
-    draft_column_nullable: bool,
-    draft_column_default: String,
-    add_column_error: Option<String>,
     // Drop-column confirmation
     pending_drop_column: Option<String>,
-    // Modify-column dialog
-    pending_modify_column: Option<String>,
-    draft_modify_type: String,
-    draft_modify_nullable: bool,
-    draft_modify_default: String,
-    modify_column_error: Option<String>,
     // Drop-index confirmation
     pending_drop_index: Option<String>,
     // Add-FK dialog
@@ -587,6 +576,7 @@ impl TableStructureView {
             col_original_name,
             copied_column: None,
             editing_name: None,
+            selected_column: (column_count > 0).then_some(0),
             indexes,
             foreign_keys,
             triggers,
@@ -600,18 +590,7 @@ impl TableStructureView {
             draft_index_columns: vec![false; column_count],
             add_index_error: None,
             pending_create_index: None,
-            show_add_column: false,
-            draft_column_name: String::new(),
-            draft_column_type: String::new(),
-            draft_column_nullable: true,
-            draft_column_default: String::new(),
-            add_column_error: None,
             pending_drop_column: None,
-            pending_modify_column: None,
-            draft_modify_type: String::new(),
-            draft_modify_nullable: true,
-            draft_modify_default: String::new(),
-            modify_column_error: None,
             pending_drop_index: None,
             show_add_fk: false,
             draft_fk_name: String::new(),
@@ -648,6 +627,7 @@ impl TableStructureView {
             col_original_name,
             copied_column: None,
             editing_name: None,
+            selected_column: (column_count > 0).then_some(0),
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
             triggers: Vec::new(),
@@ -661,18 +641,7 @@ impl TableStructureView {
             draft_index_columns: vec![false; column_count],
             add_index_error: None,
             pending_create_index: None,
-            show_add_column: false,
-            draft_column_name: String::new(),
-            draft_column_type: String::new(),
-            draft_column_nullable: true,
-            draft_column_default: String::new(),
-            add_column_error: None,
             pending_drop_column: None,
-            pending_modify_column: None,
-            draft_modify_type: String::new(),
-            draft_modify_nullable: true,
-            draft_modify_default: String::new(),
-            modify_column_error: None,
             pending_drop_index: None,
             show_add_fk: false,
             draft_fk_name: String::new(),
@@ -833,9 +802,7 @@ impl TableStructureView {
     pub fn ui(&mut self, ui: &mut Ui) -> Option<String> {
         let mut message: Option<String> = None;
         self.add_index_dialog(ui, &mut message);
-        self.add_column_dialog(ui, &mut message);
         self.drop_column_dialog(ui, &mut message);
-        self.modify_column_dialog(ui, &mut message);
         self.drop_index_dialog(ui, &mut message);
         self.add_fk_dialog(ui, &mut message);
         self.refresh_dialog(ui, &mut message);
@@ -860,15 +827,63 @@ impl TableStructureView {
                 ui.output_mut(|o| o.copied_text = self.create_sql.clone());
                 message = Some("CREATE TABLE DDL copied to clipboard".to_string());
             }
+            // Designer field actions: add / delete / primary key / order.
+            let selected = self.selected_column.filter(|i| *i < self.columns.len());
             if ui
-                .add_enabled(
-                    self.details_loaded && !self.columns.is_empty(),
-                    Button::new(tr("Add Column")),
-                )
+                .add_enabled(self.details_loaded, Button::new(tr("Add Column")))
+                .on_hover_text(tr("Add a column to the table"))
                 .clicked()
             {
-                self.prepare_add_column();
+                self.add_inline_column(&mut message);
             }
+            if ui
+                .add_enabled(
+                    self.details_loaded && selected.is_some(),
+                    Button::new(tr("Delete")),
+                )
+                .on_hover_text(tr("Delete the selected column"))
+                .clicked()
+            {
+                if let Some(index) = selected {
+                    self.pending_drop_column = Some(self.columns[index].name.clone());
+                }
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    self.details_loaded
+                        && selected.is_some_and(|i| i > 0),
+                    Button::new("↑").min_size(egui::vec2(20.0, 18.0)),
+                )
+                .on_hover_text(tr("Move selected column up"))
+                .clicked()
+            {
+                self.move_selected_column(-1, &mut message);
+            }
+            if ui
+                .add_enabled(
+                    self.details_loaded
+                        && selected.is_some_and(|i| i + 1 < self.columns.len()),
+                    Button::new("↓").min_size(egui::vec2(20.0, 18.0)),
+                )
+                .on_hover_text(tr("Move selected column down"))
+                .clicked()
+            {
+                self.move_selected_column(1, &mut message);
+            }
+            if ui
+                .add_enabled(
+                    self.details_loaded && selected.is_some(),
+                    Button::new(tr("Primary key")),
+                )
+                .on_hover_text(tr("Toggle the selected column as primary key"))
+                .clicked()
+            {
+                if let Some(index) = selected {
+                    self.columns[index].primary_key = !self.columns[index].primary_key;
+                }
+            }
+            ui.separator();
             if ui
                 .add_enabled(
                     self.details_loaded && !self.columns.is_empty(),
@@ -926,6 +941,7 @@ impl TableStructureView {
                     if let Some(m) = self.columns_table(ui) {
                         message = Some(m);
                     }
+                    self.column_properties(ui);
                 }
                 StructureTab::Indexes => self.indexes_table(ui),
                 StructureTab::ForeignKeys => self.foreign_keys_table(ui),
@@ -1082,113 +1098,60 @@ impl TableStructureView {
         }
     }
 
-    // ---- Add Column ----
+    // ---- Add Column (inline designer) ----
 
-    fn prepare_add_column(&mut self) {
+    /// Insert a new blank row into the field grid for inline editing, selecting
+    /// it immediately so the user can type a name. The column is only persisted
+    /// when the designer is saved.
+    fn add_inline_column(&mut self, message: &mut Option<String>) {
         self.active_tab = StructureTab::Columns;
-        self.show_add_column = true;
-        self.add_column_error = None;
-        self.draft_column_name.clear();
-        self.draft_column_type.clear();
-        self.draft_column_nullable = true;
-        self.draft_column_default.clear();
+        let default_type = common_column_types(self.kind)
+            .first()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "VARCHAR(255)".to_string());
+        let name = self.unique_column_name("new_column");
+        self.columns.push(TableColumn {
+            name,
+            database_type: default_type,
+            nullable: true,
+            default_value: None,
+            primary_key: false,
+            comment: None,
+        });
+        self.col_original_name.push(None);
+        self.editing_name = Some(self.columns.len() - 1);
+        self.selected_column = Some(self.columns.len() - 1);
+        *message = Some(
+            tr("Column added; edit its properties inline and click Save")
+                .to_string(),
+        );
     }
 
-    fn add_column_dialog(&mut self, ui: &mut Ui, message: &mut Option<String>) {
-        if !self.show_add_column {
+    /// Move the currently selected column up or down in the designer display
+    /// order (and keep the selection tracking the moved row).
+    fn move_selected_column(&mut self, delta: i32, message: &mut Option<String>) {
+        let Some(from) = self.selected_column.filter(|i| *i < self.columns.len()) else {
+            return;
+        };
+        let to = from as i32 + delta;
+        if to < 0 || (to as usize) >= self.columns.len() {
             return;
         }
-        let mut open = true;
-        let mut create_requested = false;
-        let mut cancel_requested = false;
-
-        Window::new(tr("Add Column"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ui.ctx(), |ui| {
-                ui.label(RichText::new(self.table_name()).strong());
-                ui.add_space(8.0);
-                Grid::new("add_column_form")
-                    .num_columns(2)
-                    .spacing([10.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label(tr("Column name"));
-                        ui.add(
-                            TextEdit::singleline(&mut self.draft_column_name).desired_width(240.0),
-                        );
-                        ui.end_row();
-                        ui.label(tr("Type"));
-                        ComboBox::from_id_source("add_column_type")
-                            .selected_text(if self.draft_column_type.is_empty() {
-                                tr("Select type...")
-                            } else {
-                                self.draft_column_type.clone()
-                            })
-                            .show_ui(ui, |ui| {
-                                for candidate in common_column_types(self.kind) {
-                                    ui.selectable_value(
-                                        &mut self.draft_column_type,
-                                        (*candidate).to_string(),
-                                        *candidate,
-                                    );
-                                }
-                            });
-                        ui.end_row();
-                        ui.label(tr("Nullable"));
-                        ui.checkbox(&mut self.draft_column_nullable, "");
-                        ui.end_row();
-                        ui.label(tr("Default (raw SQL, optional)"));
-                        ui.add(
-                            TextEdit::singleline(&mut self.draft_column_default)
-                                .desired_width(240.0),
-                        );
-                        ui.end_row();
-                    });
-
-                if let Some(error) = &self.add_column_error {
-                    ui.colored_label(Color32::RED, error);
-                }
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button(tr("Cancel")).clicked() {
-                        cancel_requested = true;
-                    }
-                    if ui.button(tr("Add Column")).clicked() {
-                        create_requested = true;
-                    }
-                });
-            });
-
-        if cancel_requested || !open {
-            self.show_add_column = false;
-            return;
+        self.columns.swap(from, to as usize);
+        self.col_original_name.swap(from, to as usize);
+        self.selected_column = Some(to as usize);
+        if self.editing_name == Some(from) {
+            self.editing_name = Some(to as usize);
+        } else if self.editing_name == Some(to as usize) {
+            self.editing_name = Some(from);
         }
-        if create_requested {
-            let name = self.draft_column_name.trim().to_string();
-            let col_type = self.draft_column_type.trim().to_string();
-            if name.is_empty() {
-                self.add_column_error = Some("Column name is required".to_string());
-            } else if col_type.is_empty() {
-                self.add_column_error = Some("Column type is required".to_string());
+        *message = Some(
+            if delta < 0 {
+                "Moved column up".to_string()
             } else {
-                self.queue_alter(AlterTableRequest::AddColumn {
-                    connection_id: self.connection_id,
-                    database: self.database.clone(),
-                    schema: self.schema.clone(),
-                    table: self.table.clone(),
-                    column_name: name,
-                    column_type: col_type,
-                    nullable: self.draft_column_nullable,
-                    default_value: {
-                        let d = self.draft_column_default.trim();
-                        (!d.is_empty()).then(|| d.to_string())
-                    },
-                });
-                self.show_add_column = false;
-                *message = Some("Adding column...".to_string());
-            }
-        }
+                "Moved column down".to_string()
+            },
+        );
     }
 
     // ---- Drop Column ----
@@ -1223,109 +1186,22 @@ impl TableStructureView {
                 });
             });
         if confirm {
-            self.queue_alter(AlterTableRequest::DropColumn {
-                connection_id: self.connection_id,
-                database: self.database.clone(),
-                schema: self.schema.clone(),
-                table: self.table.clone(),
-                column_name: column_name.clone(),
-            });
-            *message = Some(format!("Dropping column {column_name}..."));
+            if let Some(index) = self.columns.iter().position(|col| col.name == column_name) {
+                self.columns.remove(index);
+                self.col_original_name.remove(index);
+                self.selected_column =
+                    self.selected_column
+                        .and_then(|selected| match selected.cmp(&index) {
+                            std::cmp::Ordering::Less => Some(selected),
+                            std::cmp::Ordering::Equal => (!self.columns.is_empty())
+                                .then_some(index.min(self.columns.len() - 1)),
+                            std::cmp::Ordering::Greater => Some(selected - 1),
+                        });
+                *message = Some(format!("Column {column_name} marked for deletion"));
+            }
         }
         if !cancel && open {
             self.pending_drop_column = Some(column_name);
-        }
-    }
-
-    // ---- Modify Column ----
-
-    fn modify_column_dialog(&mut self, ui: &mut Ui, message: &mut Option<String>) {
-        let Some(column_name) = self.pending_modify_column.take() else {
-            return;
-        };
-        // Sync draft fields with the existing column the first time.
-        if self.draft_modify_type.is_empty() {
-            if let Some(col) = self.columns.iter().find(|c| c.name == column_name) {
-                self.draft_modify_type = col.database_type.clone();
-                self.draft_modify_nullable = col.nullable;
-                self.draft_modify_default = col.default_value.clone().unwrap_or_default();
-            }
-        }
-        let mut open = true;
-        let mut confirm = false;
-        let mut cancel = false;
-        Window::new(tr("Modify Column"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ui.ctx(), |ui| {
-                ui.label(RichText::new(self.table_name()).strong());
-                ui.label(format!("Column: {}", column_name));
-                ui.add_space(8.0);
-                Grid::new("modify_column_form")
-                    .num_columns(2)
-                    .spacing([10.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label(tr("New type"));
-                        ui.add(
-                            TextEdit::singleline(&mut self.draft_modify_type).desired_width(240.0),
-                        );
-                        ui.end_row();
-                        ui.label(tr("Nullable"));
-                        ui.checkbox(&mut self.draft_modify_nullable, "");
-                        ui.end_row();
-                        ui.label(tr("Default (raw SQL, optional)"));
-                        ui.add(
-                            TextEdit::singleline(&mut self.draft_modify_default)
-                                .desired_width(240.0),
-                        );
-                        ui.end_row();
-                    });
-                if self.kind.protocol_family() == ProtocolFamily::Sqlite {
-                    ui.colored_label(
-                        Color32::from_rgb(220, 150, 60),
-                        "提示：SQLite 不支持原生 ALTER COLUMN，修改类型可能失败；请使用迁移 SQL 重建表。",
-                    );
-                }
-                if let Some(error) = &self.modify_column_error {
-                    ui.colored_label(Color32::RED, error);
-                }
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button(tr("Cancel")).clicked() {
-                        cancel = true;
-                    }
-                    if ui.button(tr("Apply")).clicked() {
-                        confirm = true;
-                    }
-                });
-            });
-        if confirm {
-            let new_type = self.draft_modify_type.trim().to_string();
-            if new_type.is_empty() {
-                self.modify_column_error = Some("Type is required".to_string());
-                self.pending_modify_column = Some(column_name);
-                return;
-            }
-            self.queue_alter(AlterTableRequest::ModifyColumn {
-                connection_id: self.connection_id,
-                database: self.database.clone(),
-                schema: self.schema.clone(),
-                table: self.table.clone(),
-                column_name: column_name.clone(),
-                new_type,
-                nullable: self.draft_modify_nullable,
-                default_value: {
-                    let d = self.draft_modify_default.trim();
-                    (!d.is_empty()).then(|| d.to_string())
-                },
-            });
-            self.draft_modify_type.clear();
-            *message = Some(format!("Modifying column {column_name}..."));
-        } else if !cancel && open {
-            self.pending_modify_column = Some(column_name);
-        } else {
-            self.draft_modify_type.clear();
         }
     }
 
@@ -1610,13 +1486,9 @@ impl TableStructureView {
         let copy_label = tr("Copy");
         let paste_label = tr("Paste");
         let copy_name_label = tr("Copy Name");
-        let modify_label = tr("Modify");
         let delete_label = tr("Delete");
         let move_up_label = tr("Move Up");
         let move_down_label = tr("Move Down");
-        let edit_label = tr("Edit");
-        let modify_hint = tr("Modify column");
-        let drop_hint = tr("Drop column");
 
         ScrollArea::both()
             .auto_shrink([false, false])
@@ -1626,7 +1498,9 @@ impl TableStructureView {
                     .num_columns(7)
                     .spacing([8.0, 0.0])
                     .show(ui, |ui| {
-                        for label in &["Name", "Type", "Null", "Default", "Key", "", ""] {
+                        for label in &[
+                            "Name", "Type", "Length", "Null", "Default", "Key", "Comment",
+                        ] {
                             ui.label(
                                 RichText::new(if label.is_empty() {
                                     String::new()
@@ -1641,7 +1515,6 @@ impl TableStructureView {
                         let mut copy_requested: Option<usize> = None;
                         let mut paste_requested = false;
                         let mut drop_requested: Option<usize> = None;
-                        let mut modify_requested: Option<usize> = None;
                         let mut move_requested: Option<(usize, i32)> = None;
 
                         for idx in 0..column_count {
@@ -1649,9 +1522,12 @@ impl TableStructureView {
 
                             // ---- Name: inline editable, focused after copy/paste ----
                             let name_out = TextEdit::singleline(&mut self.columns[idx].name)
-                                .desired_width(150.0)
+                                .desired_width(300.0)
                                 .show(ui);
                             let name_resp = name_out.response;
+                            if name_resp.clicked() {
+                                self.selected_column = Some(idx);
+                            }
                             if self.editing_name == Some(idx) {
                                 name_resp.request_focus();
                                 // Navicat-style: select the whole (generated) name
@@ -1682,10 +1558,6 @@ impl TableStructureView {
                                     status = Some("Column name copied".to_string());
                                     ui.close_menu();
                                 }
-                                if ui.button(&modify_label).clicked() {
-                                    modify_requested = Some(idx);
-                                    ui.close_menu();
-                                }
                                 if ui.button(&delete_label).clicked() {
                                     drop_requested = Some(idx);
                                     ui.close_menu();
@@ -1710,21 +1582,55 @@ impl TableStructureView {
                                 }
                             });
 
-                            // ---- Type ----
-                            let type_edit =
-                                TextEdit::singleline(&mut self.columns[idx].database_type)
-                                    .desired_width(140.0);
-                            ui.add_sized([140.0, 22.0], type_edit);
+                            // ---- Type (dropdown) ----
+                            let type_combo = ComboBox::from_id_source(("col_type", idx))
+                                .selected_text(self.columns[idx].database_type.clone())
+                                .width(150.0)
+                                .show_ui(ui, |ui| {
+                                    for candidate in common_column_types(self.kind) {
+                                        ui.selectable_value(
+                                            &mut self.columns[idx].database_type,
+                                            candidate.to_string(),
+                                            *candidate,
+                                        );
+                                    }
+                                });
+                            if type_combo.response.clicked() || type_combo.response.changed() {
+                                self.selected_column = Some(idx);
+                            }
+
+                            // ---- Length / precision (editable) ----
+                            let mut width_buf =
+                                type_field_width(&self.columns[idx].database_type);
+                            let width_response = ui.add(
+                                TextEdit::singleline(&mut width_buf)
+                                    .desired_width(90.0)
+                                    .hint_text("size"),
+                            );
+                            if width_response.changed() {
+                                self.columns[idx].database_type = set_type_field_width(
+                                    &self.columns[idx].database_type,
+                                    &width_buf,
+                                );
+                            }
+                            if width_response.clicked() {
+                                self.selected_column = Some(idx);
+                            }
 
                             // ---- Nullable ----
-                            ui.checkbox(&mut self.columns[idx].nullable, "");
+                            if ui.checkbox(&mut self.columns[idx].nullable, "").clicked() {
+                                self.selected_column = Some(idx);
+                            }
 
                             // ---- Default ----
                             let mut default_buf =
                                 self.columns[idx].default_value.clone().unwrap_or_default();
                             let default_edit =
                                 TextEdit::singleline(&mut default_buf).desired_width(120.0);
-                            ui.add_sized([120.0, 22.0], default_edit);
+                            let default_response = ui.add_sized([120.0, 22.0], default_edit);
+                            if default_response.clicked() {
+                                self.selected_column = Some(idx);
+                            }
                             let trimmed_default = default_buf.trim().to_string();
                             self.columns[idx].default_value = if trimmed_default.is_empty() {
                                 None
@@ -1735,21 +1641,22 @@ impl TableStructureView {
                             // ---- Key ----
                             ui.label(if self.columns[idx].primary_key { "PK" } else { "" });
 
-                            // ---- Edit / Delete ----
-                            if ui
-                                .small_button(&edit_label)
-                                .on_hover_text(&modify_hint)
-                                .clicked()
-                            {
-                                modify_requested = Some(idx);
+                            // ---- Comment (editable) ----
+                            let mut comment_buf =
+                                self.columns[idx].comment.clone().unwrap_or_default();
+                            let comment_edit = TextEdit::singleline(&mut comment_buf)
+                                .desired_width(160.0)
+                                .hint_text(tr("Comment (optional)"));
+                            let comment_response = ui.add_sized([160.0, 22.0], comment_edit);
+                            if comment_response.changed() {
+                                let value = comment_buf.trim();
+                                self.columns[idx].comment =
+                                    (!value.is_empty()).then(|| value.to_string());
                             }
-                            if ui
-                                .small_button(&delete_label)
-                                .on_hover_text(&drop_hint)
-                                .clicked()
-                            {
-                                drop_requested = Some(idx);
+                            if comment_response.clicked() {
+                                self.selected_column = Some(idx);
                             }
+
                             ui.end_row();
                         }
 
@@ -1759,6 +1666,11 @@ impl TableStructureView {
                             if to >= 0 && (to as usize) < column_count {
                                 self.columns.swap(from, to as usize);
                                 self.col_original_name.swap(from, to as usize);
+                                if self.selected_column == Some(from) {
+                                    self.selected_column = Some(to as usize);
+                                } else if self.selected_column == Some(to as usize) {
+                                    self.selected_column = Some(from);
+                                }
                                 status = Some(
                                     if delta < 0 {
                                         "Moved column up (display order)"
@@ -1771,11 +1683,6 @@ impl TableStructureView {
                         }
                         if let Some(idx) = drop_requested {
                             self.pending_drop_column = Some(self.columns[idx].name.clone());
-                        }
-                        if let Some(idx) = modify_requested {
-                            // Reset draft fields so the dialog picks up the new column.
-                            self.draft_modify_type.clear();
-                            self.pending_modify_column = Some(self.columns[idx].name.clone());
                         }
                         if let Some(idx) = copy_requested {
                             let col = self.columns[idx].clone();
@@ -1847,6 +1754,77 @@ impl TableStructureView {
                     });
             });
         status
+    }
+
+    /// Shows the editable properties for the selected field, matching the
+    /// lower inspector area of a desktop table designer.
+    fn column_properties(&mut self, ui: &mut Ui) {
+        let Some(index) = self
+            .selected_column
+            .filter(|index| *index < self.columns.len())
+        else {
+            Frame::default()
+                .fill(ui.visuals().faint_bg_color)
+                .inner_margin(Margin::symmetric(10.0, 8.0))
+                .show(ui, |ui| {
+                    ui.label(tr("Select a column to view its properties"))
+                });
+            return;
+        };
+
+        let column = &mut self.columns[index];
+        Frame::default()
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .inner_margin(Margin::symmetric(10.0, 8.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} properties", column.name)).strong());
+                    if self.col_original_name[index].is_none() {
+                        ui.label(
+                            RichText::new(tr("New"))
+                                .small()
+                                .color(Color32::from_rgb(40, 140, 90)),
+                        );
+                    }
+                });
+                ui.add_space(4.0);
+                Grid::new("structure_column_properties")
+                    .num_columns(2)
+                    .spacing([12.0, 5.0])
+                    .show(ui, |ui| {
+                        ui.label(tr("Default"));
+                        let mut default = column.default_value.clone().unwrap_or_default();
+                        if ui
+                            .add(TextEdit::singleline(&mut default).desired_width(260.0))
+                            .changed()
+                        {
+                            let value = default.trim();
+                            column.default_value = (!value.is_empty()).then(|| default);
+                        }
+                        ui.end_row();
+                        ui.label(tr("Nullable"));
+                        ui.checkbox(&mut column.nullable, tr("Allow NULL"));
+                        ui.end_row();
+                        ui.label(tr("Primary key"));
+                        ui.checkbox(&mut column.primary_key, "");
+                        ui.end_row();
+                        ui.label(tr("Comment"));
+                        let mut comment = column.comment.clone().unwrap_or_default();
+                        if ui
+                            .add(
+                                TextEdit::singleline(&mut comment)
+                                    .desired_width(320.0)
+                                    .hint_text(tr("Comment (optional)")),
+                            )
+                            .changed()
+                        {
+                            let value = comment.trim();
+                            column.comment = (!value.is_empty()).then(|| value.to_string());
+                        }
+                        ui.end_row();
+                    });
+            });
     }
 
     /// Renders the indexes section as a table.
@@ -2038,31 +2016,110 @@ fn empty_message(ui: &mut Ui, text: &str) {
 fn common_column_types(kind: DataSourceKind) -> &'static [&'static str] {
     match kind.protocol_family() {
         ProtocolFamily::MySql => &[
-            "INT", "BIGINT", "TINYINT", "SMALLINT", "VARCHAR(255)", "CHAR(64)", "TEXT", "DATETIME",
-            "TIMESTAMP", "DATE", "TIME", "DECIMAL(10,2)", "FLOAT", "DOUBLE", "BOOLEAN", "JSON",
-            "BLOB", "ENUM",
+            "INT",
+            "BIGINT",
+            "TINYINT",
+            "SMALLINT",
+            "VARCHAR(255)",
+            "CHAR(64)",
+            "TEXT",
+            "DATETIME",
+            "TIMESTAMP",
+            "DATE",
+            "TIME",
+            "DECIMAL(10,2)",
+            "FLOAT",
+            "DOUBLE",
+            "BOOLEAN",
+            "JSON",
+            "BLOB",
+            "ENUM",
         ],
         ProtocolFamily::PostgreSql => &[
-            "INTEGER", "BIGINT", "SMALLINT", "SERIAL", "BIGSERIAL", "VARCHAR(255)", "TEXT", "TIMESTAMP",
-            "TIMESTAMPTZ", "DATE", "TIME", "NUMERIC(10,2)", "DOUBLE PRECISION", "BOOLEAN", "JSONB",
-            "UUID", "BYTEA",
+            "INTEGER",
+            "BIGINT",
+            "SMALLINT",
+            "SERIAL",
+            "BIGSERIAL",
+            "VARCHAR(255)",
+            "TEXT",
+            "TIMESTAMP",
+            "TIMESTAMPTZ",
+            "DATE",
+            "TIME",
+            "NUMERIC(10,2)",
+            "DOUBLE PRECISION",
+            "BOOLEAN",
+            "JSONB",
+            "UUID",
+            "BYTEA",
         ],
         ProtocolFamily::SqlServer => &[
-            "INT", "BIGINT", "SMALLINT", "TINYINT", "NVARCHAR(255)", "VARCHAR(255)", "NCHAR(64)",
-            "CHAR(64)", "TEXT", "NTEXT", "DATETIME", "DATETIME2", "DATE", "TIME", "DECIMAL(18,2)",
-            "NUMERIC", "FLOAT", "REAL", "BIT", "UNIQUEIDENTIFIER", "BINARY(16)",
+            "INT",
+            "BIGINT",
+            "SMALLINT",
+            "TINYINT",
+            "NVARCHAR(255)",
+            "VARCHAR(255)",
+            "NCHAR(64)",
+            "CHAR(64)",
+            "TEXT",
+            "NTEXT",
+            "DATETIME",
+            "DATETIME2",
+            "DATE",
+            "TIME",
+            "DECIMAL(18,2)",
+            "NUMERIC",
+            "FLOAT",
+            "REAL",
+            "BIT",
+            "UNIQUEIDENTIFIER",
+            "BINARY(16)",
         ],
         ProtocolFamily::ClickHouse => &[
-            "Int32", "Int64", "UInt32", "Float64", "String", "FixedString(16)", "Date", "DateTime",
-            "DateTime64(3)", "Decimal(18,6)", "Nullable(Int64)", "Array(Int32)", "UUID", "JSON",
+            "Int32",
+            "Int64",
+            "UInt32",
+            "Float64",
+            "String",
+            "FixedString(16)",
+            "Date",
+            "DateTime",
+            "DateTime64(3)",
+            "Decimal(18,6)",
+            "Nullable(Int64)",
+            "Array(Int32)",
+            "UUID",
+            "JSON",
         ],
         ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => &[
-            "INTEGER", "BIGINT", "TEXT", "REAL", "DOUBLE", "DECIMAL", "BOOLEAN", "DATE", "DATETIME",
-            "TIMESTAMP", "TIME", "BLOB", "JSON", "UUID",
+            "INTEGER",
+            "BIGINT",
+            "TEXT",
+            "REAL",
+            "DOUBLE",
+            "DECIMAL",
+            "BOOLEAN",
+            "DATE",
+            "DATETIME",
+            "TIMESTAMP",
+            "TIME",
+            "BLOB",
+            "JSON",
+            "UUID",
         ],
         _ => &[
-            "INT", "BIGINT", "VARCHAR(255)", "TEXT", "DATE", "DATETIME", "TIMESTAMP", "DECIMAL(10,2)",
-            "BOOLEAN", "JSON",
+            "INT",
+            "BIGINT",
+            "VARCHAR(255)",
+            "TEXT",
+            "DATE",
+            "DATETIME",
+            "TIMESTAMP",
+            "DECIMAL(10,2)",
+            "BOOLEAN",
+            "JSON",
         ],
     }
 }
@@ -2089,9 +2146,57 @@ fn type_without_field_width(value: &str) -> String {
     }
 }
 
+/// Extract the inner length/precision text of a type declaration, e.g.
+/// `20` for `VARCHAR(20)` or `10,2` for `DECIMAL(10,2)`, or "" when absent.
+fn type_field_width(value: &str) -> String {
+    let trimmed = value.trim();
+    let Some(open) = trimmed.find('(') else {
+        return String::new();
+    };
+    let Some(close_offset) = trimmed[open..].find(')') else {
+        return String::new();
+    };
+    let close = open + close_offset;
+    trimmed[open + 1..close].trim().to_string()
+}
+
+/// Set (or clear) the length/precision part of a type declaration while
+/// preserving the base type, rebuilding e.g. `VARCHAR` + `255` -> `VARCHAR(255)`.
+fn set_type_field_width(value: &str, new_width: &str) -> String {
+    let base = type_without_field_width(value);
+    let width = new_width.trim();
+    if width.is_empty() {
+        base
+    } else {
+        format!("{base}({width})")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn column(name: &str) -> TableColumn {
+        TableColumn {
+            name: name.to_string(),
+            database_type: "VARCHAR(255)".to_string(),
+            nullable: true,
+            default_value: None,
+            primary_key: false,
+            comment: None,
+        }
+    }
+
+    fn structure(columns: Vec<TableColumn>) -> TableStructureView {
+        TableStructureView::from_columns(
+            ConnectionId::new(),
+            DataSourceKind::MySql,
+            Some("app".to_string()),
+            None,
+            "users".to_string(),
+            columns,
+        )
+    }
 
     fn sample_request() -> (AlterTableRequest, ConnectionId) {
         let conn = ConnectionId::new();
@@ -2223,5 +2328,53 @@ mod tests {
         assert!(sql.contains("FOREIGN KEY (\"user_id\") REFERENCES \"users\" (\"id\")"));
         assert!(sql.contains("ON UPDATE CASCADE"));
         assert!(!sql.contains("ON DELETE"));
+    }
+
+    #[test]
+    fn staged_changes_batch_add_rename_modify_then_drop() {
+        let mut view = structure(vec![column("id"), column("email"), column("legacy")]);
+        view.columns[1].name = "email_address".to_string();
+        view.columns[1].database_type = "VARCHAR(512)".to_string();
+        view.columns[1].nullable = false;
+        view.columns[1].default_value = Some("'unknown'".to_string());
+        view.columns.remove(2);
+        view.col_original_name.remove(2);
+        view.columns.push(column("display_name"));
+        view.col_original_name.push(None);
+
+        let requests = view.staged_requests();
+        assert_eq!(requests.len(), 4);
+        assert!(matches!(
+            &requests[0],
+            AlterTableRequest::RenameColumn { old_name, new_name, .. }
+                if old_name == "email" && new_name == "email_address"
+        ));
+        assert!(matches!(
+            &requests[1],
+            AlterTableRequest::ModifyColumn { column_name, new_type, nullable, default_value, .. }
+                if column_name == "email_address"
+                    && new_type == "VARCHAR(512)"
+                    && !nullable
+                    && default_value.as_deref() == Some("'unknown'")
+        ));
+        assert!(matches!(
+            &requests[2],
+            AlterTableRequest::AddColumn { column_name, .. } if column_name == "display_name"
+        ));
+        assert!(matches!(
+            &requests[3],
+            AlterTableRequest::DropColumn { column_name, .. } if column_name == "legacy"
+        ));
+    }
+
+    #[test]
+    fn removing_a_new_draft_column_does_not_create_a_request() {
+        let mut view = structure(vec![column("id")]);
+        view.columns.push(column("draft"));
+        view.col_original_name.push(None);
+        view.columns.pop();
+        view.col_original_name.pop();
+
+        assert!(view.staged_requests().is_empty());
     }
 }
