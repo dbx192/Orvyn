@@ -58,6 +58,8 @@ impl DesktopApp {
         }
 
         ui.horizontal_wrapped(|ui| {
+            // Uniform tab height, items vertically centered.
+            ui.set_height(32.0);
             let query_selected = self.active_panel == ActivePanel::QueryEditor;
             if ui.selectable_label(query_selected, tr("Query")).clicked() {
                 if !query_selected {
@@ -268,14 +270,23 @@ impl DesktopApp {
                         .ctx()
                         .data_mut(|d| d.get_persisted::<f32>(left_panel_width_id()))
                         .unwrap_or(LEFT_PANEL_DEFAULT_WIDTH);
+                    // Drag handle: a short centered grip (not a full-height
+                    // strip) so the slider doesn't stretch the whole panel.
+                    let grip_len = 100.0;
+                    let grip_top = (avail.center().y - grip_len / 2.0).max(avail.top());
                     let handle_rect = Rect::from_min_max(
-                        pos2(avail.min.x - 3.0, avail.top()),
-                        pos2(avail.min.x + 3.0, avail.bottom()),
+                        pos2(avail.min.x - 3.0, grip_top),
+                        pos2(avail.min.x + 3.0, (grip_top + grip_len).min(avail.bottom())),
                     );
                     let handle =
                         ui.interact(handle_rect, left_panel_divider_id(), Sense::drag());
                     if handle.hovered() || handle.dragged() {
                         ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                        ui.painter().rect_filled(
+                            handle_rect.expand2(vec2(1.0, 0.0)),
+                            0.0,
+                            ui.visuals().widgets.hovered.fg_stroke.color,
+                        );
                     }
                     if handle.dragged() {
                         let w = (cur + handle.drag_delta().x).clamp(
@@ -463,11 +474,14 @@ impl DesktopApp {
                 Frame::default()
                     .fill(palette.surface)
                     .stroke(Stroke::new(1.0, palette.border))
-                    .inner_margin(Margin::symmetric(12.0, 8.0)),
+                    .inner_margin(Margin::symmetric(12.0, 4.0)),
             )
             .show(ctx, |ui| {
                 let compact = ui.available_width() < 960.0;
                 ui.horizontal(|ui| {
+                    // Force a uniform row height and center every item vertically
+                    // so text doesn't sit low when mixed with taller widgets.
+                    ui.set_height(32.0);
                     // ---- Brand ----
                     let (brand_rect, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
                     ui.painter()

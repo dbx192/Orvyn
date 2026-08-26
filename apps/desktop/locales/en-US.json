@@ -149,6 +149,8 @@
   "Key": "Key",
   "Unique": "Unique",
   "Primary": "Primary",
+  "Primary key": "Primary key",
+  "Toggle the selected column as primary key": "Toggle the selected column as primary key",
   "Loaded {count} connections": "Loaded {count} connections",
   "Event": "Event",
   "Timing": "Timing",

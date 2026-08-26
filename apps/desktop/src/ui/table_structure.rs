@@ -989,16 +989,17 @@ impl TableStructureView {
                 };
                 if let Some(error) = ddl_error {
                     message = Some(format!("Cannot build object DDL: {error}"));
-                }
-                let op_count = obj_ops.len();
-                self.pending_ddl.extend(obj_ops);
-                message = Some(if op_count > 0 && count > 0 {
-                    format!("Saving {count} structure change(s), {op_count} object op(s)...")
-                } else if op_count > 0 {
-                    format!("Saving {op_count} object op(s)...")
                 } else {
-                    format!("Saving {count} structure change(s)...")
-                });
+                    let op_count = obj_ops.len();
+                    self.pending_ddl.extend(obj_ops);
+                    message = Some(if op_count > 0 && count > 0 {
+                        format!("Saving {count} structure change(s), {op_count} object op(s)...")
+                    } else if op_count > 0 {
+                        format!("Saving {op_count} object op(s)...")
+                    } else {
+                        format!("Saving {count} structure change(s)...")
+                    });
+                }
             }
         });
 

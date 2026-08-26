@@ -1,4 +1,4 @@
-use eframe::egui::{Context, FontData, FontDefinitions, FontFamily};
+use eframe::egui::{Context, FontData, FontDefinitions, FontFamily, FontTweak};
 use std::path::{Path, PathBuf};
 
 pub fn install_global_fonts(ctx: &Context) {
@@ -11,7 +11,18 @@ pub fn install_global_fonts(ctx: &Context) {
     );
     fonts.font_data.insert(
         "orvyn-cjk".to_string(),
-        FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf")),
+        // Noto Sans CJK has a large ascent that leaves empty space above the
+        // glyph ink, which makes CJK text render noticeably lower than Latin
+        // when vertically centered (e.g. inside buttons). Shift it up so CJK
+        // and Latin share the same visual center line.
+        FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf")).tweak(
+            FontTweak {
+                scale: 1.0,
+                y_offset_factor: -0.10,
+                y_offset: 0.0,
+                baseline_offset_factor: 0.0,
+            },
+        ),
     );
     fonts.font_data.insert(
         "orvyn-mono".to_string(),

@@ -149,6 +149,8 @@
   "Key": "Clave",
   "Unique": "Ănico",
   "Primary": "Primario",
+  "Primary key": "Clave primaria",
+  "Toggle the selected column as primary key": "Convertir la columna seleccionada en clave primaria",
   "Loaded {count} connections": "{count} conexiones cargadas",
   "Event": "Evento",
   "Timing": "Momento",

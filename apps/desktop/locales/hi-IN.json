@@ -149,6 +149,8 @@
   "Key": "कुंजी",
   "Unique": "अद्वितीय",
   "Primary": "प्राथमिक",
+  "Primary key": "प्राथमिक कुंजी",
+  "Toggle the selected column as primary key": "चयनित स्तंभ को प्राथमिक कुंजी बनाएं",
   "Loaded {count} connections": "{count} कनेक्शन लोड हुए",
   "Event": "घटना",
   "Timing": "समय",

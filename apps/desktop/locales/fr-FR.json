@@ -149,6 +149,8 @@
   "Key": "ClÃ©",
   "Unique": "Unique",
   "Primary": "Primaire",
+  "Primary key": "Clé primaire",
+  "Toggle the selected column as primary key": "Définir la colonne sélectionnée comme clé primaire",
   "Loaded {count} connections": "{count} connexions chargÃ©es",
   "Event": "Ã‰vÃ©nement",
   "Timing": "Moment",

@@ -149,6 +149,8 @@
   "Key": "键",
   "Unique": "唯一",
   "Primary": "主键",
+  "Primary key": "主键",
+  "Toggle the selected column as primary key": "将选中的列设为主键",
   "Loaded {count} connections": "已加载 {count} 个连接",
   "Event": "事件",
   "Timing": "时机",
