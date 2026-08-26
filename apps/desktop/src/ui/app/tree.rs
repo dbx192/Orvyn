@@ -10,16 +10,17 @@ use crate::ui::{
     object_tree::ObjectTreeAction, redis_browser::RedisBrowserUi, search_browser::SearchBrowser,
 };
 use db_common::ConnectionId;
-use eframe::egui::{Align, Color32, Context, Id, Layout, RichText, SidePanel};
+use eframe::egui::{Align, Color32, Context, CursorIcon, Id, Layout, Rect, RichText, Sense, SidePanel, Ui, pos2, vec2};
 use import_export::ExportFormat;
 
 // Splitter state. We deliberately do NOT rely on egui's built-in resizable
 // SidePanel: in egui 0.27.2 the stored width can snap back to the default when
 // the mouse is released, so the panel is drawn at a fixed width that we persist
-// ourselves and adjust with a manual drag handle in the central panel.
+// ourselves. All width constants, the persisted key and the manual drag handle
+// live here so the whole resize behavior is in one place.
 pub(super) const LEFT_PANEL_MIN_WIDTH: f32 = 180.0;
 pub(super) const LEFT_PANEL_MAX_WIDTH: f32 = 420.0;
-pub(super) const LEFT_PANEL_DEFAULT_WIDTH: f32 = 210.0;
+pub(super) const LEFT_PANEL_DEFAULT_WIDTH: f32 = 260.0;
 
 pub(super) fn left_panel_width_id() -> Id {
     Id::new("left_tree_panel_width")
@@ -61,7 +62,57 @@ impl DesktopApp {
                         );
                     });
                 }
+                self.draw_left_divider(ui);
             });
+    }
+
+    /// Draws the T-layout divider as a fixed-height centered pill on the right
+    /// edge of the tree panel and handles the drag to resize the panel.
+    fn draw_left_divider(&mut self, ui: &mut Ui) {
+        let avail = ui.max_rect();
+        let cur = ui
+            .ctx()
+            .data_mut(|d| d.get_persisted::<f32>(left_panel_width_id()))
+            .unwrap_or(LEFT_PANEL_DEFAULT_WIDTH);
+        let grip_len = 40.0;
+        let hit_w = 14.0;
+        let right = avail.right();
+        let center_y = avail
+            .center()
+            .y
+            .clamp(avail.top() + grip_len / 2.0, avail.bottom() - grip_len / 2.0);
+        // Hit area is wider than the visible pill so it is easy to grab.
+        let handle_rect = Rect::from_min_max(
+            pos2(right - hit_w / 2.0, center_y - grip_len / 2.0),
+            pos2(right + hit_w / 2.0, center_y + grip_len / 2.0),
+        );
+        let handle = ui.interact(handle_rect, left_panel_divider_id(), Sense::drag());
+        let visual_rect = Rect::from_min_max(
+            pos2(right - 2.0, center_y - grip_len / 2.0),
+            pos2(right + 2.0, center_y + grip_len / 2.0),
+        );
+        if handle.hovered() || handle.dragged() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            ui.painter().rect_filled(
+                visual_rect.expand2(vec2(2.0, 0.0)),
+                3.0,
+                ui.visuals().widgets.hovered.fg_stroke.color,
+            );
+        } else {
+            ui.painter().rect_filled(
+                visual_rect.expand2(vec2(1.0, 0.0)),
+                3.0,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            );
+        }
+        if handle.dragged() {
+            let w = (cur + handle.drag_delta().x).clamp(
+                LEFT_PANEL_MIN_WIDTH,
+                LEFT_PANEL_MAX_WIDTH,
+            );
+            ui.ctx().data_mut(|d| d.insert_persisted(left_panel_width_id(), w));
+            ui.ctx().request_repaint();
+        }
     }
 
     pub(super) fn handle_tree_actions(&mut self, actions: Vec<ObjectTreeAction>) {

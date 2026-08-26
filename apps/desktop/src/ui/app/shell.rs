@@ -1,13 +1,11 @@
 use super::{
     style::apply_app_style,
-    tree::{left_panel_divider_id, left_panel_width_id, LEFT_PANEL_DEFAULT_WIDTH,
-        LEFT_PANEL_MAX_WIDTH, LEFT_PANEL_MIN_WIDTH},
     ActivePanel, DesktopApp,
 };
 use crate::ui::i18n::{self, text as tr, Locale};
 use eframe::egui::{
-    pos2, vec2, Align, Button, CentralPanel, Context, CursorIcon, Frame, Layout, Margin, Rect,
-    RichText, Sense, Spinner, Stroke, TopBottomPanel, Ui,
+    pos2, vec2, Align, Button, CentralPanel, Context, Frame, Layout, Margin, Rect, RichText,
+    Spinner, Stroke, TopBottomPanel, Ui,
 };
 use std::time::Duration;
 
@@ -255,66 +253,16 @@ impl DesktopApp {
             .frame(
                 Frame::default()
                     .fill(ctx.style().visuals.panel_fill)
-                    .inner_margin(Margin::same(0.0)),
+                    .inner_margin(Margin {
+                        left: 5.0,
+                        right: 0.0,
+                        top: 0.0,
+                        bottom: 0.0,
+                    }),
             )
             .show(ctx, |ui| {
-                // Manual T-layout splitter. egui 0.27.2's built-in resizable
-                // SidePanel can snap its width back on mouse release, so the
-                // tree panel is drawn at a fixed width (`left_tree`) that we
-                // adjust here by dragging this left-edge strip. The delta is
-                // applied to the persisted value, read next frame (1-frame
-                // latency while dragging, identical to the query splitter).
-                {
-                    let avail = ui.max_rect();
-                    let cur = ui
-                        .ctx()
-                        .data_mut(|d| d.get_persisted::<f32>(left_panel_width_id()))
-                        .unwrap_or(LEFT_PANEL_DEFAULT_WIDTH);
-                    // A fixed-height, centered grip. No full-height line is drawn,
-                    // so the handle never stretches to full screen when the tree
-                    // collapses. The hit area is wider than the visible pill to
-                    // make left/right dragging easy to grab.
-                    let grip_len = 40.0;
-                    let hit_w = 14.0;
-                    let center_y = avail
-                        .center()
-                        .y
-                        .clamp(avail.top() + grip_len / 2.0, avail.bottom() - grip_len / 2.0);
-                    let handle_rect = Rect::from_min_max(
-                        pos2(avail.min.x - hit_w / 2.0, center_y - grip_len / 2.0),
-                        pos2(avail.min.x + hit_w / 2.0, center_y + grip_len / 2.0),
-                    );
-                    let handle =
-                        ui.interact(handle_rect, left_panel_divider_id(), Sense::drag());
-                    // Visible pill: only the fixed-height grip.
-                    let visual_rect = Rect::from_min_max(
-                        pos2(avail.min.x - 2.0, center_y - grip_len / 2.0),
-                        pos2(avail.min.x + 2.0, center_y + grip_len / 2.0),
-                    );
-                    if handle.hovered() || handle.dragged() {
-                        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-                        ui.painter().rect_filled(
-                            visual_rect.expand2(vec2(2.0, 0.0)),
-                            3.0,
-                            ui.visuals().widgets.hovered.fg_stroke.color,
-                        );
-                    } else {
-                        ui.painter().rect_filled(
-                            visual_rect.expand2(vec2(1.0, 0.0)),
-                            3.0,
-                            ui.visuals().widgets.noninteractive.bg_stroke.color,
-                        );
-                    }
-                    if handle.dragged() {
-                        let w = (cur + handle.drag_delta().x).clamp(
-                            LEFT_PANEL_MIN_WIDTH,
-                            LEFT_PANEL_MAX_WIDTH,
-                        );
-                        ui.ctx().data_mut(|d| d.insert_persisted(left_panel_width_id(), w));
-                        ui.ctx().request_repaint();
-                    }
-                }
-
+                // Content gets a small left inset so nothing (tabs, toolbar,
+                // empty-state) is flush against the T-layout divider.
                 if matches!(self.active_panel, ActivePanel::RedisBrowser)
                     && self.redis_browser.is_none()
                 {
