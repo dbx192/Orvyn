@@ -270,22 +270,39 @@ impl DesktopApp {
                         .ctx()
                         .data_mut(|d| d.get_persisted::<f32>(left_panel_width_id()))
                         .unwrap_or(LEFT_PANEL_DEFAULT_WIDTH);
-                    // Drag handle: a short centered grip (not a full-height
-                    // strip) so the slider doesn't stretch the whole panel.
-                    let grip_len = 100.0;
-                    let grip_top = (avail.center().y - grip_len / 2.0).max(avail.top());
+                    // A fixed-height, centered grip. No full-height line is drawn,
+                    // so the handle never stretches to full screen when the tree
+                    // collapses. The hit area is wider than the visible pill to
+                    // make left/right dragging easy to grab.
+                    let grip_len = 40.0;
+                    let hit_w = 14.0;
+                    let center_y = avail
+                        .center()
+                        .y
+                        .clamp(avail.top() + grip_len / 2.0, avail.bottom() - grip_len / 2.0);
                     let handle_rect = Rect::from_min_max(
-                        pos2(avail.min.x - 3.0, grip_top),
-                        pos2(avail.min.x + 3.0, (grip_top + grip_len).min(avail.bottom())),
+                        pos2(avail.min.x - hit_w / 2.0, center_y - grip_len / 2.0),
+                        pos2(avail.min.x + hit_w / 2.0, center_y + grip_len / 2.0),
                     );
                     let handle =
                         ui.interact(handle_rect, left_panel_divider_id(), Sense::drag());
+                    // Visible pill: only the fixed-height grip.
+                    let visual_rect = Rect::from_min_max(
+                        pos2(avail.min.x - 2.0, center_y - grip_len / 2.0),
+                        pos2(avail.min.x + 2.0, center_y + grip_len / 2.0),
+                    );
                     if handle.hovered() || handle.dragged() {
                         ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
                         ui.painter().rect_filled(
-                            handle_rect.expand2(vec2(1.0, 0.0)),
-                            0.0,
+                            visual_rect.expand2(vec2(2.0, 0.0)),
+                            3.0,
                             ui.visuals().widgets.hovered.fg_stroke.color,
+                        );
+                    } else {
+                        ui.painter().rect_filled(
+                            visual_rect.expand2(vec2(1.0, 0.0)),
+                            3.0,
+                            ui.visuals().widgets.noninteractive.bg_stroke.color,
                         );
                     }
                     if handle.dragged() {
@@ -296,10 +313,6 @@ impl DesktopApp {
                         ui.ctx().data_mut(|d| d.insert_persisted(left_panel_width_id(), w));
                         ui.ctx().request_repaint();
                     }
-                    ui.painter().line_segment(
-                        [avail.left_top(), avail.left_bottom()],
-                        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
-                    );
                 }
 
                 if matches!(self.active_panel, ActivePanel::RedisBrowser)
@@ -544,14 +557,30 @@ impl DesktopApp {
 
                     // ---- Right-aligned actions ----
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let theme_icon = if ui.visuals().dark_mode { "◐" } else { "◑" };
-                        if ui
-                            .add_sized([34.0, 28.0], Button::new(theme_icon).frame(false))
+                        // Drawn here instead of a unicode half-circle glyph: the
+                        // black half of "◐"/"◑" blends into a dark panel bg and
+                        // looks broken in dark mode. Painting a fg-colored circle
+                        // with a clipped filled half renders identically on both
+                        // themes.
+                        let (theme_rect, theme_resp) =
+                            ui.allocate_exact_size(vec2(34.0, 28.0), Sense::click());
+                        if theme_resp.hovered() || theme_resp.dragged() {
+                            ui.painter()
+                                .rect_filled(theme_rect, 6.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                        }
+                        let c = theme_rect.center();
+                        let r = 6.0;
+                        let fg = ui.visuals().text_color();
+                        ui.painter()
+                            .circle_stroke(c, r, Stroke::new(1.4, fg));
+                        let top_half = Rect::from_min_max(pos2(c.x - r, c.y - r), pos2(c.x + r, c.y));
+                        ui.painter()
+                            .with_clip_rect(top_half)
+                            .circle_filled(c, r, fg);
+                        theme_resp
                             .on_hover_text(tr("Toggle theme (Ctrl+T)"))
                             .clicked()
-                        {
-                            self.state.toggle_theme();
-                        }
+                            .then(|| self.state.toggle_theme());
 
                         let error_count = self.state.errors.len();
                         if error_count > 0

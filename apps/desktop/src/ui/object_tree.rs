@@ -452,7 +452,6 @@ impl ObjectTree {
         let expanded =
             self.expanded.contains(&key_str) || self.connection_force_expanded(tree_node);
         let status_color = connection_status_color(&status);
-        let status_label = connection_status_label(&status);
 
         let node = tree_node.node.clone();
         let is_selected = self.selected_connections.contains(&connection_id);
@@ -471,7 +470,7 @@ impl ObjectTree {
                 selected: is_selected,
                 matched,
                 strong: true,
-                connection_status: Some((status_color, &status_label)),
+                connection_status: Some(status_color),
             },
         );
 
@@ -1806,7 +1805,8 @@ struct TreeRowSpec<'a> {
     selected: bool,
     matched: bool,
     strong: bool,
-    connection_status: Option<(Color32, &'a str)>,
+    /// Status shown as a small colored dot next to the connection name.
+    connection_status: Option<Color32>,
 }
 
 fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
@@ -1869,7 +1869,7 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
     }
     x += TREE_ARROW_WIDTH;
 
-    if let Some((status_color, _)) = spec.connection_status {
+    if let Some(status_color) = spec.connection_status {
         painter.circle_filled(pos2(x + 6.0, center_y), 4.0, status_color);
         x += TREE_STATUS_DOT_WIDTH;
     }
@@ -1908,11 +1908,7 @@ fn tree_row(ui: &mut Ui, spec: TreeRowSpec<'_>) -> Response {
     }
     x += badge_width + TREE_BADGE_GAP;
 
-    let right_label = spec
-        .connection_status
-        .map(|(_, label)| label)
-        .or(spec.detail)
-        .filter(|value| !value.trim().is_empty());
+    let right_label = spec.detail.filter(|value| !value.trim().is_empty());
     let right_reserved = if right_label.is_some() { 92.0 } else { 6.0 };
     let text_rect = Rect::from_min_max(
         pos2(x, rect.top()),
@@ -2188,22 +2184,12 @@ fn is_descendant(candidate: &NodeKey, ancestor: &NodeKey) -> bool {
 
 fn connection_status_color(status: &ConnectionStatus) -> Color32 {
     match status {
-        ConnectionStatus::NotConnected => Color32::GRAY,
+        ConnectionStatus::NotConnected => Color32::from_rgb(220, 60, 60),
         ConnectionStatus::Connecting => Color32::from_rgb(255, 200, 0),
         ConnectionStatus::Connected => Color32::from_rgb(64, 180, 64),
         ConnectionStatus::Failed => Color32::from_rgb(220, 60, 60),
-        ConnectionStatus::Disconnected => Color32::from_rgb(160, 160, 160),
+        ConnectionStatus::Disconnected => Color32::from_rgb(220, 60, 60),
     }
-}
-
-fn connection_status_label(status: &ConnectionStatus) -> String {
-    tr(match status {
-        ConnectionStatus::NotConnected => "Not connected",
-        ConnectionStatus::Connecting => "Connecting",
-        ConnectionStatus::Connected => "Connected",
-        ConnectionStatus::Failed => "Connection failed",
-        ConnectionStatus::Disconnected => "Disconnected",
-    })
 }
 
 fn tree_error_text(error: &AppError) -> String {
