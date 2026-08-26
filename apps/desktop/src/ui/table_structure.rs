@@ -1107,8 +1107,8 @@ impl TableStructureView {
         self.active_tab = StructureTab::Columns;
         let default_type = common_column_types(self.kind)
             .first()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "VARCHAR(255)".to_string());
+            .map(|s| type_without_field_width(s))
+            .unwrap_or_else(|| "TEXT".to_string());
         let name = self.unique_column_name("new_column");
         self.columns.push(TableColumn {
             name,
@@ -1495,19 +1495,25 @@ impl TableStructureView {
             .show(ui, |ui| {
                 Grid::new("structure_columns_grid")
                     .striped(true)
-                    .num_columns(7)
+                    .num_columns(8)
                     .spacing([8.0, 0.0])
                     .show(ui, |ui| {
-                        for label in &[
-                            "Name", "Type", "Length", "Null", "Default", "Key", "Comment",
+                        // Fixed-size header cells drive the column widths; the
+                        // label widget would otherwise keep the "Name" column at
+                        // ~40px and ignore the wider inline editor below.
+                        for (label, width) in [
+                            ("Name", 150.0),
+                            ("Type", 150.0),
+                            ("Length", 90.0),
+                            ("Unsigned", 80.0),
+                            ("Null", 50.0),
+                            ("Default", 150.0),
+                            ("Key", 50.0),
+                            ("Comment", 220.0),
                         ] {
-                            ui.label(
-                                RichText::new(if label.is_empty() {
-                                    String::new()
-                                } else {
-                                    tr(label)
-                                })
-                                .strong(),
+                            ui.add_sized(
+                                [width, 20.0],
+                                egui::Label::new(RichText::new(tr(label)).strong()),
                             );
                         }
                         ui.end_row();
@@ -1521,10 +1527,10 @@ impl TableStructureView {
                             let name = self.columns[idx].name.clone();
 
                             // ---- Name: inline editable, focused after copy/paste ----
-                            let name_out = TextEdit::singleline(&mut self.columns[idx].name)
-                                .desired_width(300.0)
-                                .show(ui);
-                            let name_resp = name_out.response;
+                            let name_resp = ui.add_sized(
+                                [150.0, 22.0],
+                                TextEdit::singleline(&mut self.columns[idx].name),
+                            );
                             if name_resp.clicked() {
                                 self.selected_column = Some(idx);
                             }
@@ -1533,14 +1539,17 @@ impl TableStructureView {
                                 // Navicat-style: select the whole (generated) name
                                 // so typing immediately replaces it.
                                 let char_count = self.columns[idx].name.chars().count();
-                                let mut state = name_out.state;
-                                state.cursor.set_char_range(Some(
-                                    egui::text::CCursorRange::two(
-                                        egui::text::CCursor::new(0),
-                                        egui::text::CCursor::new(char_count),
-                                    ),
-                                ));
-                                state.store(ui.ctx(), name_resp.id);
+                                if let Some(mut state) =
+                                    TextEdit::load_state(ui.ctx(), name_resp.id)
+                                {
+                                    state.cursor.set_char_range(Some(
+                                        egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(0),
+                                            egui::text::CCursor::new(char_count),
+                                        ),
+                                    ));
+                                    state.store(ui.ctx(), name_resp.id);
+                                }
                                 self.editing_name = None;
                             }
                             name_resp.context_menu(|ui| {
@@ -1582,16 +1591,23 @@ impl TableStructureView {
                                 }
                             });
 
-                            // ---- Type (dropdown) ----
+                            // ---- Type (dropdown, base type only; length/precision in its own column) ----
+                            let was_unsigned = type_has_unsigned(&self.columns[idx].database_type);
                             let type_combo = ComboBox::from_id_source(("col_type", idx))
-                                .selected_text(self.columns[idx].database_type.clone())
-                                .width(150.0)
+                                .selected_text(type_label(&self.columns[idx].database_type))
+                                .width(140.0)
                                 .show_ui(ui, |ui| {
                                     for candidate in common_column_types(self.kind) {
+                                        let base = type_without_field_width(candidate);
+                                        let target = if was_unsigned {
+                                            format!("{base} UNSIGNED")
+                                        } else {
+                                            base.clone()
+                                        };
                                         ui.selectable_value(
                                             &mut self.columns[idx].database_type,
-                                            candidate.to_string(),
-                                            *candidate,
+                                            target,
+                                            &base,
                                         );
                                     }
                                 });
@@ -1614,6 +1630,23 @@ impl TableStructureView {
                                 );
                             }
                             if width_response.clicked() {
+                                self.selected_column = Some(idx);
+                            }
+
+                            // ---- Unsigned ----
+                            let mut unsigned =
+                                type_has_unsigned(&self.columns[idx].database_type);
+                            let supports_unsigned =
+                                type_supports_unsigned(&self.columns[idx].database_type);
+                            let unsigned_resp = ui.add_enabled(
+                                supports_unsigned,
+                                egui::Checkbox::new(&mut unsigned, ""),
+                            );
+                            if unsigned_resp.changed() {
+                                self.columns[idx].database_type =
+                                    set_type_unsigned(&self.columns[idx].database_type, unsigned);
+                            }
+                            if unsigned_resp.clicked() {
                                 self.selected_column = Some(idx);
                             }
 
@@ -1805,6 +1838,12 @@ impl TableStructureView {
                         ui.end_row();
                         ui.label(tr("Nullable"));
                         ui.checkbox(&mut column.nullable, tr("Allow NULL"));
+                        ui.end_row();
+                        ui.label(tr("Unsigned"));
+                        let mut unsigned = type_has_unsigned(&column.database_type);
+                        if ui.checkbox(&mut unsigned, "").changed() {
+                            column.database_type = set_type_unsigned(&column.database_type, unsigned);
+                        }
                         ui.end_row();
                         ui.label(tr("Primary key"));
                         ui.checkbox(&mut column.primary_key, "");
@@ -2053,6 +2092,7 @@ fn common_column_types(kind: DataSourceKind) -> &'static [&'static str] {
             "JSONB",
             "UUID",
             "BYTEA",
+            "ENUM",
         ],
         ProtocolFamily::SqlServer => &[
             "INT",
@@ -2076,6 +2116,7 @@ fn common_column_types(kind: DataSourceKind) -> &'static [&'static str] {
             "BIT",
             "UNIQUEIDENTIFIER",
             "BINARY(16)",
+            "ENUM",
         ],
         ProtocolFamily::ClickHouse => &[
             "Int32",
@@ -2092,6 +2133,7 @@ fn common_column_types(kind: DataSourceKind) -> &'static [&'static str] {
             "Array(Int32)",
             "UUID",
             "JSON",
+            "ENUM",
         ],
         ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => &[
             "INTEGER",
@@ -2108,6 +2150,7 @@ fn common_column_types(kind: DataSourceKind) -> &'static [&'static str] {
             "BLOB",
             "JSON",
             "UUID",
+            "ENUM",
         ],
         _ => &[
             "INT",
@@ -2120,6 +2163,7 @@ fn common_column_types(kind: DataSourceKind) -> &'static [&'static str] {
             "DECIMAL(10,2)",
             "BOOLEAN",
             "JSON",
+            "ENUM",
         ],
     }
 }
@@ -2163,13 +2207,69 @@ fn type_field_width(value: &str) -> String {
 /// Set (or clear) the length/precision part of a type declaration while
 /// preserving the base type, rebuilding e.g. `VARCHAR` + `255` -> `VARCHAR(255)`.
 fn set_type_field_width(value: &str, new_width: &str) -> String {
-    let base = type_without_field_width(value);
+    let unsigned = type_has_unsigned(value);
+    let no_unsigned = set_type_unsigned(value, false);
+    let base = type_without_field_width(&no_unsigned);
     let width = new_width.trim();
-    if width.is_empty() {
+    let rebuilt = if width.is_empty() {
         base
     } else {
         format!("{base}({width})")
+    };
+    set_type_unsigned(&rebuilt, unsigned)
+}
+
+/// Whether a type declaration carries the MySQL `UNSIGNED` attribute.
+fn type_has_unsigned(value: &str) -> bool {
+    value.to_uppercase().contains("UNSIGNED")
+}
+
+/// Numeric types that support the `UNSIGNED` attribute; the inline grid only
+/// enables the checkbox for these (mirrors Navicat).
+fn type_supports_unsigned(value: &str) -> bool {
+    let base = type_label(value).to_ascii_lowercase();
+    !base.is_empty()
+        && [
+            "int",
+            "integer",
+            "tinyint",
+            "smallint",
+            "mediumint",
+            "bigint",
+            "smallint unsigned",
+            "decimal",
+            "numeric",
+            "float",
+            "float8",
+            "double",
+            "double precision",
+            "real",
+            "year",
+        ]
+        .contains(&base.as_str())
+}
+
+/// Add or remove the `UNSIGNED` attribute while normalizing spacing, e.g.
+/// `INT(11) UNSIGNED` <-> `INT(11)`.
+fn set_type_unsigned(value: &str, unsigned: bool) -> String {
+    let cleaned = value
+        .replace("UNSIGNED", "")
+        .replace("unsigned", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if unsigned && !cleaned.is_empty() {
+        format!("{cleaned} UNSIGNED")
+    } else {
+        cleaned
     }
+}
+
+/// Friendly label for a type: strips `UNSIGNED` and any length parens, e.g.
+/// `INT(11) UNSIGNED` -> `INT`.
+fn type_label(value: &str) -> String {
+    let no_unsigned = set_type_unsigned(value, false);
+    type_without_field_width(&no_unsigned)
 }
 
 #[cfg(test)]

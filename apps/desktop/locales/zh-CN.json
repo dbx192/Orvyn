@@ -145,6 +145,7 @@
   "Copy DDL": "复制 DDL",
   "DDL": "DDL",
   "Null": "可空",
+  "Unsigned": "无符号",
   "Key": "键",
   "Unique": "唯一",
   "Primary": "主键",
