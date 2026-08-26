@@ -10,8 +10,8 @@ mod tree;
 
 use self::payloads::{
     AlterTablePayload, ClearPayload, ClearRequest, DatabaseExportPayload, DropTablePayload,
-    DropTableRequest, ImportTableRequest, IndexCreatePayload, PendingTask, TableDataPayload,
-    TableExportPayload, TableExportRequest, TableStructurePayload,
+    DropTableRequest, ImportTableRequest, IndexCreatePayload, PendingTask, StructDdlPayload,
+    TableDataPayload, TableExportPayload, TableExportRequest, TableStructurePayload,
 };
 use crate::ui::{
     connection_manager::ConnectionManagerUi,
@@ -23,7 +23,7 @@ use crate::ui::{
     shortcuts::{matches_shortcut, AppShortcut, Shortcut},
     state::{AppState, AppTheme},
     table_editor::TableEditor,
-    table_structure::{AlterTableRequest, TableStructureView},
+    table_structure::{AlterTableRequest, DdlOperation, TableStructureView},
 };
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
@@ -62,6 +62,9 @@ pub struct DesktopApp {
     pending_alter_table: Option<PendingTask<AlterTablePayload>>,
     /// Table-structure ALTER requests waiting to be applied one at a time.
     alter_queue: VecDeque<AlterTableRequest>,
+    /// Raw DDL statements (index / FK reshapes, trigger & function SQL).
+    pending_structure_ddl: Option<PendingTask<StructDdlPayload>>,
+    ddl_queue: VecDeque<DdlOperation>,
     export_request: Option<TableExportRequest>,
     import_table_request: Option<ImportTableRequest>,
     drop_table_request: Option<DropTableRequest>,
@@ -137,6 +140,8 @@ impl DesktopApp {
             pending_clear: None,
             pending_alter_table: None,
             alter_queue: VecDeque::new(),
+            pending_structure_ddl: None,
+            ddl_queue: VecDeque::new(),
             export_request: None,
             import_table_request: None,
             drop_table_request: None,

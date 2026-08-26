@@ -5,15 +5,16 @@ use super::{
     },
     payloads::{
         AlterTablePayload, ClearPayload, ClearRequest, DatabaseExportPayload, DropTablePayload,
-        DropTableRequest, IndexCreatePayload, PendingTask, TableDataPayload, TableExportPayload,
-        TableExportRequest, TableStructurePayload,
+        DropTableRequest, IndexCreatePayload, PendingTask, StructDdlPayload, TableDataPayload,
+        TableExportPayload, TableExportRequest, TableStructurePayload,
     },
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
     table_editor::TableEditor,
     table_structure::{
-        build_alter_table_sql, AlterTableRequest, CreateIndexRequest, TableStructureView,
+        build_alter_table_sql, AlterTableRequest, CreateIndexRequest, DdlOperation,
+        TableStructureView,
     },
 };
 use db_common::{
@@ -398,6 +399,37 @@ impl DesktopApp {
                 self.pending_alter_table = Some(cell);
             }
             self.pump_alter_queue();
+        }
+
+        let ddl_cell = self.pending_structure_ddl.take();
+        if let Some(cell) = ddl_cell {
+            let mut done = false;
+            if let Ok(mut guard) = cell.lock() {
+                if let Some(result) = guard.take() {
+                    done = true;
+                    match result {
+                        Ok(payload) => {
+                            self.state
+                                .set_status(format!("Done: {}", payload.label));
+                            self.spawn_structure_load(
+                                payload.connection_id,
+                                payload.database,
+                                payload.schema,
+                                payload.table,
+                            );
+                            self.active_panel = ActivePanel::TableStructure;
+                        }
+                        Err(error) => {
+                            self.state
+                                .set_status(format!("DDL failed: {}", error.message));
+                        }
+                    }
+                }
+            }
+            if !done {
+                self.pending_structure_ddl = Some(cell);
+            }
+            self.pump_ddl_queue();
         }
     }
 
@@ -1038,6 +1070,81 @@ impl DesktopApp {
         if let Some(request) = self.alter_queue.pop_front() {
             self.spawn_alter_table(request);
         }
+    }
+
+    /// Spawn an async task to run one raw DDL statement (index / FK reshape,
+    /// trigger or function CREATE/DROP). The payload carries the reload target.
+    pub(super) fn spawn_structure_ddl(&mut self, op: DdlOperation) {
+        let Some((cid, db, sc, tbl)) = self.structure_target_for_current() else {
+            return;
+        };
+        let query_service = self.query_service.clone();
+        let connection_manager = self.connection_manager.clone();
+        let runtime = self.runtime.clone();
+        let cell: PendingTask<StructDdlPayload> = Arc::new(Mutex::new(None));
+        self.pending_structure_ddl = Some(cell.clone());
+        let DdlOperation { sql, label } = op;
+
+        runtime.spawn(async move {
+            let result = async {
+                let _profile = connection_manager
+                    .get_profile(cid)
+                    .await?
+                    .ok_or_else(|| AppError::validation("connection profile not found"))?;
+                query_service
+                    .execute(
+                        QueryExecutionRequest {
+                            tab_id: QueryId::new(),
+                            connection_id: cid,
+                            database: db.clone(),
+                            schema: sc.clone(),
+                            sql: sql.clone(),
+                            mode: QueryExecutionMode::All,
+                            cursor_offset: 0,
+                            selection: None,
+                            timeout_ms: 60_000,
+                            result_limit: None,
+                            result_offset: 0,
+                            result_total_rows: None,
+                        },
+                        None,
+                    )
+                    .await?;
+                Ok(StructDdlPayload {
+                    connection_id: cid,
+                    database: db,
+                    schema: sc,
+                    table: tbl,
+                    label,
+                })
+            }
+            .await;
+            *cell.lock().unwrap() = Some(result);
+        });
+
+        self.state.set_status("Executing DDL...");
+    }
+
+    /// Pop the next queued DDL operation and run it if none is in flight.
+    pub(super) fn pump_ddl_queue(&mut self) {
+        if self.pending_structure_ddl.is_some() {
+            return;
+        }
+        if let Some(op) = self.ddl_queue.pop_front() {
+            self.spawn_structure_ddl(op);
+        }
+    }
+
+    /// Target table for the current open structure view, if any.
+    fn structure_target_for_current(
+        &self,
+    ) -> Option<(db_common::ConnectionId, Option<String>, Option<String>, String)> {
+        self.active_structure
+            .and_then(|id| self.table_structures.get(&id))
+            .and_then(|v| {
+                let (cid, db, sc, tbl) = v.load_target();
+                Some((cid, db, sc, tbl))
+            })
     }
 }
 

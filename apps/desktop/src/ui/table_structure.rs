@@ -32,6 +32,36 @@ pub struct StagedColumn {
     pub default_value: Option<String>,
 }
 
+/// A raw SQL statement the shell executes in order, then reloads the structure.
+/// Used for object reshapes (index / FK re-create, trigger / function DDL) that
+/// don't map onto a single ALTER TABLE request.
+#[derive(Debug, Clone)]
+pub struct DdlOperation {
+    pub sql: String,
+    pub label: String,
+}
+
+/// State for the Navicat-style DDL editor used to author / edit triggers and
+/// functions. `is_new` opens with a CREATE template; otherwise it pre-fills
+/// with the existing definition so the user can adjust and re-run it.
+#[derive(Debug, Clone, Default)]
+pub struct DdlEditorState {
+    pub title: String,
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    Trigger,
+    Function,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectDropState {
+    pub kind: ObjectKind,
+    pub name: String,
+}
+
 /// A request to alter a table's structure. The shell layer turns this into
 /// a `QueryExecutionRequest` and re-loads the structure after it completes.
 #[derive(Debug, Clone)]
@@ -530,6 +560,17 @@ pub struct TableStructureView {
     // The structure edits waiting to be picked up by the shell. A Save runs
     // a whole batch (add / rename / modify / drop) in one go.
     pending_alter_batch: Vec<AlterTableRequest>,
+    /// Live inline-edited copies used to diff against the reload snapshot on
+    /// Save, so index / FK edits can be turned into DROP + CREATE DDL.
+    original_indexes: Vec<TableIndex>,
+    original_foreign_keys: Vec<TableForeignKey>,
+    /// Raw DDL statements (index / FK reshapes, trigger & function SQL) waiting
+    /// for the shell to execute in order, then reload the structure.
+    pending_ddl: Vec<DdlOperation>,
+    /// Open Navicat-style DDL editor (create / edit trigger or function).
+    ddl_editor: Option<DdlEditorState>,
+    /// Trigger / function marked for deletion (confirm dialog).
+    pending_object_drop: Option<ObjectDropState>,
     /// Set when the user clicks Refresh and there are no staged changes; the
     /// shell picks it up and re-loads the structure from the database.
     refresh_requested: bool,
@@ -577,8 +618,8 @@ impl TableStructureView {
             copied_column: None,
             editing_name: None,
             selected_column: (column_count > 0).then_some(0),
-            indexes,
-            foreign_keys,
+            indexes: indexes.clone(),
+            foreign_keys: foreign_keys.clone(),
             triggers,
             functions,
             create_sql,
@@ -601,6 +642,11 @@ impl TableStructureView {
             draft_fk_on_delete: String::new(),
             add_fk_error: None,
             pending_alter_batch: Vec::new(),
+            original_indexes: indexes.clone(),
+            original_foreign_keys: foreign_keys.clone(),
+            pending_ddl: Vec::new(),
+            ddl_editor: None,
+            pending_object_drop: None,
             refresh_requested: false,
             confirm_refresh: false,
         }
@@ -652,6 +698,11 @@ impl TableStructureView {
             draft_fk_on_delete: String::new(),
             add_fk_error: None,
             pending_alter_batch: Vec::new(),
+            original_indexes: Vec::new(),
+            original_foreign_keys: Vec::new(),
+            pending_ddl: Vec::new(),
+            ddl_editor: None,
+            pending_object_drop: None,
             refresh_requested: false,
             confirm_refresh: false,
         }
@@ -676,6 +727,12 @@ impl TableStructureView {
 
     pub fn take_alter_requests(&mut self) -> Vec<AlterTableRequest> {
         std::mem::take(&mut self.pending_alter_batch)
+    }
+
+    /// Raw DDL statements (index / FK reshapes, trigger / function SQL) that the
+    /// shell executes in order, then re-loads the structure.
+    pub fn take_ddl_operations(&mut self) -> Vec<DdlOperation> {
+        std::mem::take(&mut self.pending_ddl)
     }
 
     /// True once the user asked to re-load the structure from the database.
@@ -785,9 +842,9 @@ impl TableStructureView {
         changes
     }
 
-    /// True when the designer has staged column edits waiting to be saved.
+    /// True when the designer has staged column/index/FK edits waiting to be saved.
     fn has_pending_changes(&self) -> bool {
-        !self.staged_requests().is_empty()
+        !self.staged_requests().is_empty() || self.index_fk_changed()
     }
 
     /// Return the fully qualified table name.
@@ -805,6 +862,8 @@ impl TableStructureView {
         self.drop_column_dialog(ui, &mut message);
         self.drop_index_dialog(ui, &mut message);
         self.add_fk_dialog(ui, &mut message);
+        self.object_drop_dialog(ui, &mut message);
+        self.ddl_editor_window(ui, &mut message);
         self.refresh_dialog(ui, &mut message);
 
         ui.horizontal_wrapped(|ui| {
@@ -891,7 +950,7 @@ impl TableStructureView {
                 )
                 .clicked()
             {
-                self.prepare_add_index();
+                self.add_inline_index(&mut message);
             }
             if ui
                 .add_enabled(
@@ -900,7 +959,7 @@ impl TableStructureView {
                 )
                 .clicked()
             {
-                self.prepare_add_fk();
+                self.add_inline_fk(&mut message);
             }
             ui.separator();
             let has_changes = self.has_pending_changes();
@@ -924,7 +983,22 @@ impl TableStructureView {
                 let requests = self.staged_requests();
                 let count = requests.len();
                 self.pending_alter_batch.extend(requests);
-                message = Some(format!("Saving {} structure change(s)...", count));
+                let (obj_ops, ddl_error) = match self.index_fk_ddl_ops() {
+                    Ok(ops) => (ops, None),
+                    Err(error) => (Vec::new(), Some(error)),
+                };
+                if let Some(error) = ddl_error {
+                    message = Some(format!("Cannot build object DDL: {error}"));
+                }
+                let op_count = obj_ops.len();
+                self.pending_ddl.extend(obj_ops);
+                message = Some(if op_count > 0 && count > 0 {
+                    format!("Saving {count} structure change(s), {op_count} object op(s)...")
+                } else if op_count > 0 {
+                    format!("Saving {op_count} object op(s)...")
+                } else {
+                    format!("Saving {count} structure change(s)...")
+                });
             }
         });
 
@@ -1866,22 +1940,319 @@ impl TableStructureView {
             });
     }
 
-    /// Renders the indexes section as a table.
-    fn indexes_table(&mut self, ui: &mut Ui) {
-        if self.indexes.is_empty() {
-            empty_message(ui, "No indexes");
-            return;
-        }
+    // ---- Generic DDL helpers (index / FK / trigger / function) ----
 
+    /// Dialect-aware DROP or CREATE INDEX against the current table.
+    fn build_index_ddl(&self, index: &TableIndex, drop: bool) -> Result<String, AppError> {
+        let dialect = dialect_for_kind(self.kind);
+        let table_sql = qualified_table_sql(
+            dialect.as_ref(),
+            self.kind,
+            self.database.as_deref(),
+            self.schema.as_deref(),
+            &self.table,
+        )?;
+        let name_sql = quote_id(dialect.as_ref(), &index.name)?;
+        let cols = index
+            .columns
+            .iter()
+            .map(|c| quote_id(dialect.as_ref(), c))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        let unique = if index.unique { "UNIQUE " } else { "" };
+        let statement = match self.kind.protocol_family() {
+            ProtocolFamily::MySql | ProtocolFamily::Tdengine => {
+                if drop {
+                    format!("DROP INDEX {name_sql} ON {table_sql}")
+                } else {
+                    format!("CREATE {unique}INDEX {name_sql} ON {table_sql} ({cols})")
+                }
+            }
+            ProtocolFamily::SqlServer => {
+                if drop {
+                    format!("DROP INDEX {name_sql} ON {table_sql}")
+                } else {
+                    format!("CREATE {unique}INDEX {name_sql} ON {table_sql} ({cols})")
+                }
+            }
+            ProtocolFamily::PostgreSql | ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => {
+                let full = if self.schema.as_deref().is_some_and(|s| !s.is_empty())
+                    && self.kind.protocol_family() == ProtocolFamily::PostgreSql
+                {
+                    format!(
+                        "{}.{name_sql}",
+                        quote_id(dialect.as_ref(), self.schema.as_deref().unwrap_or(""))?
+                    )
+                } else {
+                    name_sql.clone()
+                };
+                if drop {
+                    format!("DROP INDEX IF EXISTS {full}")
+                } else {
+                    format!("CREATE {unique}INDEX IF NOT EXISTS {full} ON {table_sql} ({cols})")
+                }
+            }
+            _ => return Err(AppError::unsupported("index DDL is not supported for this data source")),
+        };
+        Ok(statement)
+    }
+
+    /// Dialect-aware DROP or CREATE FOREIGN KEY constraint.
+    fn build_fk_ddl(&self, fk: &TableForeignKey, drop: bool) -> Result<String, AppError> {
+        let dialect = dialect_for_kind(self.kind);
+        let table_sql = qualified_table_sql(
+            dialect.as_ref(),
+            self.kind,
+            self.database.as_deref(),
+            self.schema.as_deref(),
+            &self.table,
+        )?;
+        let name_sql = quote_id(dialect.as_ref(), &fk.name)?;
+        let statement = match self.kind.protocol_family() {
+            ProtocolFamily::MySql | ProtocolFamily::PostgreSql | ProtocolFamily::SqlServer => {
+                if drop {
+                    let verb = if self.kind.protocol_family() == ProtocolFamily::MySql {
+                        "DROP FOREIGN KEY"
+                    } else {
+                        "DROP CONSTRAINT"
+                    };
+                    format!("ALTER TABLE {table_sql} {verb} {name_sql}")
+                } else {
+                    let cols = fk
+                        .columns
+                        .iter()
+                        .map(|c| quote_id(dialect.as_ref(), c))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .join(", ");
+                    let ref_table_sql = qualified_table_sql(
+                        dialect.as_ref(),
+                        self.kind,
+                        self.database.as_deref(),
+                        self.schema.as_deref(),
+                        &fk.referenced_table,
+                    )?;
+                    let ref_cols = fk
+                        .referenced_columns
+                        .iter()
+                        .map(|c| quote_id(dialect.as_ref(), c))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .join(", ");
+                    let on_update = fk
+                        .on_update
+                        .as_deref()
+                        .map(|v| format!(" ON UPDATE {v}"))
+                        .unwrap_or_default();
+                    let on_delete = fk
+                        .on_delete
+                        .as_deref()
+                        .map(|v| format!(" ON DELETE {v}"))
+                        .unwrap_or_default();
+                    format!(
+                        "ALTER TABLE {table_sql} ADD CONSTRAINT {name_sql} \
+                         FOREIGN KEY ({cols}) REFERENCES {ref_table_sql} ({ref_cols}){on_update}{on_delete}"
+                    )
+                }
+            }
+            _ => {
+                return Err(AppError::unsupported(
+                    "foreign key DDL is not supported for this data source",
+                ))
+            }
+        };
+        Ok(statement)
+    }
+
+    /// Build DROP DDL for a trigger / function.
+    fn build_object_drop_sql(&self, kind: ObjectKind, name: &str) -> String {
+        let dialect = dialect_for_kind(self.kind);
+        let name_sql = quote_id(dialect.as_ref(), name).unwrap_or_else(|_| name.to_string());
+        match kind {
+            ObjectKind::Trigger => format!("DROP TRIGGER IF EXISTS {name_sql}"),
+            ObjectKind::Function => format!("DROP FUNCTION IF EXISTS {name_sql}"),
+        }
+    }
+
+    /// Baseline CREATE text shown when authoring a new trigger in the DDL editor.
+    fn trigger_create_template(&self) -> String {
+        format!(
+            "CREATE TRIGGER trigger_{}\nBEFORE INSERT\nON {}\nFOR EACH ROW\nBEGIN\n    -- work here\nEND;",
+            self.table_name_display(),
+            self.table_name(),
+        )
+    }
+
+    /// Baseline CREATE text shown when authoring a new function in the DDL editor.
+    fn function_create_template(&self) -> String {
+        format!(
+            "CREATE OR REPLACE FUNCTION {}\nRETURNS void AS $$\nBEGIN\n    -- work here\nEND;\n$$ LANGUAGE plpgsql;",
+            self.table,
+        )
+    }
+
+    fn table_name_display(&self) -> String {
+        self.table.replace('.', "_")
+    }
+
+    /// Diff edited indexes / FKs against the reload snapshot and produce the
+    /// ordered DROP + CREATE DDL statements a Save should run.
+    fn index_fk_ddl_ops(&self) -> Result<Vec<DdlOperation>, String> {
+        let mut ops = Vec::new();
+        // ---- Indexes (drops first, then creates/diffs in display order) ----
+        for orig in &self.original_indexes {
+            if orig.primary {
+                continue;
+            }
+            if !self.indexes.iter().any(|c| c.name == orig.name) {
+                ops.push(DdlOperation {
+                    sql: self
+                        .build_index_ddl(orig, true)
+                        .map_err(|e| e.message.clone())?,
+                    label: format!("Drop index {}", orig.name),
+                });
+            }
+        }
+        for cur in &self.indexes {
+            if cur.primary || cur.name.is_empty() || cur.columns.is_empty() {
+                continue;
+            }
+            match self
+                .original_indexes
+                .iter()
+                .find(|o| o.name == cur.name)
+            {
+                None => ops.push(DdlOperation {
+                    sql: self.build_index_ddl(cur, false).map_err(|e| e.message.clone())?,
+                    label: format!("Create index {}", cur.name),
+                }),
+                Some(orig) => {
+                    if orig.unique != cur.unique || orig.columns != cur.columns {
+                        ops.push(DdlOperation {
+                            sql: self.build_index_ddl(orig, true).map_err(|e| e.message.clone())?,
+                            label: format!("Rebuild index {}", cur.name),
+                        });
+                        ops.push(DdlOperation {
+                            sql: self.build_index_ddl(cur, false).map_err(|e| e.message.clone())?,
+                            label: format!("Recreate index {}", cur.name),
+                        });
+                    }
+                }
+            }
+        }
+        // ---- Foreign keys ----
+        for orig in &self.original_foreign_keys {
+            if !self.foreign_keys.iter().any(|c| c.name == orig.name) {
+                ops.push(DdlOperation {
+                    sql: self.build_fk_ddl(orig, true).map_err(|e| e.message.clone())?,
+                    label: format!("Drop foreign key {}", orig.name),
+                });
+            }
+        }
+        for cur in &self.foreign_keys {
+            if cur.name.is_empty() || cur.columns.is_empty() || cur.referenced_table.is_empty() {
+                continue;
+            }
+            match self
+                .original_foreign_keys
+                .iter()
+                .find(|o| o.name == cur.name)
+            {
+                None => ops.push(DdlOperation {
+                    sql: self.build_fk_ddl(cur, false).map_err(|e| e.message.clone())?,
+                    label: format!("Add foreign key {}", cur.name),
+                }),
+                Some(orig) => {
+                    let changed = orig.columns != cur.columns
+                        || orig.referenced_table != cur.referenced_table
+                        || orig.referenced_columns != cur.referenced_columns
+                        || orig.on_update != cur.on_update
+                        || orig.on_delete != cur.on_delete;
+                    if changed {
+                        ops.push(DdlOperation {
+                            sql: self.build_fk_ddl(orig, true).map_err(|e| e.message.clone())?,
+                            label: format!("Rebuild foreign key {}", cur.name),
+                        });
+                        ops.push(DdlOperation {
+                            sql: self.build_fk_ddl(cur, false).map_err(|e| e.message.clone())?,
+                            label: format!("Recreate foreign key {}", cur.name),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(ops)
+    }
+
+    /// Cheap diff (no SQL building) used to light up the Save button.
+    fn index_fk_changed(&self) -> bool {
+        self.indexes != self.original_indexes || self.foreign_keys != self.original_foreign_keys
+    }
+
+    /// Append a blank editable index row inline (Navicat designer style).
+    fn add_inline_index(&mut self, message: &mut Option<String>) {
+        self.active_tab = StructureTab::Indexes;
+        let base = self
+            .columns
+            .first()
+            .map(|c| c.name.as_str())
+            .unwrap_or("column");
+        let mut n = 2;
+        let name = loop {
+            let candidate = format!("idx_{}_{}", self.table_name_display(), base);
+            if !self.indexes.iter().any(|i| i.name == candidate) {
+                break candidate;
+            }
+            let candidate = format!("idx_{}_{}_{}", self.table_name_display(), base, n);
+            if !self.indexes.iter().any(|i| i.name == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        self.indexes.push(TableIndex {
+            name,
+            columns: Vec::new(),
+            unique: false,
+            primary: false,
+        });
+        *message = Some(tr("Index added; choose its columns and click Save").to_string());
+    }
+
+    /// Append a blank editable foreign key row inline.
+    fn add_inline_fk(&mut self, message: &mut Option<String>) {
+        self.active_tab = StructureTab::ForeignKeys;
+        let mut n = 2;
+        let name = loop {
+            let candidate = format!("fk_{}_{}", self.table_name_display(), "1");
+            if !self.foreign_keys.iter().any(|f| f.name == candidate) {
+                break candidate;
+            }
+            let candidate = format!("fk_{}_{}", self.table_name_display(), n);
+            if !self.foreign_keys.iter().any(|f| f.name == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        self.foreign_keys.push(TableForeignKey {
+            name,
+            columns: Vec::new(),
+            referenced_table: String::new(),
+            referenced_columns: Vec::new(),
+            on_update: None,
+            on_delete: None,
+        });
+        *message = Some(tr("Foreign key added; edit its columns and click Save").to_string());
+    }
+
+    /// Renders the indexes section as an inline-editable table (Navicat style).
+    fn indexes_table(&mut self, ui: &mut Ui) {
         ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 Grid::new("structure_indexes_grid")
                     .striped(true)
                     .num_columns(5)
-                    .spacing([8.0, 0.0])
+                    .spacing([8.0, 4.0])
                     .show(ui, |ui| {
-                        for label in &["Name", "Columns", "Unique", "Primary", ""] {
+                        for label in &["Name", "Columns", "Unique", "", "Primary"] {
                             ui.label(
                                 RichText::new(if label.is_empty() {
                                     String::new()
@@ -1893,46 +2264,74 @@ impl TableStructureView {
                         }
                         ui.end_row();
 
-                        let mut drop_requested = None;
-                        for idx in &self.indexes {
-                            ui.label(&idx.name);
-                            ui.label(idx.columns.join(", "));
-                            ui.label(if idx.unique { "YES" } else { "" });
-                            ui.label(if idx.primary { "YES" } else { "" });
+                        let mut remove = None;
+                        let count = self.indexes.len();
+                        for i in 0..count {
+                            let idx = &mut self.indexes[i];
+                            ui.add_sized(
+                                [170.0, 22.0],
+                                TextEdit::singleline(&mut idx.name).hint_text(tr("Index name")),
+                            );
+                            let mut cols_text = idx.columns.join(", ");
+                            if ui
+                                .add_sized(
+                                    [230.0, 22.0],
+                                    TextEdit::singleline(&mut cols_text)
+                                        .hint_text(tr("Columns")),
+                                )
+                                .changed()
+                            {
+                                idx.columns = cols_text
+                                    .split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                            }
+                            let mut unique = idx.unique;
+                            if ui.checkbox(&mut unique, "").changed() {
+                                idx.unique = unique;
+                            }
                             if !idx.primary {
                                 if ui
                                     .small_button(tr("Delete"))
                                     .on_hover_text(tr("Drop index"))
                                     .clicked()
                                 {
-                                    drop_requested = Some(idx.name.clone());
+                                    remove = Some(i);
                                 }
                             } else {
                                 ui.label("");
                             }
+                            let mut primary = idx.primary;
+                            ui.add_enabled_ui(false, |ui| {
+                                ui.checkbox(&mut primary, "");
+                            });
                             ui.end_row();
                         }
-                        if let Some(name) = drop_requested {
-                            self.pending_drop_index = Some(name);
+                        if let Some(i) = remove {
+                            self.indexes.remove(i);
                         }
                     });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr("New Index")).clicked() {
+                        let mut m = None;
+                        self.add_inline_index(&mut m);
+                    }
+                });
             });
     }
 
-    /// Renders the foreign keys section as a table.
-    fn foreign_keys_table(&self, ui: &mut Ui) {
-        if self.foreign_keys.is_empty() {
-            empty_message(ui, &tr("No foreign keys"));
-            return;
-        }
-
+    /// Renders the foreign keys section as an inline-editable table.
+    fn foreign_keys_table(&mut self, ui: &mut Ui) {
         ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 Grid::new("structure_fks_grid")
                     .striped(true)
-                    .num_columns(6)
-                    .spacing([8.0, 0.0])
+                    .num_columns(7)
+                    .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                         for label in &[
                             "Name",
@@ -1941,45 +2340,115 @@ impl TableStructureView {
                             "Referenced Columns",
                             "On Update",
                             "On Delete",
+                            "",
                         ] {
                             ui.label(RichText::new(tr(label)).strong());
                         }
                         ui.end_row();
 
-                        for fk in &self.foreign_keys {
-                            ui.label(&fk.name);
-                            ui.label(fk.columns.join(", "));
-                            ui.label(&fk.referenced_table);
-                            ui.label(fk.referenced_columns.join(", "));
-                            ui.label(fk.on_update.as_deref().unwrap_or(""));
-                            ui.label(fk.on_delete.as_deref().unwrap_or(""));
+                        let mut remove = None;
+                        let count = self.foreign_keys.len();
+                        for i in 0..count {
+                            let fk = &mut self.foreign_keys[i];
+                            ui.add_sized(
+                                [150.0, 22.0],
+                                TextEdit::singleline(&mut fk.name).hint_text(tr("FK name")),
+                            );
+                            let mut cols_text = fk.columns.join(", ");
+                            if ui
+                                .add_sized(
+                                    [130.0, 22.0],
+                                    TextEdit::singleline(&mut cols_text).hint_text(tr("Local cols")),
+                                )
+                                .changed()
+                            {
+                                fk.columns = cols_text
+                                    .split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                            }
+                            let mut ref_table = fk.referenced_table.clone();
+                            if ui
+                                .add_sized(
+                                    [130.0, 22.0],
+                                    TextEdit::singleline(&mut ref_table)
+                                        .hint_text(tr("Referenced table")),
+                                )
+                                .changed()
+                            {
+                                fk.referenced_table = ref_table.trim().to_string();
+                            }
+                            let mut ref_cols_text = fk.referenced_columns.join(", ");
+                            if ui
+                                .add_sized(
+                                    [130.0, 22.0],
+                                    TextEdit::singleline(&mut ref_cols_text)
+                                        .hint_text(tr("Referenced cols")),
+                                )
+                                .changed()
+                            {
+                                fk.referenced_columns = ref_cols_text
+                                    .split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                            }
+                            fk_rule_combo(ui, &mut fk.on_update, ("fk_on_update", i));
+                            fk_rule_combo(ui, &mut fk.on_delete, ("fk_on_delete", i));
+                            if ui
+                                .small_button(tr("Delete"))
+                                .on_hover_text(tr("Drop foreign key"))
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
                             ui.end_row();
                         }
+                        if let Some(i) = remove {
+                            self.foreign_keys.remove(i);
+                        }
                     });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr("New FK")).clicked() {
+                        let mut m = None;
+                        self.add_inline_fk(&mut m);
+                    }
+                });
             });
     }
 
-    /// Renders the triggers section as a table.
-    fn triggers_table(&self, ui: &mut Ui) {
+    /// Renders the triggers section as a table with Edit / Delete actions.
+    fn triggers_table(&mut self, ui: &mut Ui) {
         if self.triggers.is_empty() {
             empty_message(ui, "No triggers");
-            return;
         }
 
         ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                let mut edit = None;
+                let mut drop = None;
                 Grid::new("structure_triggers_grid")
                     .striped(true)
-                    .num_columns(4)
-                    .spacing([8.0, 0.0])
+                    .num_columns(6)
+                    .spacing([8.0, 4.0])
                     .show(ui, |ui| {
-                        for label in &["Name", "Event", "Timing", "Statement"] {
-                            ui.label(RichText::new(tr(label)).strong());
+                        for label in &["Name", "Event", "Timing", "Statement", "", ""] {
+                            ui.label(
+                                RichText::new(if label.is_empty() {
+                                    String::new()
+                                } else {
+                                    tr(label)
+                                })
+                                .strong(),
+                            );
                         }
                         ui.end_row();
 
-                        for trg in &self.triggers {
+                        for (index, trg) in self.triggers.iter().enumerate() {
                             ui.label(&trg.name);
                             ui.label(&trg.event);
                             ui.label(&trg.timing);
@@ -1990,40 +2459,147 @@ impl TableStructureView {
                                 stmt.to_string()
                             };
                             ui.label(preview).on_hover_text(stmt);
+                            if ui
+                                .small_button(tr("Edit"))
+                                .on_hover_text(tr("Edit trigger DDL"))
+                                .clicked()
+                            {
+                                edit = Some(index);
+                            }
+                            if ui
+                                .small_button(tr("Delete"))
+                                .on_hover_text(tr("Drop trigger"))
+                                .clicked()
+                            {
+                                drop = Some((ObjectKind::Trigger, trg.name.clone()));
+                            }
                             ui.end_row();
                         }
                     });
+                if let Some(index) = edit {
+                    self.open_trigger_editor(index);
+                }
+                if let Some((kind, name)) = drop {
+                    self.pending_object_drop =
+                        Some(ObjectDropState { kind, name });
+                }
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr("New Trigger")).clicked() {
+                        self.ddl_editor = Some(DdlEditorState {
+                            title: tr("New Trigger").to_string(),
+                            sql: self.trigger_create_template(),
+                        });
+                    }
+                });
             });
     }
 
-    /// Renders the functions section as a table.
-    fn functions_table(&self, ui: &mut Ui) {
+    /// Renders the functions section as a table with Edit / Delete actions.
+    fn functions_table(&mut self, ui: &mut Ui) {
         if self.functions.is_empty() {
             empty_message(ui, "No functions");
-            return;
         }
 
         ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                let mut edit = None;
+                let mut drop = None;
                 Grid::new("structure_functions_grid")
                     .striped(true)
-                    .num_columns(3)
-                    .spacing([8.0, 0.0])
+                    .num_columns(5)
+                    .spacing([8.0, 4.0])
                     .show(ui, |ui| {
-                        for label in &["Name", "Return Type", "Kind"] {
-                            ui.label(RichText::new(tr(label)).strong());
+                        for label in &["Name", "Return Type", "Kind", "", ""] {
+                            ui.label(
+                                RichText::new(if label.is_empty() {
+                                    String::new()
+                                } else {
+                                    tr(label)
+                                })
+                                .strong(),
+                            );
                         }
                         ui.end_row();
 
-                        for func in &self.functions {
+                        for (index, func) in self.functions.iter().enumerate() {
                             ui.label(&func.name);
                             ui.label(func.return_type.as_deref().unwrap_or(""));
                             ui.label(&func.kind);
+                            if ui
+                                .small_button(tr("Edit"))
+                                .on_hover_text(tr("Edit function DDL"))
+                                .clicked()
+                            {
+                                edit = Some(index);
+                            }
+                            if ui
+                                .small_button(tr("Delete"))
+                                .on_hover_text(tr("Drop function"))
+                                .clicked()
+                            {
+                                drop = Some((ObjectKind::Function, func.name.clone()));
+                            }
                             ui.end_row();
                         }
                     });
+                if let Some(index) = edit {
+                    self.open_function_editor(index);
+                }
+                if let Some((kind, name)) = drop {
+                    self.pending_object_drop = Some(ObjectDropState { kind, name });
+                }
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr("New Function")).clicked() {
+                        self.ddl_editor = Some(DdlEditorState {
+                            title: tr("New Function").to_string(),
+                            sql: self.function_create_template(),
+                        });
+                    }
+                });
             });
+    }
+
+    /// Open the DDL editor pre-filled with a reconstructed CREATE TRIGGER.
+    fn open_trigger_editor(&mut self, index: usize) {
+        if let Some(trg) = self.triggers.get(index) {
+            let stmt = trg.statement.clone().unwrap_or_default();
+            let sql = format!(
+                "CREATE TRIGGER {}\n{} {}\nON {}\nFOR EACH ROW\n{}\n",
+                trg.name,
+                trg.timing.to_uppercase(),
+                trg.event.to_uppercase(),
+                self.table_name_display(),
+                stmt,
+            );
+            self.ddl_editor = Some(DdlEditorState {
+                title: format!("Edit Trigger - {}", trg.name),
+                sql,
+            });
+            self.active_tab = StructureTab::Triggers;
+        }
+    }
+
+    /// Open the DDL editor pre-filled with a CREATE FUNCTION stub. The full
+    /// body is not kept in the metadata, so it is left for the user to paste.
+    fn open_function_editor(&mut self, index: usize) {
+        if let Some(func) = self.functions.get(index) {
+            let ret = func.return_type.as_deref().unwrap_or("void");
+            let lang = func.language.as_deref().unwrap_or("plpgsql");
+            let sql = format!(
+                "CREATE OR REPLACE FUNCTION {}\nRETURNS {}\nAS $$\n    -- Full definition not retained by metadata; paste it here.\nBEGIN\n    RAISE NOTICE 'TODO';\nEND;\n$$ LANGUAGE {};",
+                func.name, ret, lang,
+            );
+            self.ddl_editor = Some(DdlEditorState {
+                title: format!("Edit Function - {}", func.name),
+                sql,
+            });
+            self.active_tab = StructureTab::Functions;
+        }
     }
 
     fn ddl_view(&self, ui: &mut Ui) {
@@ -2040,6 +2616,111 @@ impl TableStructureView {
                 );
             });
     }
+
+    /// Confirm dialog shown before executing DROP for a trigger / function.
+    fn object_drop_dialog(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+        let Some(drop) = self.pending_object_drop.take() else {
+            return;
+        };
+        let kind_label = match drop.kind {
+            ObjectKind::Trigger => "trigger",
+            ObjectKind::Function => "function",
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        Window::new(tr("Confirm Delete"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.label(
+                    RichText::new(tr("Drop this object?")).strong(),
+                );
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "{}: {}",
+                    kind_label.to_uppercase(),
+                    drop.name
+                ));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Cancel")).clicked() {
+                        cancel = true;
+                    }
+                    if ui.button(tr("Drop")).clicked() {
+                        confirm = true;
+                    }
+                });
+            });
+        if confirm {
+            let sql = self.build_object_drop_sql(drop.kind, &drop.name);
+            self.pending_ddl.push(DdlOperation {
+                sql,
+                label: format!("Drop {}", drop.name),
+            });
+            *message = Some(format!("Dropping {} {}...", kind_label, drop.name));
+        }
+        if !cancel && open {
+            self.pending_object_drop = Some(drop);
+        }
+    }
+
+    /// Navicat-style DDL editor used to create / edit triggers and functions.
+    /// The user authors (or refines) the full CREATE / DROP and clicks Run Query.
+    fn ddl_editor_window(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+        let Some(editor_title) = self.ddl_editor.as_ref().map(|e| e.title.clone()) else {
+            return;
+        };
+        let mut open = true;
+        let mut run = false;
+        let mut cancel = false;
+        Window::new(editor_title)
+            .default_size([780.0, 520.0])
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.label(tr("Edit the SQL and run it against the current database."));
+                ui.add_space(6.0);
+                ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if let Some(editor) = self.ddl_editor.as_mut() {
+                            ui.add(
+                                TextEdit::multiline(&mut editor.sql)
+                                    .font(TextStyle::Monospace)
+                                    .desired_width(ui.available_width().max(640.0))
+                                    .desired_rows(24)
+                                    .interactive(true),
+                            );
+                        }
+                    });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Cancel")).clicked() {
+                        cancel = true;
+                    }
+                    if ui.button(tr("Run Query")).clicked() {
+                        run = true;
+                    }
+                });
+            });
+        if run {
+            if let Some(editor) = self.ddl_editor.take() {
+                let sql = editor.sql.trim().to_string();
+                if !sql.is_empty() {
+                    self.pending_ddl.push(DdlOperation {
+                        sql,
+                        label: editor.title,
+                    });
+                    *message = Some("Executing DDL...".to_string());
+                }
+            }
+        } else if cancel || !open {
+            self.ddl_editor = None;
+        }
+    }
 }
 
 fn empty_message(ui: &mut Ui, text: &str) {
@@ -2047,6 +2728,33 @@ fn empty_message(ui: &mut Ui, text: &str) {
     ui.vertical_centered(|ui| {
         ui.label(RichText::new(text).color(Color32::GRAY).italics());
     });
+}
+
+/// Inline combo for the ON UPDATE / ON DELETE rule of a foreign key.
+fn fk_rule_combo(ui: &mut Ui, slot: &mut Option<String>, tag: (&str, usize)) {
+    let current = slot.clone().unwrap_or_default();
+    ComboBox::from_id_source((tag.0, tag.1))
+        .selected_text(if current.is_empty() {
+            "—".to_string()
+        } else {
+            current.clone()
+        })
+        .width(120.0)
+        .show_ui(ui, |ui| {
+            let opts = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION", "SET DEFAULT"];
+            for opt in opts {
+                let value = if opt.is_empty() {
+                    None
+                } else {
+                    Some(opt.to_string())
+                };
+                ui.selectable_value(
+                    slot,
+                    value,
+                    if opt.is_empty() { "—" } else { opt },
+                );
+            }
+        });
 }
 
 /// Common column type candidates offered in the Add-Column dropdown, grouped

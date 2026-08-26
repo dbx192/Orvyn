@@ -22,6 +22,7 @@ impl eframe::App for DesktopApp {
             || self.pending_table_drop.is_some()
             || self.pending_clear.is_some()
             || self.pending_alter_table.is_some()
+            || self.pending_structure_ddl.is_some()
             || self
                 .search_browser
                 .as_ref()
@@ -371,6 +372,7 @@ impl DesktopApp {
                             let message = view.ui(ui);
                             let create_index = view.take_create_index_request();
                             let alter_requests = view.take_alter_requests();
+                            let ddl_ops = view.take_ddl_operations();
                             // Capture the refresh target (owned data) up front so
                             // the `view` borrow ends before the `self` calls below.
                             let refresh = view.take_refresh_request();
@@ -387,6 +389,10 @@ impl DesktopApp {
                             if !alter_requests.is_empty() {
                                 self.alter_queue.extend(alter_requests);
                                 self.pump_alter_queue();
+                            }
+                            if !ddl_ops.is_empty() {
+                                self.ddl_queue.extend(ddl_ops);
+                                self.pump_ddl_queue();
                             }
                             if let Some((connection_id, database, schema, table)) = refresh_target {
                                 if let Some(name) = refresh_name {

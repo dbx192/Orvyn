@@ -75,6 +75,16 @@ pub(super) struct IndexCreatePayload {
     pub(super) name: String,
 }
 
+/// Payload produced after a batch of raw DDL statements (index / FK reshapes,
+/// trigger & function SQL) has run; triggers a structure reload.
+pub(super) struct StructDdlPayload {
+    pub(super) connection_id: ConnectionId,
+    pub(super) database: Option<String>,
+    pub(super) schema: Option<String>,
+    pub(super) table: String,
+    pub(super) label: String,
+}
+
 pub(super) struct DropTableRequest {
     pub(super) connection_id: ConnectionId,
     pub(super) database: Option<String>,

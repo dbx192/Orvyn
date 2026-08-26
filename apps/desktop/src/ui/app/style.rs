@@ -106,9 +106,14 @@ pub(super) fn apply_app_style(ctx: &Context, theme: AppTheme) {
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, palette.accent_border);
     visuals.widgets.open.fg_stroke = Stroke::new(1.0, palette.accent_fg);
 
-    // ---- Selection: quiet, refusable, professional ----
-    visuals.selection.bg_fill = palette.accent;
-    visuals.selection.stroke = Stroke::new(1.0, palette.accent_border);
+    // ---- Selection: high-contrast so highlighted SQL / DDL text stays
+    // readable in both themes (egui paints selected text in stroke.color). ----
+    let selection = match theme {
+        AppTheme::Light => (Color32::from_rgb(88, 148, 232), Color32::from_rgb(255, 255, 255)),
+        AppTheme::Dark => (Color32::from_rgb(40, 92, 168), Color32::from_rgb(255, 255, 255)),
+    };
+    visuals.selection.bg_fill = selection.0;
+    visuals.selection.stroke = Stroke::new(1.0, selection.1);
 
     // ---- Geometry ----
     let radius = Rounding::same(6.0);
