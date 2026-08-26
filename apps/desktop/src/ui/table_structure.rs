@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
-use crate::ui::i18n::text as tr;
+use crate::ui::i18n::{format as trf, text as tr};
 use db_common::{
     dialect::{BacktickDialect, Dialect, DoubleQuoteDialect, Identifier},
     AppError, ConnectionId, DataSourceKind, DatabaseFunction, ProtocolFamily, TableColumn,
@@ -1568,6 +1568,11 @@ impl TableStructureView {
         ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // Force a content width wider than the viewport. Without this
+                // the Grid squeezes every column down to fit the panel, so with
+                // many fields the right-hand columns get clipped and the
+                // horizontal scroll bar never appears.
+                ui.set_min_width(1040.0);
                 Grid::new("structure_columns_grid")
                     .striped(true)
                     .num_columns(8)
@@ -2075,19 +2080,48 @@ impl TableStructureView {
 
     /// Baseline CREATE text shown when authoring a new trigger in the DDL editor.
     fn trigger_create_template(&self) -> String {
-        format!(
-            "CREATE TRIGGER trigger_{}\nBEFORE INSERT\nON {}\nFOR EACH ROW\nBEGIN\n    -- work here\nEND;",
-            self.table_name_display(),
-            self.table_name(),
-        )
+        let name = format!("trigger_{}", self.table_name_display());
+        let tbl = self.table_name();
+        match self.kind.protocol_family() {
+            // MySQL: a trigger body cannot contain a literal `;` because the
+            // query executor splits statements on it, so use a semicolon-free
+            // single SET action that is valid and user-editable.
+            ProtocolFamily::MySql => {
+                if let Some(col) = self.columns.first().map(|c| c.name.clone()) {
+                    format!(
+                        "CREATE TRIGGER {name}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW SET NEW.{col} = NEW.{col}"
+                    )
+                } else {
+                    format!(
+                        "CREATE TRIGGER {name}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW\nBEGIN\n-- add logic here\nEND"
+                    )
+                }
+            }
+            // PostgreSQL: a trigger needs a trigger function plus the trigger.
+            // The executor runs the two `;`-separated statements in order.
+            ProtocolFamily::PostgreSql => format!(
+                "CREATE FUNCTION {name}_fn() RETURNS TRIGGER AS $$\nBEGIN\n    RETURN NEW; -- add logic here\nEND;\n$$ LANGUAGE plpgsql;\n\nCREATE TRIGGER {name}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW EXECUTE FUNCTION {name}_fn();"
+            ),
+            _ => format!(
+                "CREATE TRIGGER {name}\nON {tbl}\nAFTER INSERT\nAS\nBEGIN\n-- add logic here\nEND"
+            ),
+        }
     }
 
     /// Baseline CREATE text shown when authoring a new function in the DDL editor.
     fn function_create_template(&self) -> String {
-        format!(
-            "CREATE OR REPLACE FUNCTION {}\nRETURNS void AS $$\nBEGIN\n    -- work here\nEND;\n$$ LANGUAGE plpgsql;",
-            self.table,
-        )
+        let name = format!("{}_fn", self.table_name_display());
+        match self.kind.protocol_family() {
+            // MySQL stored functions with a body need DELIMITER handling, so
+            // default to a single-expression form that runs as one statement.
+            ProtocolFamily::MySql => {
+                format!("CREATE FUNCTION {name}() RETURNS INT DETERMINISTIC RETURN 1")
+            }
+            ProtocolFamily::PostgreSql => format!(
+                "CREATE OR REPLACE FUNCTION {name}() RETURNS void AS $$\nBEGIN\n    -- add logic here\nEND;\n$$ LANGUAGE plpgsql;"
+            ),
+            _ => format!("CREATE FUNCTION {name}() RETURNS INT AS BEGIN RETURN 1 END"),
+        }
     }
 
     fn table_name_display(&self) -> String {
@@ -2578,7 +2612,7 @@ impl TableStructureView {
                 stmt,
             );
             self.ddl_editor = Some(DdlEditorState {
-                title: format!("Edit Trigger - {}", trg.name),
+                title: trf("Edit Trigger - {name}", &[("name", trg.name.clone())]),
                 sql,
             });
             self.active_tab = StructureTab::Triggers;
@@ -2596,7 +2630,7 @@ impl TableStructureView {
                 func.name, ret, lang,
             );
             self.ddl_editor = Some(DdlEditorState {
-                title: format!("Edit Function - {}", func.name),
+                title: trf("Edit Function - {name}", &[("name", func.name.clone())]),
                 sql,
             });
             self.active_tab = StructureTab::Functions;
@@ -2624,8 +2658,8 @@ impl TableStructureView {
             return;
         };
         let kind_label = match drop.kind {
-            ObjectKind::Trigger => "trigger",
-            ObjectKind::Function => "function",
+            ObjectKind::Trigger => tr("Trigger"),
+            ObjectKind::Function => tr("Function"),
         };
         let mut open = true;
         let mut confirm = false;
@@ -2635,14 +2669,11 @@ impl TableStructureView {
             .collapsible(false)
             .resizable(false)
             .show(ui.ctx(), |ui| {
-                ui.label(
-                    RichText::new(tr("Drop this object?")).strong(),
-                );
+                ui.label(RichText::new(tr("Drop this object?")).strong());
                 ui.add_space(8.0);
-                ui.label(format!(
-                    "{}: {}",
-                    kind_label.to_uppercase(),
-                    drop.name
+                ui.label(trf(
+                    "{kind}: {name}",
+                    &[("kind", kind_label.clone()), ("name", drop.name.clone())],
                 ));
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -2658,9 +2689,12 @@ impl TableStructureView {
             let sql = self.build_object_drop_sql(drop.kind, &drop.name);
             self.pending_ddl.push(DdlOperation {
                 sql,
-                label: format!("Drop {}", drop.name),
+                label: trf("Drop {name}", &[("name", drop.name.clone())]),
             });
-            *message = Some(format!("Dropping {} {}...", kind_label, drop.name));
+            *message = Some(trf(
+                "Dropping {kind} {name}...",
+                &[("kind", kind_label), ("name", drop.name.clone())],
+            ));
         }
         if !cancel && open {
             self.pending_object_drop = Some(drop);
@@ -2668,13 +2702,14 @@ impl TableStructureView {
     }
 
     /// Navicat-style DDL editor used to create / edit triggers and functions.
-    /// The user authors (or refines) the full CREATE / DROP and clicks Run Query.
+    /// The user authors (or refines) the full CREATE and clicks Save to run it
+    /// and reload the object list; Cancel discards the draft.
     fn ddl_editor_window(&mut self, ui: &mut Ui, message: &mut Option<String>) {
         let Some(editor_title) = self.ddl_editor.as_ref().map(|e| e.title.clone()) else {
             return;
         };
         let mut open = true;
-        let mut run = false;
+        let mut save = false;
         let mut cancel = false;
         Window::new(editor_title)
             .default_size([780.0, 520.0])
@@ -2702,12 +2737,12 @@ impl TableStructureView {
                     if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button(tr("Run Query")).clicked() {
-                        run = true;
+                    if ui.button(tr("Save")).clicked() {
+                        save = true;
                     }
                 });
             });
-        if run {
+        if save {
             if let Some(editor) = self.ddl_editor.take() {
                 let sql = editor.sql.trim().to_string();
                 if !sql.is_empty() {
@@ -2715,7 +2750,7 @@ impl TableStructureView {
                         sql,
                         label: editor.title,
                     });
-                    *message = Some("Executing DDL...".to_string());
+                    *message = Some(tr("Executing DDL..."));
                 }
             }
         } else if cancel || !open {

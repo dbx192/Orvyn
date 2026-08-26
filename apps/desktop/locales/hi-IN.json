@@ -259,5 +259,15 @@
   "Comma (, )": "अल्पविराम (, )",
   "Comma (,)": "अल्पविराम (,)",
   "Tab": "टैब",
-  "Semicolon (; )": "अर्धविराम (; )"
+  "Semicolon (; )": "अर्धविराम (; )",
+  "Drop": "हटाएं",
+  "Trigger": "ट्रिगर",
+  "Function": "फ़ंक्शन",
+  "Drop this object?": "क्या यह ऑब्जेक्ट हटाएं?",
+  "Dropping {kind} {name}...": "{kind} {name} हटाया जा रहा है...",
+  "Drop {name}": "{name} हटाएं",
+  "Edit the SQL and run it against the current database.": "SQL संपादित करें और इसे वर्तमान डेटाबेस पर चलाएं।",
+  "Executing DDL...": "DDL निष्पादित हो रहा है...",
+  "Edit Trigger - {name}": "ट्रिगर संपादित करें - {name}",
+  "Edit Function - {name}": "फ़ंक्शन संपादित करें - {name}"
 }

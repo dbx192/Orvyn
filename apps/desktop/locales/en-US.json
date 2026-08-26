@@ -259,5 +259,15 @@
   "Comma (, )": "Comma (, )",
   "Comma (,)": "Comma (,)",
   "Tab": "Tab",
-  "Semicolon (; )": "Semicolon (; )"
+  "Semicolon (; )": "Semicolon (; )",
+  "Drop": "Drop",
+  "Trigger": "Trigger",
+  "Function": "Function",
+  "Drop this object?": "Drop this object?",
+  "Dropping {kind} {name}...": "Dropping {kind} {name}...",
+  "Drop {name}": "Drop {name}",
+  "Edit the SQL and run it against the current database.": "Edit the SQL and run it against the current database.",
+  "Executing DDL...": "Executing DDL...",
+  "Edit Trigger - {name}": "Edit Trigger - {name}",
+  "Edit Function - {name}": "Edit Function - {name}"
 }

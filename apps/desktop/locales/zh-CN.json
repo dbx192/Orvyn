@@ -259,5 +259,15 @@
   "Comma (, )": "逗号（, ）",
   "Comma (,)": "逗号（,）",
   "Tab": "制表符",
-  "Semicolon (; )": "分号（; ）"
+  "Semicolon (; )": "分号（; ）",
+  "Drop": "删除",
+  "Trigger": "触发器",
+  "Function": "函数",
+  "Drop this object?": "确定删除该对象吗？",
+  "Dropping {kind} {name}...": "正在删除 {kind} {name}...",
+  "Drop {name}": "删除 {name}",
+  "Edit the SQL and run it against the current database.": "编辑 SQL 并针对当前数据库执行。",
+  "Executing DDL...": "正在执行 DDL...",
+  "Edit Trigger - {name}": "编辑触发器 - {name}",
+  "Edit Function - {name}": "编辑函数 - {name}"
 }

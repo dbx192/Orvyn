@@ -259,5 +259,15 @@
   "Comma (, )": "Virgule (, )",
   "Comma (,)": "Virgule (,)",
   "Tab": "Tabulation",
-  "Semicolon (; )": "Point-virgule (; )"
+  "Semicolon (; )": "Point-virgule (; )",
+  "Drop": "Supprimer",
+  "Trigger": "Déclencheur",
+  "Function": "Fonction",
+  "Drop this object?": "Supprimer cet objet ?",
+  "Dropping {kind} {name}...": "Suppression de {kind} {name}...",
+  "Drop {name}": "Supprimer {name}",
+  "Edit the SQL and run it against the current database.": "Modifiez le SQL et exécutez-le sur la base de données actuelle.",
+  "Executing DDL...": "Exécution du DDL...",
+  "Edit Trigger - {name}": "Modifier le déclencheur - {name}",
+  "Edit Function - {name}": "Modifier la fonction - {name}"
 }

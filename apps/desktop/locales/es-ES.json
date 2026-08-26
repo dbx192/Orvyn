@@ -259,5 +259,15 @@
   "Comma (, )": "Coma (, )",
   "Comma (,)": "Coma (,)",
   "Tab": "Tabulación",
-  "Semicolon (; )": "Punto y coma (; )"
+  "Semicolon (; )": "Punto y coma (; )",
+  "Drop": "Eliminar",
+  "Trigger": "Disparador",
+  "Function": "Función",
+  "Drop this object?": "¿Eliminar este objeto?",
+  "Dropping {kind} {name}...": "Eliminando {kind} {name}...",
+  "Drop {name}": "Eliminar {name}",
+  "Edit the SQL and run it against the current database.": "Edita el SQL y ejecútalo contra la base de datos actual.",
+  "Executing DDL...": "Ejecutando DDL...",
+  "Edit Trigger - {name}": "Editar disparador - {name}",
+  "Edit Function - {name}": "Editar función - {name}"
 }
