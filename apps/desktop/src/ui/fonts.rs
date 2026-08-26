@@ -1,4 +1,4 @@
-use eframe::egui::{Context, FontData, FontDefinitions, FontFamily, FontTweak};
+use eframe::egui::{Context, FontData, FontDefinitions, FontFamily};
 use std::path::{Path, PathBuf};
 
 pub fn install_global_fonts(ctx: &Context) {
@@ -8,21 +8,6 @@ pub fn install_global_fonts(ctx: &Context) {
     fonts.font_data.insert(
         "orvyn-inter".to_string(),
         FontData::from_static(include_bytes!("../../fonts/Inter-Regular.ttf")),
-    );
-    fonts.font_data.insert(
-        "orvyn-cjk".to_string(),
-        // Noto Sans CJK has a large ascent that leaves empty space above the
-        // glyph ink, which makes CJK text render noticeably lower than Latin
-        // when vertically centered (e.g. inside buttons). Shift it up so CJK
-        // and Latin share the same visual center line.
-        FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf")).tweak(
-            FontTweak {
-                scale: 1.0,
-                y_offset_factor: -0.10,
-                y_offset: 0.0,
-                baseline_offset_factor: 0.0,
-            },
-        ),
     );
     fonts.font_data.insert(
         "orvyn-mono".to_string(),
@@ -41,7 +26,7 @@ pub fn install_global_fonts(ctx: &Context) {
         .unwrap_or_default();
     fonts.families.insert(
         FontFamily::Name("orvyn-inter".into()),
-        ["orvyn-inter", "orvyn-cjk"]
+        ["orvyn-inter"]
             .into_iter()
             .map(str::to_string)
             .chain(proportional_fallbacks)
@@ -49,7 +34,7 @@ pub fn install_global_fonts(ctx: &Context) {
     );
     fonts.families.insert(
         FontFamily::Name("orvyn-mono".into()),
-        ["orvyn-mono", "orvyn-cjk"]
+        ["orvyn-mono"]
             .into_iter()
             .map(str::to_string)
             .chain(monospace_fallbacks)
@@ -57,13 +42,11 @@ pub fn install_global_fonts(ctx: &Context) {
     );
     if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
         family.insert(0, "orvyn-inter".to_string());
-        family.push("orvyn-cjk".to_string());
     }
     if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
         family.insert(0, "orvyn-mono".to_string());
-        family.push("orvyn-cjk".to_string());
     }
-    installed += 3;
+    installed += 2;
 
     for path in global_font_candidates() {
         if let Ok(bytes) = std::fs::read(&path) {
