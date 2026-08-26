@@ -10,23 +10,39 @@ use crate::ui::{
     object_tree::ObjectTreeAction, redis_browser::RedisBrowserUi, search_browser::SearchBrowser,
 };
 use db_common::ConnectionId;
-use eframe::egui::{Align, Color32, Context, Layout, RichText, SidePanel};
+use eframe::egui::{Align, Color32, Context, Id, Layout, RichText, SidePanel};
 use import_export::ExportFormat;
 
-// The previous "resizable" panel clamped the width to 200..280, an ~80px
-// sliver for which dragging felt like nothing happened. Widen the range so the
-// split is actually adjustable between a compact rail and a wider explorer.
-const LEFT_PANEL_MIN_WIDTH: f32 = 180.0;
-const LEFT_PANEL_MAX_WIDTH: f32 = 420.0;
+// Splitter state. We deliberately do NOT rely on egui's built-in resizable
+// SidePanel: in egui 0.27.2 the stored width can snap back to the default when
+// the mouse is released, so the panel is drawn at a fixed width that we persist
+// ourselves and adjust with a manual drag handle in the central panel.
+pub(super) const LEFT_PANEL_MIN_WIDTH: f32 = 180.0;
+pub(super) const LEFT_PANEL_MAX_WIDTH: f32 = 420.0;
+pub(super) const LEFT_PANEL_DEFAULT_WIDTH: f32 = 210.0;
+
+pub(super) fn left_panel_width_id() -> Id {
+    Id::new("left_tree_panel_width")
+}
+
+/// T-layout splitter id: register this in the central panel's left edge so the
+/// drag handle reliably claims pointer input over the boundary widgets.
+pub(super) fn left_panel_divider_id() -> Id {
+    Id::new("left_tree_divider_drag")
+}
 
 impl DesktopApp {
     pub(super) fn left_tree(&mut self, ctx: &Context) {
-        // Use a fresh persistence id so widths inflated by the previous
-        // content-driven sizing implementation are not restored.
-        SidePanel::left("connection_object_tree_resizable_v2")
-            .resizable(true)
-            .default_width(200.0)
-            .width_range(LEFT_PANEL_MIN_WIDTH..=LEFT_PANEL_MAX_WIDTH)
+        // Width is controlled by our own persisted value (see the drag handle
+        // in `central_panel`), not by egui's resizable-panel memory.
+        let width = ctx
+            .data_mut(|d| d.get_persisted::<f32>(left_panel_width_id()))
+            .unwrap_or(LEFT_PANEL_DEFAULT_WIDTH)
+            .clamp(LEFT_PANEL_MIN_WIDTH, LEFT_PANEL_MAX_WIDTH);
+
+        SidePanel::left("connection_object_tree_resizable_v3")
+            .resizable(false)
+            .exact_width(width)
             .show(ctx, |ui| {
                 let (message, actions) = self.object_tree.ui(ctx, ui);
                 if let Some(message) = message {

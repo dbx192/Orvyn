@@ -1,8 +1,13 @@
-use super::{style::apply_app_style, ActivePanel, DesktopApp};
+use super::{
+    style::apply_app_style,
+    tree::{left_panel_divider_id, left_panel_width_id, LEFT_PANEL_DEFAULT_WIDTH,
+        LEFT_PANEL_MAX_WIDTH, LEFT_PANEL_MIN_WIDTH},
+    ActivePanel, DesktopApp,
+};
 use crate::ui::i18n::{self, text as tr, Locale};
 use eframe::egui::{
-    vec2, Align, Button, CentralPanel, Context, Frame, Layout, Margin, RichText, Spinner, Stroke,
-    TopBottomPanel, Ui,
+    pos2, vec2, Align, Button, CentralPanel, Context, CursorIcon, Frame, Layout, Margin, Rect,
+    RichText, Sense, Spinner, Stroke, TopBottomPanel, Ui,
 };
 use std::time::Duration;
 
@@ -250,6 +255,41 @@ impl DesktopApp {
                     .inner_margin(Margin::same(0.0)),
             )
             .show(ctx, |ui| {
+                // Manual T-layout splitter. egui 0.27.2's built-in resizable
+                // SidePanel can snap its width back on mouse release, so the
+                // tree panel is drawn at a fixed width (`left_tree`) that we
+                // adjust here by dragging this left-edge strip. The delta is
+                // applied to the persisted value, read next frame (1-frame
+                // latency while dragging, identical to the query splitter).
+                {
+                    let avail = ui.max_rect();
+                    let cur = ui
+                        .ctx()
+                        .data_mut(|d| d.get_persisted::<f32>(left_panel_width_id()))
+                        .unwrap_or(LEFT_PANEL_DEFAULT_WIDTH);
+                    let handle_rect = Rect::from_min_max(
+                        pos2(avail.min.x - 3.0, avail.top()),
+                        pos2(avail.min.x + 3.0, avail.bottom()),
+                    );
+                    let handle =
+                        ui.interact(handle_rect, left_panel_divider_id(), Sense::drag());
+                    if handle.hovered() || handle.dragged() {
+                        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                    }
+                    if handle.dragged() {
+                        let w = (cur + handle.drag_delta().x).clamp(
+                            LEFT_PANEL_MIN_WIDTH,
+                            LEFT_PANEL_MAX_WIDTH,
+                        );
+                        ui.ctx().data_mut(|d| d.insert_persisted(left_panel_width_id(), w));
+                        ui.ctx().request_repaint();
+                    }
+                    ui.painter().line_segment(
+                        [avail.left_top(), avail.left_bottom()],
+                        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                    );
+                }
+
                 if matches!(self.active_panel, ActivePanel::RedisBrowser)
                     && self.redis_browser.is_none()
                 {
