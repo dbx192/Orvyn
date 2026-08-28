@@ -242,7 +242,7 @@ impl ImportWizard {
         if ui
             .add_enabled(
                 self.file_path.is_some() && !self.loading,
-                Button::new("Next: Preview →"),
+                Button::new(tr("Next: Preview →")),
             )
             .clicked()
         {
@@ -565,7 +565,7 @@ impl ImportWizard {
             if ui
                 .add_enabled(
                     self.validation_report.is_some() && !self.loading,
-                    Button::new("Next: Execute Import →"),
+                    Button::new(tr("Next: Execute Import →")),
                 )
                 .clicked()
             {
@@ -636,11 +636,11 @@ impl ImportWizard {
 
             ui.add_space(16.0);
             ui.horizontal(|ui| {
-                if ui.button("← Back").clicked() {
+                if ui.button(format!("← {}", tr("Back"))).clicked() {
                     self.step = ImportStep::Validate;
                 }
                 if ui
-                    .add_enabled(!self.loading, Button::new("🚀 Start Import"))
+                    .add_enabled(!self.loading, Button::new(tr("🚀 Start Import")))
                     .clicked()
                 {
                     self.start_import();

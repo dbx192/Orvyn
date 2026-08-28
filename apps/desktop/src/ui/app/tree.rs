@@ -55,11 +55,26 @@ impl DesktopApp {
                 self.handle_tree_actions(actions);
                 if !self.last_tree_status.is_empty() {
                     ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-                        ui.label(
-                            RichText::new(&self.last_tree_status)
-                                .small()
-                                .color(Color32::GRAY),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(&self.last_tree_status)
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                            if let Some(selected_count) = self
+                                .active_table_editor
+                                .and_then(|id| self.table_editors.get(&id))
+                                .map(|editor| editor.selected_row_count())
+                                .filter(|count| *count > 0)
+                            {
+                                ui.separator();
+                                ui.label(
+                                    RichText::new(format!("{selected_count} rows selected"))
+                                        .small()
+                                        .color(Color32::GRAY),
+                                );
+                            }
+                        });
                     });
                 }
                 self.draw_left_divider(ui);

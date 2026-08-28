@@ -673,12 +673,12 @@ impl RedisBrowserUi {
             );
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!self.cli_running, Button::new("Execute"))
+                    .add_enabled(!self.cli_running, Button::new(tr("Execute")))
                     .clicked()
                 {
                     self.execute_cli_command();
                 }
-                if ui.button("Clear").clicked() {
+                if ui.button(tr("Clear")).clicked() {
                     self.cli_result = None;
                     self.cli_command.clear();
                 }
@@ -858,7 +858,7 @@ impl RedisBrowserUi {
                 if response.lost_focus() && self.search_pattern != self.pattern {
                     self.apply_pattern();
                 }
-                if ui.add_sized([56.0, 24.0], Button::new("Match")).clicked() {
+                if ui.add_sized([56.0, 24.0], Button::new(tr("Match"))).clicked() {
                     self.apply_pattern();
                 }
             });
@@ -905,7 +905,7 @@ impl RedisBrowserUi {
                                     ui.label(RichText::new("Loading...").color(style.muted));
                                 });
                             } else if self.has_more {
-                                if ui.button("Load More").clicked() {
+                                if ui.button(tr("Load More")).clicked() {
                                     self.load_more_keys();
                                 }
                             }
@@ -998,17 +998,17 @@ impl RedisBrowserUi {
     }
 
     fn key_context_menu(&mut self, ui: &mut Ui, key_name: &str) {
-        if ui.button("View").clicked() {
+        if ui.button(tr("View")).clicked() {
             self.select_key(key_name.to_string());
             ui.close_menu();
         }
-        if ui.button("Copy Name").clicked() {
+        if ui.button(tr("Copy Name")).clicked() {
             ui.output_mut(|o| o.copied_text = key_name.to_string());
             self.status = format!("Copied: {}", key_name);
             ui.close_menu();
         }
         ui.separator();
-        if ui.button("Delete").clicked() {
+        if ui.button(tr("Delete")).clicked() {
             self.confirm_delete = Some(key_name.to_string());
             ui.close_menu();
         }
@@ -1064,10 +1064,10 @@ impl RedisBrowserUi {
                             .desired_rows(5),
                     );
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if ui.button(tr("Save")).clicked() {
                             self.set_string_value();
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(tr("Cancel")).clicked() {
                             self.string_editing = false;
                             self.string_edit_value.clear();
                         }
@@ -1099,10 +1099,10 @@ impl RedisBrowserUi {
                     );
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Del").clicked() {
+                        if ui.button(tr("Del")).clicked() {
                             self.confirm_delete = Some(key_name.to_string());
                         }
-                        if ui.button("Edit").clicked() && key_type == "string" {
+                        if ui.button(tr("Edit")).clicked() && key_type == "string" {
                             self.string_editing = true;
                             if let ValueDisplay::Loaded(RedisValue::String(bytes)) =
                                 &self.value_display
@@ -1110,11 +1110,11 @@ impl RedisBrowserUi {
                                 self.string_edit_value = redis_display_text(bytes);
                             }
                         }
-                        if ui.button("Copy").clicked() {
+                        if ui.button(tr("Copy")).clicked() {
                             ui.output_mut(|output| output.copied_text = key_name.to_string());
                             self.status = format!("Copied: {}", key_name);
                         }
-                        if ui.button("Reload").clicked() {
+                        if ui.button(tr("Reload")).clicked() {
                             self.refresh_key(key_name.to_string());
                         }
                     });
@@ -1149,7 +1149,7 @@ impl RedisBrowserUi {
         let value_display = self.value_display.clone();
         match value_display {
             ValueDisplay::NotLoaded => {
-                if ui.button("Load Preview").clicked() {
+                if ui.button(tr("Load Preview")).clicked() {
                     self.load_key_value(key_name.to_string(), false);
                 }
             }
@@ -1184,7 +1184,7 @@ impl RedisBrowserUi {
                         ))
                         .color(Color32::YELLOW),
                     );
-                    if ui.button("Load Full Value").clicked() {
+                    if ui.button(tr("Load Full Value")).clicked() {
                         self.confirm_load_full = Some((key_name.to_string(), total_size));
                     }
                 });
@@ -1292,13 +1292,13 @@ impl RedisBrowserUi {
                         ui.label(RichText::new(field).monospace().color(style.text));
                         ui.label(RichText::new(value_text).monospace().color(style.text));
                         ui.horizontal(|ui| {
-                            if ui.small_button("Copy").clicked() {
+                            if ui.small_button(tr("Copy")).clicked() {
                                 ui.output_mut(|output| output.copied_text = value_text.clone());
                             }
-                            if ui.small_button("Edit").clicked() {
+                            if ui.small_button(tr("Edit")).clicked() {
                                 self.hash_edit_field = Some((field.clone(), value_text.clone()));
                             }
-                            if ui.small_button("Del").clicked() {
+                            if ui.small_button(tr("Del")).clicked() {
                                 self.confirm_delete_hash_field = Some(field.clone());
                             }
                         });
@@ -1337,10 +1337,10 @@ impl RedisBrowserUi {
                     self.hash_edit_field = Some((field.clone(), edit_val.clone()));
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                    if ui.button(tr("Save")).clicked() {
                         self.update_hash_field_with_value(field.clone(), edit_val.clone());
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.hash_edit_field = None;
                     }
                 });
@@ -1380,7 +1380,7 @@ impl RedisBrowserUi {
                             .desired_width(240.0)
                             .hint_text("value"),
                     );
-                    if ui.button("Push").clicked() {
+                    if ui.button(tr("Push")).clicked() {
                         if self.list_push_direction == "left" {
                             self.lpush_value();
                         } else {
@@ -1407,7 +1407,7 @@ impl RedisBrowserUi {
                                 "RPOP",
                             );
                         });
-                    if ui.button("Pop").clicked() {
+                    if ui.button(tr("Pop")).clicked() {
                         if self.list_pop_direction == "left" {
                             self.lpop_value();
                         } else {
@@ -1434,10 +1434,10 @@ impl RedisBrowserUi {
                         ui.label(RichText::new(index.to_string()).color(style.muted));
                         ui.label(RichText::new(value_text).monospace().color(style.text));
                         ui.horizontal(|ui| {
-                            if ui.small_button("Copy").clicked() {
+                            if ui.small_button(tr("Copy")).clicked() {
                                 ui.output_mut(|output| output.copied_text = value_text.clone());
                             }
-                            if ui.small_button("Del").clicked() {
+                            if ui.small_button(tr("Del")).clicked() {
                                 self.confirm_delete_list_index = Some(*index);
                             }
                         });
@@ -1462,7 +1462,7 @@ impl RedisBrowserUi {
                             .desired_width(260.0)
                             .hint_text("member"),
                     );
-                    if ui.button("Add").clicked() {
+                    if ui.button(tr("Add")).clicked() {
                         self.sadd_member();
                     }
                 });
@@ -1485,10 +1485,10 @@ impl RedisBrowserUi {
                         ui.label(RichText::new((index + 1).to_string()).color(style.muted));
                         ui.label(RichText::new(value_text).monospace().color(style.text));
                         ui.horizontal(|ui| {
-                            if ui.small_button("Copy").clicked() {
+                            if ui.small_button(tr("Copy")).clicked() {
                                 ui.output_mut(|output| output.copied_text = value_text.clone());
                             }
-                            if ui.small_button("Del").clicked() {
+                            if ui.small_button(tr("Del")).clicked() {
                                 self.confirm_delete_set_member = Some(value_text.clone());
                             }
                         });
@@ -1523,7 +1523,7 @@ impl RedisBrowserUi {
                             .desired_width(90.0)
                             .hint_text("score"),
                     );
-                    if ui.button("Add").clicked() {
+                    if ui.button(tr("Add")).clicked() {
                         self.zadd_member();
                     }
                 });
@@ -1548,13 +1548,13 @@ impl RedisBrowserUi {
                         ui.label(RichText::new(member).monospace().color(style.text));
                         ui.label(RichText::new(score.to_string()).color(style.text));
                         ui.horizontal(|ui| {
-                            if ui.small_button("Copy").clicked() {
+                            if ui.small_button(tr("Copy")).clicked() {
                                 ui.output_mut(|output| output.copied_text = member.clone());
                             }
-                            if ui.small_button("Edit").clicked() {
+                            if ui.small_button(tr("Edit")).clicked() {
                                 self.zset_edit_score = Some((member.clone(), score.to_string()));
                             }
-                            if ui.small_button("Del").clicked() {
+                            if ui.small_button(tr("Del")).clicked() {
                                 self.confirm_delete_zset_member = Some(member.clone());
                             }
                         });
@@ -1578,11 +1578,11 @@ impl RedisBrowserUi {
                     self.zset_edit_score = Some((member.clone(), score_str.clone()));
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Update Score").clicked() {
+                    if ui.button(tr("Update Score")).clicked() {
                         self.zset_edit_score = Some((member.clone(), score_str.clone()));
                         self.update_zset_score(member.clone());
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.zset_edit_score = None;
                     }
                 });
@@ -1739,11 +1739,11 @@ impl RedisBrowserUi {
                 ui.label("- Block the UI temporarily");
                 ui.label("- Display slowly");
                 ui.horizontal(|ui| {
-                    if ui.button("Load Anyway").clicked() {
+                    if ui.button(tr("Load Anyway")).clicked() {
                         self.load_key_value_full(key_name.clone());
                         self.confirm_load_full = None;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         self.confirm_load_full = None;
                     }
                 });

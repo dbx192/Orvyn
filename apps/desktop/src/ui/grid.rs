@@ -72,7 +72,7 @@ pub fn label_cell(
 ) -> GridCellResponse {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), sense);
     paint_cell_frame(ui, rect, fill, stroke);
-    paint_label(ui, rect, height, text);
+    paint_label(ui, rect, text);
     GridCellResponse { response, rect }
 }
 
@@ -148,7 +148,7 @@ pub fn resizable_header_cell(
             },
         ),
     );
-    paint_label(ui, rect, height, text);
+    paint_label(ui, rect, text);
 
     let handle_rect = Rect::from_min_max(pos2(rect.max.x - 5.0, rect.min.y), rect.max);
     let handle_response = ui.interact(handle_rect, id, Sense::drag());
@@ -182,15 +182,51 @@ pub fn paint_cell_frame(ui: &Ui, rect: Rect, fill: Color32, stroke: Stroke) {
     ui.painter().rect_stroke(rect.shrink(0.5), 0.0, stroke);
 }
 
-fn paint_label(ui: &mut Ui, rect: Rect, height: f32, text: RichText) {
+/// Compact flat horizontal scrollbar used below wide data grids.
+pub fn flat_scrollbar(ui: &mut Ui, value: &mut f32, max: f32, width: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 12.0), Sense::click_and_drag());
+    let track = rect.shrink2(vec2(0.0, 4.0));
+    ui.painter()
+        .rect_filled(track, 0.0, ui.visuals().widgets.noninteractive.bg_fill);
+    let thumb_width = 42.0_f32.min(rect.width().max(1.0));
+    let travel = (rect.width() - thumb_width).max(0.0);
+    let fraction = if max > 0.0 { (*value / max).clamp(0.0, 1.0) } else { 0.0 };
+    let thumb = Rect::from_min_size(
+        pos2(rect.left() + travel * fraction, rect.top()),
+        vec2(thumb_width, rect.height()),
+    );
+    ui.painter().rect_filled(
+        thumb,
+        0.0,
+        if response.dragged() || response.hovered() {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().widgets.inactive.bg_fill
+        },
+    );
+    if (response.dragged() || response.clicked()) && max > 0.0 {
+        if let Some(pointer) = ui.ctx().pointer_hover_pos() {
+            *value = (((pointer.x - rect.left() - thumb_width * 0.5) / travel.max(1.0))
+                .clamp(0.0, 1.0))
+                * max;
+        }
+    }
+    response
+}
+
+fn paint_label(ui: &mut Ui, rect: Rect, text: RichText) {
     // A small vertical inset prevents glyphs from touching the cell borders
     // when the row is scrolled or rendered at fractional scale factors.
     let inner_rect = rect.shrink2(vec2(CELL_PADDING_X, 2.0));
     let galley =
         WidgetText::from(text).into_galley(ui, Some(false), inner_rect.width(), TextStyle::Body);
+    // Center the visible glyph ink on the cell, not the (taller) line box, so
+    // single-line text no longer looks pushed toward the top of the row.
+    let ink = galley.mesh_bounds;
+    let ink_height = if ink.height() > 0.0 { ink.height() } else { galley.size().y };
     let text_pos = pos2(
         inner_rect.left(),
-        rect.center().y - (galley.size().y * 0.5).min(height * 0.5),
+        rect.center().y - ink.min.y - ink_height * 0.5,
     );
     ui.painter().with_clip_rect(inner_rect).add(TextShape::new(
         text_pos,

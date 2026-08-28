@@ -721,6 +721,14 @@ impl TableStructureView {
         )
     }
 
+    /// A metadata reload rebuilds the view. Keep its current tab so created
+    /// triggers and functions remain visible when the reload completes.
+    pub fn preserve_active_tab_from(&mut self, previous: Option<&Self>) {
+        if let Some(previous) = previous {
+            self.active_tab = previous.active_tab;
+        }
+    }
+
     pub fn take_create_index_request(&mut self) -> Option<CreateIndexRequest> {
         self.pending_create_index.take()
     }
@@ -2712,6 +2720,7 @@ impl TableStructureView {
         };
         let mut open = true;
         let mut save = false;
+        let mut save_file = false;
         let mut cancel = false;
         Window::new(editor_title)
             .default_size([780.0, 400.0])
@@ -2746,11 +2755,37 @@ impl TableStructureView {
                     if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
+                    if ui.button(tr("Save SQL")).clicked() {
+                        save_file = true;
+                    }
                     if ui.button(tr("Save")).clicked() {
                         save = true;
                     }
                 });
             });
+        if save_file {
+            if let Some(editor) = self.ddl_editor.as_ref() {
+                let filename = editor
+                    .title
+                    .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+                let filename = format!("{}.sql", filename.trim());
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title(tr("Save SQL to File"))
+                    .set_file_name(&filename)
+                    .add_filter("SQL", &["sql"])
+                    .save_file()
+                {
+                    match std::fs::write(&path, editor.sql.as_bytes()) {
+                        Ok(()) => {
+                            *message = Some(format!("SQL saved to {}", path.display()));
+                        }
+                        Err(error) => {
+                            *message = Some(format!("Failed to save SQL: {error}"));
+                        }
+                    }
+                }
+            }
+        }
         if save {
             if let Some(editor) = self.ddl_editor.take() {
                 let sql = editor.sql.trim().to_string();

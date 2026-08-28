@@ -56,11 +56,11 @@ impl DesktopApp {
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
                     if ui
-                        .add_enabled(!request.table.trim().is_empty(), Button::new("Continue"))
+                        .add_enabled(!request.table.trim().is_empty(), Button::new(tr("Continue")))
                         .clicked()
                     {
                         start_import = true;
@@ -479,14 +479,14 @@ impl DesktopApp {
 
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(!self.state.errors.is_empty(), Button::new("Clear All"))
+                            .add_enabled(!self.state.errors.is_empty(), Button::new(tr("Clear All")))
                             .clicked()
                         {
                             self.state.errors.clear();
                             self.error_window_open = false;
                         }
 
-                        if ui.button("Copy All").clicked() {
+                        if ui.button(tr("Copy All")).clicked() {
                             let error_text: String = self
                                 .state
                                 .errors

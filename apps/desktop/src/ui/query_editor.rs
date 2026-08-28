@@ -568,7 +568,7 @@ impl QueryEditor {
                     self.execute_current_statement();
                 }
                 if ui
-                    .add_enabled(has_selection, Button::new("Run Selection"))
+                    .add_enabled(has_selection, Button::new(tr("Run Selection")))
                     .clicked()
                 {
                     self.execute_selection();
@@ -590,7 +590,7 @@ impl QueryEditor {
                     self.execute_explain(true);
                 }
             } else if is_cancelling {
-                ui.add_enabled(false, Button::new("Cancelling..."));
+                ui.add_enabled(false, Button::new(tr("Cancelling...")));
             } else if ui.button(tr("Stop")).clicked() {
                 self.stop_execution();
             }
@@ -1113,13 +1113,13 @@ impl QueryEditor {
                     );
                 }
                 ui.separator();
-                if ui.button("Export CSV").clicked() {
+                if ui.button(tr("Export CSV")).clicked() {
                     export_request = Some((
                         result.grid.as_ref().map(|grid| grid.result().clone()),
                         ExportFormat::Csv,
                     ));
                 }
-                if ui.button("Export JSON").clicked() {
+                if ui.button(tr("Export JSON")).clicked() {
                     export_request = Some((
                         result.grid.as_ref().map(|grid| grid.result().clone()),
                         ExportFormat::Json,
@@ -2165,10 +2165,10 @@ impl QueryEditor {
         ui.horizontal(|ui| {
             ui.add(
                 TextEdit::singleline(&mut self.favorite_name_input)
-                    .hint_text("Favorite name")
+                    .hint_text(tr("Favorite name"))
                     .desired_width(180.0),
             );
-            if ui.button("Save Current").clicked() {
+            if ui.button(tr("Save Current")).clicked() {
                 self.save_current_as_favorite(tab_id);
             }
         });
@@ -2195,7 +2195,7 @@ impl QueryEditor {
                             if ui.selectable_label(false, &entry.title).clicked() {
                                 picked_sql = Some(entry.sql.clone());
                             }
-                            if ui.small_button("Delete").clicked() {
+                            if ui.small_button(tr("Delete")).clicked() {
                                 remove_id = Some(entry.id);
                             }
                         });

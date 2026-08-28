@@ -4,7 +4,7 @@ use crate::ui::format::{
     cell_rich_text, compare_cell_values, copy_cell_value, copy_to_clipboard, display_cell_value,
 };
 use crate::ui::grid::{
-    estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_outline,
+    estimate_text_width, flat_scrollbar, grid_stroke, header_fill, label_cell, paint_cell_outline,
     resizable_header_cell, row_fill, TABLE_HEADER_HEIGHT, TABLE_ROW_HEIGHT,
 };
 use crate::ui::i18n::text as tr;
@@ -23,6 +23,7 @@ use tokio::runtime::Handle;
 const DEFAULT_PAGE_SIZE: usize = 100;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
+const HORIZONTAL_SCROLL_CONTROL_HEIGHT: f32 = 22.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 320.0;
 const COLUMN_WIDTH_SAMPLE_LIMIT: usize = 40;
 
@@ -125,43 +126,68 @@ impl ResultSetGrid {
         }
 
         let page_rows = self.page_rows();
+        let content_width = self.content_width();
+        let viewport_width = ui.available_width();
 
         Frame::default()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(grid_stroke(ui))
             .inner_margin(Margin::same(0.0))
             .show(ui, |ui| {
+                // Hard-clip the whole grid frame to its own rect so that the
+                // horizontally scrolled header/body can never paint outside the
+                // frame and spill over the side connection panel.
+                let frame_clip = ui.max_rect().intersect(ui.clip_rect());
+                ui.set_clip_rect(frame_clip);
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 let (header_rect, _) = ui.allocate_exact_size(
                     vec2(ui.available_width(), TABLE_HEADER_HEIGHT),
                     Sense::hover(),
                 );
-                let body_height = ui.available_height().max(0.0);
-                let content_width = self.content_width();
-                let output = ScrollArea::both()
-                    .id_source("result_set_body")
-                    .min_scrolled_height(body_height)
-                    .max_height(body_height)
-                    .auto_shrink([false, false])
-                    .scroll_bar_visibility(
-                        eframe::egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                    )
-                    .show_rows(ui, TABLE_ROW_HEIGHT, page_rows.len(), |ui, row_range| {
-                        ui.set_min_width(content_width);
-                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                        ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
-                        for visible_row_index in row_range {
-                            let Some(row_index) = page_rows.get(visible_row_index).copied() else {
-                                continue;
-                            };
-                            self.row(ui, row_index, visible_row_index);
-                        }
-                    });
+                let body_height =
+                    (ui.available_height() - HORIZONTAL_SCROLL_CONTROL_HEIGHT).max(0.0);
+                let (body_rect, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), body_height),
+                    Sense::hover(),
+                );
+                let mut body_ui = ui.child_ui(body_rect, Layout::top_down(Align::Min));
+                body_ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+                let output =
+                        ScrollArea::both()
+                            .id_source("result_set_body")
+                            .max_height(body_height)
+                            .auto_shrink([false, false])
+                            .scroll_bar_visibility(eframe::egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                            .horizontal_scroll_offset(self.scroll_x)
+                            .show_rows(&mut body_ui, TABLE_ROW_HEIGHT, page_rows.len(), |ui, row_range| {
+                                ui.set_min_width(content_width);
+                                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                                ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
+                                for visible_row_index in row_range {
+                                    let Some(row_index) = page_rows.get(visible_row_index).copied() else {
+                                        continue;
+                                    };
+                                    self.row(ui, row_index, visible_row_index);
+                                }
+                            });
                 self.scroll_x = output.state.offset.x;
                 // Paint the header after the scroll area so partially visible
                 // rows can never bleed over it while scrolling.
                 self.header(ui, header_rect);
             });
+        let max_scroll = (content_width - viewport_width).max(0.0);
+        if max_scroll > 0.0 {
+            ui.allocate_ui_with_layout(
+                vec2(300.0, 18.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    let response = flat_scrollbar(ui, &mut self.scroll_x, max_scroll, 300.0);
+                    if response.changed() {
+                        ui.ctx().request_repaint();
+                    }
+                },
+            );
+        }
 
         action
     }
@@ -223,14 +249,14 @@ impl ResultSetGrid {
             ui.separator();
             let has_selection = self.selected.is_some();
             ui.menu_button(tr("Copy"), |ui| {
-                if ui.add_enabled(has_selection, Button::new("Cell")).clicked() {
+                if ui.add_enabled(has_selection, Button::new(tr("Cell"))).clicked() {
                     if let Some(text) = self.copy_cell_text() {
                         copy_to_clipboard(ui, text);
                         *action = Some(ResultSetGridAction::Message("Cell copied".to_string()));
                     }
                     ui.close_menu();
                 }
-                if ui.add_enabled(has_selection, Button::new("Row")).clicked() {
+                if ui.add_enabled(has_selection, Button::new(tr("Row"))).clicked() {
                     if let Some(text) = self.copy_row_text(false) {
                         copy_to_clipboard(ui, text);
                         *action = Some(ResultSetGridAction::Message("Row copied".to_string()));
@@ -238,7 +264,7 @@ impl ResultSetGrid {
                     ui.close_menu();
                 }
                 if ui
-                    .add_enabled(has_selection, Button::new("Row with Header"))
+                    .add_enabled(has_selection, Button::new(tr("Row with Header")))
                     .clicked()
                 {
                     if let Some(text) = self.copy_row_text(true) {
@@ -250,14 +276,14 @@ impl ResultSetGrid {
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("Page with Header").clicked() {
+                if ui.button(tr("Page with Header")).clicked() {
                     copy_to_clipboard(ui, self.copy_rows_text(self.page_rows(), true));
                     *action = Some(ResultSetGridAction::Message(
                         "Current page copied with header".to_string(),
                     ));
                     ui.close_menu();
                 }
-                if ui.button("All with Header").clicked() {
+                if ui.button(tr("All with Header")).clicked() {
                     copy_to_clipboard(ui, self.copy_rows_text(self.sorted_rows(), true));
                     *action = Some(ResultSetGridAction::Message(
                         "All rows copied with header".to_string(),
@@ -267,20 +293,20 @@ impl ResultSetGrid {
             });
 
             ui.menu_button(tr("Export"), |ui| {
-                if ui.button("Copy CSV").clicked() {
+                if ui.button(tr("Copy CSV")).clicked() {
                     self.copy_export(ui, ExportFormat::Csv, action);
                     ui.close_menu();
                 }
-                if ui.button("Copy JSON").clicked() {
+                if ui.button(tr("Copy JSON")).clicked() {
                     self.copy_export(ui, ExportFormat::Json, action);
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("Save CSV").clicked() {
+                if ui.button(tr("Save CSV")).clicked() {
                     self.save_export(ExportFormat::Csv, action);
                     ui.close_menu();
                 }
-                if ui.button("Save JSON").clicked() {
+                if ui.button(tr("Save JSON")).clicked() {
                     self.save_export(ExportFormat::Json, action);
                     ui.close_menu();
                 }
@@ -295,7 +321,7 @@ impl ResultSetGrid {
             vec2(self.content_width(), TABLE_HEADER_HEIGHT),
         );
         let mut header_ui = ui.child_ui(header_rect, Layout::left_to_right(Align::Center));
-        header_ui.set_clip_rect(rect);
+        header_ui.set_clip_rect(rect.intersect(ui.clip_rect()));
         header_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
         header_ui.horizontal(|ui| {
@@ -453,8 +479,88 @@ impl ResultSetGrid {
                         column: column_index,
                     });
                 }
+                response.context_menu(|ui| self.row_copy_menu(ui, row_index));
             }
         });
+    }
+
+    fn row_copy_menu(&self, ui: &mut Ui, row_index: usize) {
+        if ui.button(tr("Copy")).clicked() {
+            if let Some(text) = self.copy_row_values(row_index) {
+                copy_to_clipboard(ui, text);
+            }
+            ui.close_menu();
+        }
+        ui.menu_button(tr("Copy as"), |ui| {
+            if ui.button(tr("Insert statement")).clicked() {
+                copy_to_clipboard(ui, self.copy_insert_statement(row_index));
+                ui.close_menu();
+            }
+            if ui.button(tr("Update statement")).clicked() {
+                copy_to_clipboard(ui, self.copy_update_statement(row_index));
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button(tr("Tab-separated values (data)")).clicked() {
+                copy_to_clipboard(ui, self.copy_row_values(row_index).unwrap_or_default());
+                ui.close_menu();
+            }
+            if ui.button(tr("Tab-separated values (fields)")).clicked() {
+                copy_to_clipboard(ui, self.copy_header_text());
+                ui.close_menu();
+            }
+            if ui.button(tr("Tab-separated values (fields and data)")).clicked() {
+                let mut text = self.copy_header_text();
+                if let Some(values) = self.copy_row_values(row_index) {
+                    text.push('\n');
+                    text.push_str(&values);
+                }
+                copy_to_clipboard(ui, text);
+                ui.close_menu();
+            }
+        });
+    }
+
+    fn copy_insert_statement(&self, row_index: usize) -> String {
+        let fields = self.copy_header_text();
+        let values = self
+            .result
+            .rows
+            .get(row_index)
+            .map(|row| {
+                (0..self.result.columns.len())
+                    .map(|index| {
+                        row.values
+                            .get(index)
+                            .map(sql_literal)
+                            .unwrap_or_else(|| "NULL".to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        format!("INSERT INTO <table> ({fields}) VALUES ({values});")
+    }
+
+    fn copy_update_statement(&self, row_index: usize) -> String {
+        let assignments = self
+            .result
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                let value = self
+                    .result
+                    .rows
+                    .get(row_index)
+                    .and_then(|row| row.values.get(index))
+                    .map(sql_literal)
+                    .unwrap_or_else(|| "NULL".to_string());
+                format!("{} = {value}", quote_identifier(&column.name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("UPDATE <table> SET {assignments};")
     }
 
     fn page_rows(&self) -> Vec<usize> {
@@ -747,6 +853,22 @@ fn estimate_column_widths(result: &QueryResult) -> Vec<f32> {
             estimated.clamp(MIN_COLUMN_WIDTH, INITIAL_MAX_COLUMN_WIDTH)
         })
         .collect()
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn sql_literal(value: &CellValue) -> String {
+    match value {
+        CellValue::Null => "NULL".to_string(),
+        CellValue::Bool(value) => value.to_string(),
+        CellValue::Int(value) => value.to_string(),
+        CellValue::UInt(value) => value.to_string(),
+        CellValue::Float(value) => value.to_string(),
+        CellValue::Decimal(value) => value.clone(),
+        _ => format!("'{}'", copy_cell_value(value).replace('\'', "''")),
+    }
 }
 
 fn sampled_row_indexes(row_count: usize, limit: usize) -> Vec<usize> {

@@ -757,7 +757,7 @@ impl ConnectionManagerUi {
                     if ui.button(tr("Keep Both and Rename")).clicked() {
                         action = Some(ImportConflictPolicy::Rename);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
                 });

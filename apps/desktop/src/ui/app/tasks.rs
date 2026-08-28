@@ -119,7 +119,8 @@ impl DesktopApp {
                                 payload.schema.as_deref().unwrap_or_default(),
                                 payload.table.as_str(),
                             ));
-                            let view = TableStructureView::new(
+                            let previous_view = self.table_structures.get(&structure_id);
+                            let mut view = TableStructureView::new(
                                 payload.connection_id,
                                 payload.kind,
                                 payload.database,
@@ -132,6 +133,7 @@ impl DesktopApp {
                                 payload.functions,
                                 payload.create_sql,
                             );
+                            view.preserve_active_tab_from(previous_view);
                             let table_name = view.table_name();
                             self.table_structures.insert(structure_id, view);
                             self.active_structure = Some(structure_id);

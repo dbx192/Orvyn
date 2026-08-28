@@ -34,13 +34,15 @@ impl eframe::App for DesktopApp {
 
         self.top_toolbar(ctx);
         self.left_tree(ctx);
+        // Top/bottom panels must be laid out before CentralPanel. Otherwise the
+        // status bar is painted over the result grid's horizontal scrollbar.
+        self.bottom_status(ctx);
         self.central_panel(ctx);
         self.connection_windows(ctx);
         self.table_export_window(ctx);
         self.import_table_window(ctx);
         self.drop_table_window(ctx);
         self.clear_window(ctx);
-        self.bottom_status(ctx);
         self.error_window(ctx);
     }
 }

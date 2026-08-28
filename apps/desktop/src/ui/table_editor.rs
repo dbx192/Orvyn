@@ -4,7 +4,7 @@
 
 use crate::ui::format::{cell_rich_text, compare_cell_values, copy_cell_value, display_cell_value};
 use crate::ui::grid::{
-    estimate_text_width, grid_stroke, header_fill, label_cell, paint_cell_frame,
+    estimate_text_width, flat_scrollbar, grid_stroke, header_fill, label_cell, paint_cell_frame,
     paint_cell_outline, resizable_header_cell, row_fill, text_edit_cell, GridCellResponse,
     TABLE_HEADER_HEIGHT, TABLE_ROW_HEIGHT,
 };
@@ -19,7 +19,8 @@ use db_common::{
 };
 use eframe::egui::{
     pos2, vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Grid, Key, Layout,
-    Margin, Modifiers, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui, Window,
+    Margin, Modifiers, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
+    Window,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,6 +34,7 @@ const DEFAULT_PAGE_SIZE: usize = 100;
 const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
+const HORIZONTAL_SCROLL_CONTROL_HEIGHT: f32 = 22.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -269,7 +271,7 @@ impl TableEditor {
 
         if let Some(error) = self.commit_error.clone() {
             ui.colored_label(Color32::RED, error);
-            if ui.button("Clear Error").clicked() {
+            if ui.button(tr("Clear Error")).clicked() {
                 self.commit_error = None;
                 self.error_row_index = None;
             }
@@ -278,8 +280,15 @@ impl TableEditor {
         self.toolbar(ui, &mut message);
         self.handle_row_shortcuts(ui, &mut message);
 
-        let grid_height = (ui.available_height() - 30.0).max(0.0);
+        // Reserve space for the fixed header and horizontal scroll control so
+        // both stay inside the visible table frame.
+        let grid_height = (ui.available_height()
+            - TABLE_HEADER_HEIGHT
+            - HORIZONTAL_SCROLL_CONTROL_HEIGHT)
+            .max(0.0);
         let visible_rows = self.visible_rows();
+        let content_width = self.content_width();
+        let viewport_width = ui.available_width();
         let previous_hovered_dirty_cell = self.hovered_dirty_cell.take();
         let previous_hovered_dirty_new_row = self.hovered_dirty_new_row.take();
         let table_frame = Frame::default()
@@ -287,51 +296,66 @@ impl TableEditor {
             .stroke(grid_stroke(ui))
             .inner_margin(Margin::same(0.0))
             .show(ui, |ui| {
+                // Hard-clip the whole grid frame to its own rect so that the
+                // horizontally scrolled header/body can never paint outside the
+                // frame and spill over the side connection panel.
+                let frame_clip = ui.max_rect().intersect(ui.clip_rect());
+                ui.set_clip_rect(frame_clip);
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 let (header_rect, _) = ui.allocate_exact_size(
                     vec2(ui.available_width(), TABLE_HEADER_HEIGHT),
                     Sense::hover(),
                 );
-                let content_width = self.content_width();
-                let output = if visible_rows.is_empty() {
-                    ScrollArea::both()
-                        .id_source("table_editor_body")
-                        .min_scrolled_height(grid_height)
-                        .max_height(grid_height)
-                        .auto_shrink([false, false])
-                        .scroll_bar_visibility(
-                            eframe::egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                        )
-                        .show(ui, |ui| {
-                            ui.set_min_width(content_width);
-                            self.empty_rows_body(ui, content_width, grid_height, &mut message);
-                        })
-                } else {
-                    ScrollArea::both()
-                        .id_source("table_editor_body")
-                        .min_scrolled_height(grid_height)
-                        .max_height(grid_height)
-                        .auto_shrink([false, false])
-                        .scroll_bar_visibility(
-                            eframe::egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                        )
-                        .show_rows(ui, TABLE_ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
-                            ui.set_min_width(content_width);
-                            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                            ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
-                            for visible_index in row_range {
-                                let Some(row_key) = visible_rows.get(visible_index).copied() else {
-                                    continue;
-                                };
-                                self.row(ui, row_key, visible_index, &visible_rows);
-                            }
-                        })
-                };
+                let (body_rect, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), grid_height),
+                    Sense::hover(),
+                );
+                let mut body_ui = ui.child_ui(body_rect, Layout::top_down(Align::Min));
+                body_ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+                let output = {
+                        if visible_rows.is_empty() {
+                            ScrollArea::both()
+                                .id_source("table_editor_body")
+                                .max_height(grid_height)
+                                .auto_shrink([false, false])
+                                .scroll_bar_visibility(eframe::egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                                .horizontal_scroll_offset(self.scroll_x)
+                                .show(&mut body_ui, |ui| {
+                                    ui.set_min_width(content_width);
+                                    self.empty_rows_body(ui, content_width, grid_height, &mut message);
+                                })
+                        } else {
+                            ScrollArea::both()
+                                .id_source("table_editor_body")
+                                .max_height(grid_height)
+                                .auto_shrink([false, false])
+                                .scroll_bar_visibility(eframe::egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                                .horizontal_scroll_offset(self.scroll_x)
+                                .show_rows(&mut body_ui, TABLE_ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
+                                    ui.set_min_width(content_width);
+                                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                                    ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
+                                    for visible_index in row_range {
+                                        let Some(row_key) = visible_rows.get(visible_index).copied() else {
+                                            continue;
+                                        };
+                                        self.row(ui, row_key, visible_index, &visible_rows);
+                                    }
+                                })
+                        }
+                    };
                 self.scroll_x = output.state.offset.x;
                 // Keep the fixed header above the virtualized body. Rows are
                 // painted first so a fractional top pixel cannot cover it.
                 self.header(ui, header_rect);
             });
+        let max_scroll = (content_width - viewport_width).max(0.0);
+        if max_scroll > 0.0 {
+            let response = flat_scrollbar(ui, &mut self.scroll_x, max_scroll, 300.0);
+            if response.changed() {
+                ui.ctx().request_repaint();
+            }
+        }
         let table_hovered = ui.ctx().input(|input| {
             input
                 .pointer
@@ -349,8 +373,6 @@ impl TableEditor {
             self.auto_save_pending_changes(&mut message);
         }
         self.table_hovered_last_frame = table_hovered;
-
-        self.row_actions_bar(ui, &mut message);
 
         message
     }
@@ -555,12 +577,12 @@ impl TableEditor {
                 );
             }
             ui.separator();
-            if ui.add_enabled(self.page > 0, Button::new("Prev")).clicked() {
+            if ui.add_enabled(self.page > 0, Button::new(tr("Prev"))).clicked() {
                 self.change_page(self.page.saturating_sub(1), message);
             }
             ui.label(format!("{} / {}", self.page + 1, self.total_pages().max(1)));
             if ui
-                .add_enabled(self.page + 1 < self.total_pages(), Button::new("Next"))
+                .add_enabled(self.page + 1 < self.total_pages(), Button::new(tr("Next")))
                 .clicked()
             {
                 self.change_page(self.page + 1, message);
@@ -641,70 +663,8 @@ impl TableEditor {
         }
     }
 
-    fn row_actions_bar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!self.is_committing(), Button::new("+"))
-                .on_hover_text("Append row")
-                .clicked()
-            {
-                self.append_row(message);
-            }
-
-            let selected_rows = self.selected_rows.iter().copied().collect::<Vec<_>>();
-            let selected_count = selected_rows.len();
-            let can_remove = !self.is_committing()
-                && selected_rows
-                    .iter()
-                    .any(|row| self.can_remove_or_restore_row(*row));
-            let delete_label = if selected_count > 1 {
-                format!("- Rows ({selected_count})")
-            } else {
-                "- Row".to_string()
-            };
-            if ui
-                .add_enabled(can_remove, Button::new(delete_label))
-                .on_hover_text("Delete selected row(s), restore delete mark, or remove staged rows")
-                .clicked()
-            {
-                self.request_remove_or_restore_rows(selected_rows, message);
-            }
-
-            ui.separator();
-            if ui
-                .add_enabled(
-                    self.has_changes() && !self.is_committing(),
-                    Button::new(tr("Rollback")),
-                )
-                .clicked()
-            {
-                self.clear_changes();
-                self.last_commit_result = None;
-                *message = Some("Uncommitted table changes rolled back".to_string());
-            }
-
-            ui.separator();
-            let selected_label = if selected_count > 1 {
-                format!("{selected_count} rows selected")
-            } else {
-                self.selected_row
-                    .map(|row| self.row_label(row))
-                    .unwrap_or_else(|| "No row selected".to_string())
-            };
-            ui.label(RichText::new(selected_label).small().color(Color32::GRAY));
-
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let pending = self.pending_change_count();
-                if pending > 0 {
-                    ui.label(
-                        RichText::new(format!("{pending} unsaved"))
-                            .small()
-                            .color(Color32::from_rgb(70, 110, 190)),
-                    );
-                }
-            });
-        });
+    pub fn selected_row_count(&self) -> usize {
+        self.selected_rows.len()
     }
 
     fn append_row(&mut self, message: &mut Option<String>) {
@@ -1008,7 +968,7 @@ impl TableEditor {
                         self.show_commit_dialog = false;
                     }
                     if ui
-                        .add_enabled(self.can_commit(), Button::new("Commit"))
+                        .add_enabled(self.can_commit(), Button::new(tr("Commit")))
                         .clicked()
                     {
                         self.execute_commit(message);
@@ -1038,7 +998,7 @@ impl TableEditor {
                     if ui.button(tr("Cancel")).clicked() {
                         self.show_close_warning = false;
                     }
-                    if ui.button("Close Anyway").clicked() {
+                    if ui.button(tr("Close Anyway")).clicked() {
                         self.clear_changes();
                         self.show_close_warning = false;
                     }
@@ -1499,7 +1459,7 @@ impl TableEditor {
             vec2(self.content_width(), TABLE_HEADER_HEIGHT),
         );
         let mut header_ui = ui.child_ui(header_rect, Layout::left_to_right(Align::Center));
-        header_ui.set_clip_rect(rect);
+        header_ui.set_clip_rect(rect.intersect(ui.clip_rect()));
         header_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
         header_ui.horizontal(|ui| {
@@ -1615,6 +1575,7 @@ impl TableEditor {
                     ui,
                     &cell.response,
                     row_key,
+                    column_index,
                     visible_rows,
                     &mut append_requested,
                     &mut remove_requested,
@@ -1643,6 +1604,7 @@ impl TableEditor {
         ui: &Ui,
         response: &Response,
         row_key: RowKey,
+        column_index: usize,
         visible_rows: &[RowKey],
         append_requested: &mut bool,
         remove_requested: &mut bool,
@@ -1659,6 +1621,57 @@ impl TableEditor {
                 self.selected_rows.insert(row_key);
                 self.selected_row = Some(row_key);
             }
+
+            if ui.button(tr("Copy")).clicked() {
+                if let Some(text) = self.copy_cell_text(row_key, column_index) {
+                    ui.output_mut(|output| output.copied_text = text);
+                }
+                ui.close_menu();
+            }
+            ui.menu_button(tr("Copy As"), |ui| {
+                if ui.button(tr("Insert Statement")).clicked() {
+                    if let Some(text) = self.copy_insert_statement(row_key) {
+                        ui.output_mut(|output| output.copied_text = text);
+                    }
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        matches!(row_key, RowKey::Existing(_)),
+                        Button::new(tr("Update Statement")),
+                    )
+                    .clicked()
+                {
+                    if let Some(text) = self.copy_update_statement(row_key) {
+                        ui.output_mut(|output| output.copied_text = text);
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button(tr("Tab-Separated Values (Data)")).clicked() {
+                    ui.output_mut(|output| {
+                        output.copied_text = self.copy_row_values(row_key).unwrap_or_default()
+                    });
+                    ui.close_menu();
+                }
+                if ui.button(tr("Tab-Separated Values (Fields)")).clicked() {
+                    ui.output_mut(|output| output.copied_text = self.copy_headers());
+                    ui.close_menu();
+                }
+                if ui
+                    .button(tr("Tab-Separated Values (Fields and Data)"))
+                    .clicked()
+                {
+                    let mut text = self.copy_headers();
+                    if let Some(values) = self.copy_row_values(row_key) {
+                        text.push('\n');
+                        text.push_str(&values);
+                    }
+                    ui.output_mut(|output| output.copied_text = text);
+                    ui.close_menu();
+                }
+            });
+            ui.separator();
 
             if ui.button(tr("Insert Row")).clicked() {
                 *append_requested = true;
@@ -1687,6 +1700,105 @@ impl TableEditor {
                 ui.close_menu();
             }
         });
+    }
+
+    fn copy_cell_text(&self, row_key: RowKey, column_index: usize) -> Option<String> {
+        self.copy_row_texts(row_key)?.get(column_index).cloned()
+    }
+
+    fn copy_row_values(&self, row_key: RowKey) -> Option<String> {
+        Some(self.copy_row_texts(row_key)?.join("\t"))
+    }
+
+    fn copy_row_texts(&self, row_key: RowKey) -> Option<Vec<String>> {
+        match row_key {
+            RowKey::Existing(row_index) => Some(
+                (0..self.display_column_count())
+                    .map(|column_index| {
+                        self.edits
+                            .get(&CellKey {
+                                row: row_index,
+                                column: column_index,
+                            })
+                            .cloned()
+                            .or_else(|| {
+                                self.result
+                                    .rows
+                                    .get(row_index)
+                                    .and_then(|row| row.values.get(column_index))
+                                    .map(copy_cell_value)
+                            })
+                            .unwrap_or_else(|| "NULL".to_string())
+                    })
+                    .collect(),
+            ),
+            RowKey::New(row_index) => self.new_rows.get(row_index).map(|row| row.values.clone()),
+        }
+    }
+
+    fn copy_headers(&self) -> String {
+        (0..self.display_column_count())
+            .map(|column_index| self.display_column_name(column_index))
+            .collect::<Vec<_>>()
+            .join("\t")
+    }
+
+    fn copy_insert_statement(&self, row_key: RowKey) -> Option<String> {
+        let table = self.qualified_table_name().ok()?;
+        let columns = (0..self.display_column_count())
+            .map(|column_index| self.quote_identifier(&self.display_column_name(column_index)))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .ok()?
+            .join(", ");
+        let values = self
+            .copy_row_texts(row_key)?
+            .iter()
+            .map(|value| sql_literal(value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("INSERT INTO {table} ({columns}) VALUES ({values});"))
+    }
+
+    fn copy_update_statement(&self, row_key: RowKey) -> Option<String> {
+        let RowKey::Existing(row_index) = row_key else {
+            return None;
+        };
+        let table = self.qualified_table_name().ok()?;
+        let values = self.copy_row_texts(row_key)?;
+        let assignments = (0..self.display_column_count())
+            .map(|column_index| {
+                Some(format!(
+                    "{} = {}",
+                    self.quote_identifier(&self.display_column_name(column_index)).ok()?,
+                    sql_literal(values.get(column_index)?)
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?
+            .join(", ");
+        let predicates = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.primary_key)
+            .map(|(column_index, column)| {
+                let value = self
+                    .result
+                    .rows
+                    .get(row_index)
+                    .and_then(|row| row.values.get(column_index))?;
+                Some(format!(
+                    "{} = {}",
+                    self.quote_identifier(&column.name).ok()?,
+                    sql_literal_for_cell(value)
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!predicates.is_empty()).then(|| {
+            format!(
+                "UPDATE {table} SET {assignments} WHERE {};",
+                predicates.join(" AND ")
+            )
+        })
     }
 
     fn existing_cell(
