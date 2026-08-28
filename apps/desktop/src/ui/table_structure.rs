@@ -1567,12 +1567,14 @@ impl TableStructureView {
 
         ScrollArea::both()
             .auto_shrink([false, false])
+            // 滚动条始终可见：字段多/列宽时不再依赖 egui 的“需要才显示”
+            // 判断（那套判断在部分布局下会失败），保证一定能拖看到右侧列。
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
-                // Force a content width wider than the viewport. Without this
-                // the Grid squeezes every column down to fit the panel, so with
-                // many fields the right-hand columns get clipped and the
-                // horizontal scroll bar never appears.
-                ui.set_min_width(1040.0);
+                // Force a content width wider than the viewport so the
+                // horizontal scroll bar reliably appears and the wider
+                // Default / Comment columns are fully reachable.
+                ui.set_min_width(1240.0);
                 Grid::new("structure_columns_grid")
                     .striped(true)
                     .num_columns(8)
@@ -1587,9 +1589,9 @@ impl TableStructureView {
                             ("Length", 90.0),
                             ("Unsigned", 80.0),
                             ("Null", 50.0),
-                            ("Default", 150.0),
+                            ("Default", 260.0),
                             ("Key", 50.0),
-                            ("Comment", 220.0),
+                            ("Comment", 360.0),
                         ] {
                             ui.add_sized(
                                 [width, 20.0],
@@ -1739,8 +1741,8 @@ impl TableStructureView {
                             let mut default_buf =
                                 self.columns[idx].default_value.clone().unwrap_or_default();
                             let default_edit =
-                                TextEdit::singleline(&mut default_buf).desired_width(120.0);
-                            let default_response = ui.add_sized([120.0, 22.0], default_edit);
+                                TextEdit::singleline(&mut default_buf).desired_width(260.0);
+                            let default_response = ui.add_sized([260.0, 22.0], default_edit);
                             if default_response.clicked() {
                                 self.selected_column = Some(idx);
                             }
@@ -1758,9 +1760,9 @@ impl TableStructureView {
                             let mut comment_buf =
                                 self.columns[idx].comment.clone().unwrap_or_default();
                             let comment_edit = TextEdit::singleline(&mut comment_buf)
-                                .desired_width(160.0)
+                                .desired_width(360.0)
                                 .hint_text(tr("Comment (optional)"));
-                            let comment_response = ui.add_sized([160.0, 22.0], comment_edit);
+                            let comment_response = ui.add_sized([360.0, 22.0], comment_edit);
                             if comment_response.changed() {
                                 let value = comment_buf.trim();
                                 self.columns[idx].comment =
@@ -2712,27 +2714,34 @@ impl TableStructureView {
         let mut save = false;
         let mut cancel = false;
         Window::new(editor_title)
-            .default_size([780.0, 520.0])
+            .default_size([780.0, 400.0])
+            .min_size([560.0, 300.0])
             .collapsible(false)
             .resizable(true)
             .open(&mut open)
             .show(ui.ctx(), |ui| {
                 ui.label(tr("Edit the SQL and run it against the current database."));
-                ui.add_space(6.0);
+                ui.add_space(4.0);
+                // 固定编辑器高度（不能再引用 available_height）：
+                // 否则 窗口变高 -> available 变大 -> edit_h 变大 -> 内容变高
+                // -> 窗口更高 形成正反馈，弹窗会一路涨到撑满屏幕。
+                let edit_h = 300.0;
+                let edit_w = ui.available_width().max(620.0);
                 ScrollArea::both()
                     .auto_shrink([false, false])
+                    .max_height(edit_h)
                     .show(ui, |ui| {
                         if let Some(editor) = self.ddl_editor.as_mut() {
-                            ui.add(
+                            ui.add_sized(
+                                [edit_w, edit_h],
                                 TextEdit::multiline(&mut editor.sql)
                                     .font(TextStyle::Monospace)
-                                    .desired_width(ui.available_width().max(640.0))
-                                    .desired_rows(24)
+                                    .desired_width(edit_w)
                                     .interactive(true),
                             );
                         }
                     });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button(tr("Cancel")).clicked() {
                         cancel = true;

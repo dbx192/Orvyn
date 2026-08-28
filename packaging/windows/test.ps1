@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$DuckDbDir = Join-Path $Root 'target\duckdb-download\local\1.5.4'
+$DuckDbDir = Join-Path $Root 'packaging\duckdb-download\local\1.5.4'
 if (-not (Test-Path (Join-Path $DuckDbDir 'duckdb.dll'))) {
   throw "duckdb.dll not found: $DuckDbDir"
 }

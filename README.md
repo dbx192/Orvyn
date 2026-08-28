@@ -76,7 +76,7 @@ $env:ORVYN_MASTER_KEY = "replace-with-a-strong-private-key"
 项目使用本地 DuckDB 库，构建时不会自动下载。默认目录：
 
 ~~~text
-target/duckdb-download/local/1.5.4
+packaging/duckdb-download/local/1.5.4
 ~~~
 
 目录必须包含目标平台文件：
@@ -127,7 +127,7 @@ PKG=dist/linux/orvyn_1.0.0_amd64
 rm -rf "$PKG"
 mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/orvyn" "$PKG/usr/bin" "$PKG/usr/share/applications"
 cp target/x86_64-unknown-linux-gnu/release/orvyn "$PKG/usr/lib/orvyn/"
-cp target/duckdb-download/local/1.5.4/libduckdb.so "$PKG/usr/lib/orvyn/"
+cp packaging/duckdb-download/local/1.5.4/libduckdb.so "$PKG/usr/lib/orvyn/"
 printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/usr/lib/orvyn /usr/lib/orvyn/orvyn "$@"\n' > "$PKG/usr/bin/orvyn"
 chmod 755 "$PKG/usr/bin/orvyn"
 printf 'Package: orvyn\nVersion: 1.0.0\nSection: database\nPriority: optional\nArchitecture: amd64\nMaintainer: Orvyn\nDescription: Cross-platform desktop database client\n' > "$PKG/DEBIAN/control"
@@ -152,7 +152,7 @@ APP=dist/macos/Orvyn.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
 cp "target/$TARGET/release/orvyn" "$APP/Contents/MacOS/Orvyn"
-cp target/duckdb-download/local/1.5.4/libduckdb.dylib "$APP/Contents/Frameworks/"
+cp packaging/duckdb-download/local/1.5.4/libduckdb.dylib "$APP/Contents/Frameworks/"
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

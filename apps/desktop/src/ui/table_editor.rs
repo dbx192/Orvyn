@@ -299,6 +299,9 @@ impl TableEditor {
                         .min_scrolled_height(grid_height)
                         .max_height(grid_height)
                         .auto_shrink([false, false])
+                        .scroll_bar_visibility(
+                            eframe::egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
                         .show(ui, |ui| {
                             ui.set_min_width(content_width);
                             self.empty_rows_body(ui, content_width, grid_height, &mut message);
@@ -309,6 +312,9 @@ impl TableEditor {
                         .min_scrolled_height(grid_height)
                         .max_height(grid_height)
                         .auto_shrink([false, false])
+                        .scroll_bar_visibility(
+                            eframe::egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
                         .show_rows(ui, TABLE_ROW_HEIGHT, visible_rows.len(), |ui, row_range| {
                             ui.set_min_width(content_width);
                             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);

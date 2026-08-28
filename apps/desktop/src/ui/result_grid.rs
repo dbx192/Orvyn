@@ -143,6 +143,9 @@ impl ResultSetGrid {
                     .min_scrolled_height(body_height)
                     .max_height(body_height)
                     .auto_shrink([false, false])
+                    .scroll_bar_visibility(
+                        eframe::egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                    )
                     .show_rows(ui, TABLE_ROW_HEIGHT, page_rows.len(), |ui, row_range| {
                         ui.set_min_width(content_width);
                         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
