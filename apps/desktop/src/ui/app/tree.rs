@@ -61,19 +61,6 @@ impl DesktopApp {
                                     .small()
                                     .color(Color32::GRAY),
                             );
-                            if let Some(selected_count) = self
-                                .active_table_editor
-                                .and_then(|id| self.table_editors.get(&id))
-                                .map(|editor| editor.selected_row_count())
-                                .filter(|count| *count > 0)
-                            {
-                                ui.separator();
-                                ui.label(
-                                    RichText::new(format!("{selected_count} rows selected"))
-                                        .small()
-                                        .color(Color32::GRAY),
-                                );
-                            }
                         });
                     });
                 }

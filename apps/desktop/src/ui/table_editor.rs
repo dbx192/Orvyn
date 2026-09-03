@@ -626,6 +626,7 @@ impl TableEditor {
             let response = ui.add(
                 TextEdit::singleline(&mut self.filter_text)
                     .desired_width(180.0)
+                    .min_size(vec2(0.0, ui.spacing().interact_size.y))
                     .hint_text("contains"),
             );
             if response.changed() {

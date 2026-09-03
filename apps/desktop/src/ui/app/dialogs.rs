@@ -378,6 +378,19 @@ impl DesktopApp {
                     .on_hover_text(&self.state.status);
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(selected_count) = self
+                            .active_table_editor
+                            .and_then(|id| self.table_editors.get(&id))
+                            .map(|editor| editor.selected_row_count())
+                            .filter(|count| *count > 0)
+                        {
+                            ui.label(
+                                RichText::new(format!("{selected_count} rows selected"))
+                                    .small()
+                                    .color(palette.fg_muted),
+                            );
+                            ui.separator();
+                        }
                         ui.label(
                             RichText::new(match self.state.errors.len() {
                                 0 => tr("No errors").to_string(),

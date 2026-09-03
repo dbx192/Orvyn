@@ -8,8 +8,8 @@ use db_common::{
     TableForeignKey, TableIndex, TableTrigger,
 };
 use eframe::egui::{
-    self, Button, Color32, ComboBox, Frame, Grid, Margin, RichText, ScrollArea, TextEdit, TextStyle,
-    Ui, Window,
+    self, vec2, Align, Button, Color32, ComboBox, Frame, Grid, Layout, Margin, RichText,
+    ScrollArea, TextEdit, TextStyle, Ui, Window,
 };
 use std::{env, fs, path::PathBuf};
 
@@ -948,7 +948,10 @@ impl TableStructureView {
         self.ddl_editor_window(ui, &mut message);
         self.refresh_dialog(ui, &mut message);
 
-        ui.horizontal_wrapped(|ui| {
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), 32.0),
+            Layout::left_to_right(Align::Center).with_main_wrap(true),
+            |ui| {
             ui.label(RichText::new(self.table_name()).strong().size(15.0));
             if !self.details_loaded {
                 ui.label(
@@ -1083,7 +1086,8 @@ impl TableStructureView {
                     });
                 }
             }
-        });
+            },
+        );
 
         ui.add_space(4.0);
         self.tabs(ui);

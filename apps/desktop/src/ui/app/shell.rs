@@ -5,7 +5,7 @@ use super::{
 use crate::ui::i18n::{self, text as tr, Locale};
 use eframe::egui::{
     pos2, vec2, Align, Button, CentralPanel, Context, Frame, Layout, Margin, Rect, RichText,
-    Spinner, Stroke, TopBottomPanel, Ui,
+    Sense, Spinner, Stroke, TopBottomPanel, Ui,
 };
 use std::time::Duration;
 
@@ -97,8 +97,7 @@ impl DesktopApp {
             let ordered_ids = tabs.iter().map(|(id, _, _)| *id).collect::<Vec<_>>();
             let mut close_tabs = None;
             for (id, title, dirty) in tabs {
-                let selected = self.active_panel == ActivePanel::TableEditor
-                    && self.active_table_editor == Some(id);
+                let selected = self.active_table_editor == Some(id);
                 let tab_response = ui.selectable_label(selected, title);
                 if tab_response.clicked() {
                     self.active_panel = ActivePanel::TableEditor;
@@ -150,16 +149,22 @@ impl DesktopApp {
                         &mut close_tabs,
                     );
                 });
-                if ui
-                    .add_enabled(!dirty, Button::new("x"))
-                    .on_hover_text(if dirty {
-                        tr("Save or rollback changes before closing")
-                    } else {
-                        tr("Close table")
-                    })
-                    .clicked()
-                {
-                    close_tabs = Some(vec![id]);
+                if selected || tab_response.hovered() {
+                    if ui
+                        .add_enabled(!dirty, Button::new("x"))
+                        .on_hover_text(if dirty {
+                            tr("Save or rollback changes before closing")
+                        } else {
+                            tr("Close table")
+                        })
+                        .clicked()
+                    {
+                        close_tabs = Some(vec![id]);
+                    }
+                } else {
+                    // Preserve the tab width while keeping inactive close
+                    // controls hidden until the pointer reaches the tab.
+                    ui.allocate_exact_size(vec2(18.0, 28.0), Sense::hover());
                 }
             }
             if let Some(ids) = close_tabs {
