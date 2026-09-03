@@ -11,6 +11,7 @@ use eframe::egui::{
     self, Button, Color32, ComboBox, Frame, Grid, Margin, RichText, ScrollArea, TextEdit, TextStyle,
     Ui, Window,
 };
+use std::{env, fs, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct CreateIndexRequest {
@@ -133,7 +134,6 @@ impl AlterTableRequest {
             | AlterTableRequest::AddForeignKey { connection_id, .. } => *connection_id,
         }
     }
-
     pub fn table(&self) -> &str {
         match self {
             AlterTableRequest::AddColumn { table, .. }
@@ -166,6 +166,79 @@ impl AlterTableRequest {
             | AlterTableRequest::AddForeignKey { schema, .. } => schema.as_deref(),
         }
     }
+
+}
+
+fn local_ddl_dir() -> PathBuf {
+    let base = env::var_os("ORVYN_CONFIG_DIR").map(PathBuf::from).or_else(|| {
+        #[cfg(windows)]
+        { env::var_os("APPDATA").map(|path| PathBuf::from(path).join("Orvyn")) }
+        #[cfg(not(windows))]
+        { None }
+    }).or_else(|| env::var_os("XDG_CONFIG_HOME").map(|path| PathBuf::from(path).join("orvyn")))
+      .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+      .join("ddl");
+    base
+}
+
+fn sanitize_filename(value: &str) -> String {
+    value.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+}
+
+fn parse_ddl_object(sql: &str) -> Option<(ObjectKind, String)> {
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+    let create = tokens.iter().position(|token| token.eq_ignore_ascii_case("create"))?;
+    let mut kind_index = create + 1;
+    if tokens.get(kind_index).is_some_and(|token| token.eq_ignore_ascii_case("or")) { kind_index += 2; }
+    let kind = match tokens.get(kind_index)?.to_ascii_lowercase().as_str() {
+        "trigger" => ObjectKind::Trigger,
+        "function" => ObjectKind::Function,
+        _ => return None,
+    };
+    let name = tokens.get(kind_index + 1)?.trim_matches(|ch: char| "(`\"'[".contains(ch)).trim_end_matches(';');
+    (!name.is_empty()).then(|| (kind, name.to_string()))
+}
+
+fn save_local_ddl(table: &str, title: &str, sql: &str) -> Result<PathBuf, String> {
+    let dir = local_ddl_dir();
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let kind = if title.to_ascii_lowercase().contains("function") { "function" } else { "trigger" };
+    let name = parse_ddl_object(sql).map(|(_, name)| name).unwrap_or_else(|| title.to_string());
+    let path = dir.join(format!("{}__{}__{}.sql", sanitize_filename(table), kind, sanitize_filename(&name)));
+    fs::write(&path, sql.as_bytes()).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+fn remove_local_ddl(table: &str, kind: ObjectKind, name: &str) {
+    let kind_name = match kind {
+        ObjectKind::Trigger => "trigger",
+        ObjectKind::Function => "function",
+    };
+    let path = local_ddl_dir().join(format!(
+        "{}__{}__{}.sql",
+        sanitize_filename(table),
+        kind_name,
+        sanitize_filename(name)
+    ));
+    let _ = fs::remove_file(path);
+}
+
+fn merge_local_ddl(table: &str, mut triggers: Vec<TableTrigger>, mut functions: Vec<DatabaseFunction>) -> (Vec<TableTrigger>, Vec<DatabaseFunction>) {
+    let prefix = format!("{}__", sanitize_filename(table));
+    let Ok(entries) = fs::read_dir(local_ddl_dir()) else { return (triggers, functions) };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(filename) = path.file_name().and_then(|name| name.to_str()) else { continue };
+        if !filename.starts_with(&prefix) || path.extension().and_then(|ext| ext.to_str()) != Some("sql") { continue; }
+        let Ok(sql) = fs::read_to_string(path) else { continue };
+        let Some((kind, name)) = parse_ddl_object(&sql) else { continue };
+        match kind {
+            ObjectKind::Trigger if !triggers.iter().any(|item| item.name == name) => triggers.push(TableTrigger { name, event: String::new(), timing: String::new(), statement: Some(sql) }),
+            ObjectKind::Function if !functions.iter().any(|item| item.name == name) => functions.push(DatabaseFunction { name, return_type: None, language: None, kind: "local".to_string() }),
+            _ => {}
+        }
+    }
+    (triggers, functions)
 }
 
 /// Generate the dialect-aware SQL for an `AlterTableRequest`.
@@ -606,6 +679,7 @@ impl TableStructureView {
     ) -> Self {
         let column_count = columns.len();
         let col_original_name = columns.iter().map(|c| Some(c.name.clone())).collect();
+        let (triggers, functions) = merge_local_ddl(&table, triggers, functions);
         Self {
             connection_id,
             kind,
@@ -2084,7 +2158,13 @@ impl TableStructureView {
         let name_sql = quote_id(dialect.as_ref(), name).unwrap_or_else(|_| name.to_string());
         match kind {
             ObjectKind::Trigger => format!("DROP TRIGGER IF EXISTS {name_sql}"),
-            ObjectKind::Function => format!("DROP FUNCTION IF EXISTS {name_sql}"),
+            ObjectKind::Function => {
+                if self.kind.protocol_family() == ProtocolFamily::PostgreSql {
+                    format!("DROP FUNCTION IF EXISTS {name_sql}()")
+                } else {
+                    format!("DROP FUNCTION IF EXISTS {name_sql}")
+                }
+            }
         }
     }
 
@@ -2696,6 +2776,11 @@ impl TableStructureView {
                 });
             });
         if confirm {
+            remove_local_ddl(&self.table, drop.kind, &drop.name);
+            match drop.kind {
+                ObjectKind::Trigger => self.triggers.retain(|item| item.name != drop.name),
+                ObjectKind::Function => self.functions.retain(|item| item.name != drop.name),
+            }
             let sql = self.build_object_drop_sql(drop.kind, &drop.name);
             self.pending_ddl.push(DdlOperation {
                 sql,
@@ -2706,7 +2791,7 @@ impl TableStructureView {
                 &[("kind", kind_label), ("name", drop.name.clone())],
             ));
         }
-        if !cancel && open {
+        if !confirm && !cancel && open {
             self.pending_object_drop = Some(drop);
         }
     }
@@ -2720,7 +2805,6 @@ impl TableStructureView {
         };
         let mut open = true;
         let mut save = false;
-        let mut save_file = false;
         let mut cancel = false;
         Window::new(editor_title)
             .default_size([780.0, 400.0])
@@ -2755,41 +2839,21 @@ impl TableStructureView {
                     if ui.button(tr("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button(tr("Save SQL")).clicked() {
-                        save_file = true;
-                    }
                     if ui.button(tr("Save")).clicked() {
                         save = true;
                     }
                 });
             });
-        if save_file {
-            if let Some(editor) = self.ddl_editor.as_ref() {
-                let filename = editor
-                    .title
-                    .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-                let filename = format!("{}.sql", filename.trim());
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title(tr("Save SQL to File"))
-                    .set_file_name(&filename)
-                    .add_filter("SQL", &["sql"])
-                    .save_file()
-                {
-                    match std::fs::write(&path, editor.sql.as_bytes()) {
-                        Ok(()) => {
-                            *message = Some(format!("SQL saved to {}", path.display()));
-                        }
-                        Err(error) => {
-                            *message = Some(format!("Failed to save SQL: {error}"));
-                        }
-                    }
-                }
-            }
-        }
         if save {
             if let Some(editor) = self.ddl_editor.take() {
                 let sql = editor.sql.trim().to_string();
                 if !sql.is_empty() {
+                    if let Err(error) = save_local_ddl(&self.table, &editor.title, &sql) {
+                        *message = Some(format!("Failed to save local DDL: {error}"));
+                        self.ddl_editor = Some(editor);
+                        return;
+                    }
+                    self.add_local_ddl_to_view(&sql);
                     self.pending_ddl.push(DdlOperation {
                         sql,
                         label: editor.title,
@@ -2799,6 +2863,19 @@ impl TableStructureView {
             }
         } else if cancel || !open {
             self.ddl_editor = None;
+        }
+    }
+
+    fn add_local_ddl_to_view(&mut self, sql: &str) {
+        let Some((kind, name)) = parse_ddl_object(sql) else { return };
+        match kind {
+            ObjectKind::Trigger if !self.triggers.iter().any(|item| item.name == name) => {
+                self.triggers.push(TableTrigger { name, event: String::new(), timing: String::new(), statement: Some(sql.to_string()) });
+            }
+            ObjectKind::Function if !self.functions.iter().any(|item| item.name == name) => {
+                self.functions.push(DatabaseFunction { name, return_type: None, language: None, kind: "local".to_string() });
+            }
+            _ => {}
         }
     }
 }

@@ -151,7 +151,8 @@ impl ResultSetGrid {
                     Sense::hover(),
                 );
                 let mut body_ui = ui.child_ui(body_rect, Layout::top_down(Align::Min));
-                body_ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+                let body_clip = body_rect;
+                body_ui.set_clip_rect(body_clip);
                 let output =
                         ScrollArea::both()
                             .id_source("result_set_body")
@@ -321,7 +322,7 @@ impl ResultSetGrid {
             vec2(self.content_width(), TABLE_HEADER_HEIGHT),
         );
         let mut header_ui = ui.child_ui(header_rect, Layout::left_to_right(Align::Center));
-        header_ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+        header_ui.set_clip_rect(rect);
         header_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
         header_ui.horizontal(|ui| {

@@ -311,7 +311,8 @@ impl TableEditor {
                     Sense::hover(),
                 );
                 let mut body_ui = ui.child_ui(body_rect, Layout::top_down(Align::Min));
-                body_ui.set_clip_rect(body_rect.intersect(ui.clip_rect()));
+                let body_clip = body_rect;
+                body_ui.set_clip_rect(body_clip);
                 let output = {
                         if visible_rows.is_empty() {
                             ScrollArea::both()
@@ -1459,7 +1460,7 @@ impl TableEditor {
             vec2(self.content_width(), TABLE_HEADER_HEIGHT),
         );
         let mut header_ui = ui.child_ui(header_rect, Layout::left_to_right(Align::Center));
-        header_ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+        header_ui.set_clip_rect(rect);
         header_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
         header_ui.horizontal(|ui| {
@@ -1980,7 +1981,7 @@ impl TableEditor {
         );
 
         let mut edit_ui = ui.child_ui(edit_rect, Layout::left_to_right(Align::Center));
-        edit_ui.set_clip_rect(edit_rect);
+        edit_ui.set_clip_rect(edit_rect.intersect(ui.clip_rect()));
         edit_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         edit_ui.spacing_mut().interact_size = vec2(0.0, TABLE_ROW_HEIGHT);
         let edit_response = edit_ui.add_sized(

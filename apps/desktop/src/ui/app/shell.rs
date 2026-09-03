@@ -263,6 +263,10 @@ impl DesktopApp {
                     }),
             )
             .show(ctx, |ui| {
+                // Keep every central-panel painter (including scrolled grids)
+                // inside the area to the right of the T-layout divider.
+                let central_clip = ui.max_rect().intersect(ui.clip_rect());
+                ui.set_clip_rect(central_clip);
                 // Content gets a small left inset so nothing (tabs, toolbar,
                 // empty-state) is flush against the T-layout divider.
                 if matches!(self.active_panel, ActivePanel::RedisBrowser)

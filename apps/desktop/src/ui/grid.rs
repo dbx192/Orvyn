@@ -72,7 +72,7 @@ pub fn label_cell(
 ) -> GridCellResponse {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), sense);
     paint_cell_frame(ui, rect, fill, stroke);
-    paint_label(ui, rect, text);
+    paint_label(ui, rect, height, text);
     GridCellResponse { response, rect }
 }
 
@@ -93,7 +93,7 @@ pub fn text_edit_cell(
         pos2(rect.right() - CELL_PADDING_X, rect.bottom()),
     );
     let mut child_ui = ui.child_ui(inner_rect, Layout::left_to_right(Align::Center));
-    child_ui.set_clip_rect(inner_rect);
+    child_ui.set_clip_rect(inner_rect.intersect(ui.clip_rect()));
     child_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     child_ui.spacing_mut().interact_size = vec2(0.0, height);
 
@@ -148,7 +148,7 @@ pub fn resizable_header_cell(
             },
         ),
     );
-    paint_label(ui, rect, text);
+    paint_label(ui, rect, height, text);
 
     let handle_rect = Rect::from_min_max(pos2(rect.max.x - 5.0, rect.min.y), rect.max);
     let handle_response = ui.interact(handle_rect, id, Sense::drag());
@@ -214,21 +214,17 @@ pub fn flat_scrollbar(ui: &mut Ui, value: &mut f32, max: f32, width: f32) -> Res
     response
 }
 
-fn paint_label(ui: &mut Ui, rect: Rect, text: RichText) {
+fn paint_label(ui: &mut Ui, rect: Rect, height: f32, text: RichText) {
     // A small vertical inset prevents glyphs from touching the cell borders
     // when the row is scrolled or rendered at fractional scale factors.
     let inner_rect = rect.shrink2(vec2(CELL_PADDING_X, 2.0));
     let galley =
         WidgetText::from(text).into_galley(ui, Some(false), inner_rect.width(), TextStyle::Body);
-    // Center the visible glyph ink on the cell, not the (taller) line box, so
-    // single-line text no longer looks pushed toward the top of the row.
-    let ink = galley.mesh_bounds;
-    let ink_height = if ink.height() > 0.0 { ink.height() } else { galley.size().y };
     let text_pos = pos2(
         inner_rect.left(),
-        rect.center().y - ink.min.y - ink_height * 0.5,
+        rect.center().y - (galley.size().y * 0.5).min(height * 0.5),
     );
-    ui.painter().with_clip_rect(inner_rect).add(TextShape::new(
+    ui.painter().with_clip_rect(inner_rect.intersect(ui.clip_rect())).add(TextShape::new(
         text_pos,
         galley,
         ui.visuals().text_color(),
