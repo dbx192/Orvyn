@@ -10,7 +10,7 @@ use crate::ui::{
     object_tree::ObjectTreeAction, redis_browser::RedisBrowserUi, search_browser::SearchBrowser,
 };
 use db_common::ConnectionId;
-use eframe::egui::{Align, Color32, Context, CursorIcon, Id, Layout, Rect, RichText, Sense, SidePanel, Ui, pos2, vec2};
+use eframe::egui::{Context, CursorIcon, Id, Rect, Sense, SidePanel, Ui, pos2, vec2};
 use import_export::ExportFormat;
 
 // Splitter state. We deliberately do NOT rely on egui's built-in resizable
@@ -45,30 +45,8 @@ impl DesktopApp {
             .resizable(false)
             .exact_width(width)
             .show(ctx, |ui| {
-                let (message, actions) = self.object_tree.ui(ctx, ui);
-                if let Some(message) = message {
-                    // Opening a table/query is already apparent from the active
-                    // panel and does not need a duplicate status line.
-                    if !message.is_empty()
-                        && !message.starts_with("Opening ")
-                        && !message.starts_with("Selected: ")
-                    {
-                        self.last_tree_status = message.clone();
-                        self.state.set_status(message);
-                    }
-                }
+                let (_message, actions) = self.object_tree.ui(ctx, ui);
                 self.handle_tree_actions(actions);
-                if !self.last_tree_status.is_empty() {
-                    ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(&self.last_tree_status)
-                                    .small()
-                                    .color(Color32::GRAY),
-                            );
-                        });
-                    });
-                }
                 self.draw_left_divider(ui);
             });
     }

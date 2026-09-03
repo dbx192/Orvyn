@@ -488,45 +488,40 @@ impl QueryEditor {
     }
 
     fn close_tab(&mut self, tab_id: QueryId) {
-        let Some(tab) = self.tabs.remove(&tab_id) else {
+        let Some(_tab) = self.tabs.remove(&tab_id) else {
             return;
         };
         if self.active_tab == Some(tab_id) {
             self.active_tab = self.tabs.keys().next_back().copied();
         }
-        self.status = if tab.dirty {
-            "Query tab closed; unsaved SQL was discarded".to_string()
-        } else {
-            "Query tab closed".to_string()
-        };
     }
 
     fn close_all_tabs(&mut self) {
         self.tabs.clear();
         self.active_tab = None;
-        self.status = "All query tabs closed".to_string();
     }
 
     fn close_other_tabs(&mut self, keep: QueryId) {
         self.tabs.retain(|id, _| *id == keep);
         self.active_tab = Some(keep);
-        self.status = "Other query tabs closed".to_string();
     }
 
     fn tab_bar(&mut self, ui: &mut Ui) {
         let ids: Vec<QueryId> = self.tabs.keys().copied().collect();
+        let mut close_tab = None;
         ui.horizontal_wrapped(|ui| {
             for id in ids {
-                let Some(title) = self.tabs.get(&id).map(|tab| {
+                let Some((title, dirty)) = self.tabs.get(&id).map(|tab| {
                     if tab.dirty {
-                        format!("* {}", tab.title)
+                        (format!("* {}", tab.title), true)
                     } else {
-                        tab.title.clone()
+                        (tab.title.clone(), false)
                     }
                 }) else {
                     continue;
                 };
-                let response = ui.selectable_label(self.active_tab == Some(id), title);
+                let selected = self.active_tab == Some(id);
+                let response = ui.selectable_label(selected, title);
                 if response.clicked() {
                     self.active_tab = Some(id);
                 }
@@ -544,8 +539,26 @@ impl QueryEditor {
                         ui.close_menu();
                     }
                 });
+                if selected || response.hovered() {
+                    if ui
+                        .add_enabled(!dirty, Button::new("x"))
+                        .on_hover_text(if dirty {
+                            tr("Save or rollback changes before closing")
+                        } else {
+                            tr("Close query")
+                        })
+                        .clicked()
+                    {
+                        close_tab = Some(id);
+                    }
+                } else {
+                    ui.allocate_exact_size(vec2(18.0, 28.0), eframe::egui::Sense::hover());
+                }
             }
         });
+        if let Some(id) = close_tab {
+            self.close_tab(id);
+        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
@@ -1631,6 +1644,14 @@ impl QueryEditor {
         let Some(tab) = self.tabs.get(&tab_id) else {
             return;
         };
+        let kind = self
+            .connections
+            .iter()
+            .find(|profile| profile.id == tab.connection_id)
+            .map(|profile| profile.kind);
+        if tab.database.is_none() && kind.is_some_and(mysql_metadata_requires_database) {
+            return;
+        }
         let tx = self.tx.clone();
         let service = self.metadata_service.clone();
         let connection_id = tab.connection_id;
@@ -1657,6 +1678,14 @@ impl QueryEditor {
         let Some(tab) = self.tabs.get(&tab_id) else {
             return;
         };
+        let kind = self
+            .connections
+            .iter()
+            .find(|profile| profile.id == tab.connection_id)
+            .map(|profile| profile.kind);
+        if tab.database.is_none() && kind.is_some_and(mysql_metadata_requires_database) {
+            return;
+        }
         let tx = self.tx.clone();
         let service = self.metadata_service.clone();
         let connection_id = tab.connection_id;
@@ -1678,6 +1707,17 @@ impl QueryEditor {
     }
 
     fn load_columns_for_tab(&mut self, tab_id: QueryId, table: String) {
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
+        let kind = self
+            .connections
+            .iter()
+            .find(|profile| profile.id == tab.connection_id)
+            .map(|profile| profile.kind);
+        if tab.database.is_none() && kind.is_some_and(mysql_metadata_requires_database) {
+            return;
+        }
         let Some(tab) = self.tabs.get_mut(&tab_id) else {
             return;
         };
@@ -2286,6 +2326,20 @@ fn connection_label(profile: &ConnectionProfile) -> String {
 
 fn next_tab_title(_connection_name: &str) -> String {
     "Query".to_string()
+}
+
+fn mysql_metadata_requires_database(kind: DataSourceKind) -> bool {
+    matches!(
+        kind,
+        DataSourceKind::MySql
+            | DataSourceKind::MariaDb
+            | DataSourceKind::TiDb
+            | DataSourceKind::OceanBase
+            | DataSourceKind::Doris
+            | DataSourceKind::SelectDb
+            | DataSourceKind::StarRocks
+            | DataSourceKind::GoldenDb
+    )
 }
 
 fn qualified_query_table(

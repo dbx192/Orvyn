@@ -46,7 +46,6 @@ pub struct DesktopApp {
     import_wizard: Option<ImportWizard>,
     redis_browser: Option<RedisBrowserUi>,
     search_browser: Option<SearchBrowser>,
-    last_tree_status: String,
     error_window_open: bool,
     active_panel: ActivePanel,
     /// Pending async load for table data (Arc<Mutex> polled each frame).
@@ -128,7 +127,6 @@ impl DesktopApp {
             active_structure: None,
             import_wizard: None,
             redis_browser: None,
-            last_tree_status: String::new(),
             error_window_open: false,
             active_panel: ActivePanel::QueryEditor,
             pending_table_load: None,
