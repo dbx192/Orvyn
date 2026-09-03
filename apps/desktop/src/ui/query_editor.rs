@@ -339,9 +339,30 @@ impl QueryEditor {
             .cloned();
 
         if let Some(profile) = profile {
+            let target_database = database.clone().or(profile.database.clone());
+
+            // Reuse a table query tab when returning from the table-data view.
+            if let Some(table_name) = table.as_deref() {
+                if let Some(tab_id) = self
+                    .tabs
+                    .iter()
+                    .find(|(_, tab)| {
+                        tab.connection_id == connection_id
+                            && tab.database == target_database
+                            && tab.schema == schema
+                            && tab.title == table_name
+                    })
+                    .map(|(id, _)| *id)
+                {
+                    self.active_tab = Some(tab_id);
+                    self.refresh_metadata_for_tab(tab_id);
+                    return;
+                }
+            }
+
             let tab_id = self.open_new_tab(profile.clone());
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.database = database.or(profile.database.clone());
+                tab.database = target_database;
                 tab.schema = schema;
                 if let Some(table) = table {
                     tab.title = table.clone();
@@ -2263,8 +2284,8 @@ fn connection_label(profile: &ConnectionProfile) -> String {
     format!("{} ({})", profile.name, profile.kind.as_str())
 }
 
-fn next_tab_title(connection_name: &str) -> String {
-    format!("Query · {}", connection_name)
+fn next_tab_title(_connection_name: &str) -> String {
+    "Query".to_string()
 }
 
 fn qualified_query_table(

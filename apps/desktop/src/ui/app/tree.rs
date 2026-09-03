@@ -47,7 +47,12 @@ impl DesktopApp {
             .show(ctx, |ui| {
                 let (message, actions) = self.object_tree.ui(ctx, ui);
                 if let Some(message) = message {
-                    if !message.is_empty() {
+                    // Opening a table/query is already apparent from the active
+                    // panel and does not need a duplicate status line.
+                    if !message.is_empty()
+                        && !message.starts_with("Opening ")
+                        && !message.starts_with("Selected: ")
+                    {
                         self.last_tree_status = message.clone();
                         self.state.set_status(message);
                     }
@@ -141,11 +146,6 @@ impl DesktopApp {
                         database.clone(),
                         schema.clone(),
                     );
-                    self.state.set_status(format!(
-                        "Loading table {}.{} ...",
-                        schema.as_deref().unwrap_or(""),
-                        table
-                    ));
                     self.spawn_table_data_load(
                         connection_id,
                         database.clone(),
@@ -386,11 +386,10 @@ impl DesktopApp {
     }
 
     pub(super) fn connection_windows(&mut self, ctx: &Context) {
-        if let Some(message) = self.connection_manager_ui.ui_window(ctx) {
-            if !message.is_empty() {
-                self.state.set_status(message);
-            }
-        }
+        // Connection-manager feedback is rendered in its own window. Keeping
+        // it out of the global bottom bar avoids duplicating the connection
+        // count/status that is already visible in the window header/content.
+        let _ = self.connection_manager_ui.ui_window(ctx);
         for change in self.connection_manager_ui.take_changes() {
             self.handle_connection_change(change);
         }

@@ -590,14 +590,6 @@ impl DesktopApp {
                             i18n::locale().tag()
                         ));
 
-                        ui.separator();
-                        ui.label(
-                            RichText::new(&self.state.status)
-                                .small()
-                                .color(palette.fg_muted)
-                                .strong(),
-                        )
-                        .on_hover_text(&self.state.status);
                     });
                 });
             });

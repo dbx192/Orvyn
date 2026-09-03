@@ -39,8 +39,6 @@ impl DesktopApp {
                     done = true;
                     match result {
                         Ok(payload) => {
-                            let row_count = payload.result.rows.len();
-                            let table_name = payload.table.clone();
                             let conn_id = payload.connection_id;
                             self.object_tree.mark_connected(conn_id);
                             let structure = TableStructureView::from_columns(
@@ -78,10 +76,6 @@ impl DesktopApp {
                             }
                             self.active_table_editor = Some(editor_id);
                             self.active_structure = Some(editor_id);
-                            self.state.set_status(format!(
-                                "Loaded table {} ({} rows)",
-                                table_name, row_count
-                            ));
                         }
                         Err(e) => {
                             let detail = e
