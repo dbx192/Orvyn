@@ -426,7 +426,7 @@ impl TableEditor {
                             ))
                         }
                         Err(e) => {
-                            let msg = format!("Commit failed: {}", e.message);
+                            let msg = format!("Commit failed: {}", e.diagnostic_message());
                             self.commit_state = CommitState::Failed(msg.clone());
                             self.commit_error = Some(msg.clone());
                             Some(msg)
@@ -458,7 +458,10 @@ impl TableEditor {
                         }
                         Err(error) => {
                             let msg =
-                                format!("Commit succeeded but refresh failed: {}", error.message);
+                                format!(
+                                    "Commit succeeded but refresh failed: {}",
+                                    error.diagnostic_message()
+                                );
                             self.commit_state = CommitState::Failed(msg.clone());
                             self.commit_error = Some(msg.clone());
                             Some(msg)
@@ -1089,7 +1092,7 @@ impl TableEditor {
         let connection_id = self.connection_id.unwrap();
         let runtime = self.runtime.clone().unwrap();
         let insert_count = self.new_rows.len();
-        let database = self.database.clone();
+        let database = self.effective_database();
         let schema = self.schema.clone();
 
         let result_cell: Arc<Mutex<Option<Result<db_common::QueryExecutionReport>>>> =
@@ -1188,7 +1191,7 @@ impl TableEditor {
             return;
         };
 
-        let database = self.database.clone();
+        let database = self.effective_database();
         let schema = self.schema.clone();
         let table = self.table.clone();
         let previous_total_rows = self
@@ -1289,7 +1292,7 @@ impl TableEditor {
             return;
         };
 
-        let database = self.database.clone();
+        let database = self.effective_database();
         let schema = self.schema.clone();
         let Ok(table_sql) = self.qualified_table_name() else {
             *message = Some("Failed to build table SQL".to_string());
@@ -2335,6 +2338,15 @@ impl TableEditor {
         self.columns.iter().any(|column| column.primary_key)
     }
 
+    fn effective_database(&self) -> Option<String> {
+        self.database.clone().or_else(|| {
+            self.data_source_kind
+                .filter(|kind| mysql_family(*kind))
+                .and_then(|_| self.schema.clone())
+                .filter(|value| !value.trim().is_empty())
+        })
+    }
+
     fn has_changes(&self) -> bool {
         !self.edits.is_empty() || !self.new_rows.is_empty() || !self.deleted_rows.is_empty()
     }
@@ -2647,6 +2659,20 @@ fn page_index_from_result(result: &QueryResult) -> usize {
         .and_then(|value| value.parse::<u64>().ok())
         .map(|offset| (offset as usize) / page_size)
         .unwrap_or(0)
+}
+
+fn mysql_family(kind: DataSourceKind) -> bool {
+    matches!(
+        kind,
+        DataSourceKind::MySql
+            | DataSourceKind::MariaDb
+            | DataSourceKind::TiDb
+            | DataSourceKind::OceanBase
+            | DataSourceKind::Doris
+            | DataSourceKind::SelectDb
+            | DataSourceKind::StarRocks
+            | DataSourceKind::GoldenDb
+    )
 }
 
 impl TimePickerState {

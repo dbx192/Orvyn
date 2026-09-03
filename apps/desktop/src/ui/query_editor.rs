@@ -506,7 +506,16 @@ impl QueryEditor {
     }
 
     fn tab_bar(&mut self, ui: &mut Ui) {
-        let ids: Vec<QueryId> = self.tabs.keys().copied().collect();
+        let mut ids: Vec<QueryId> = self.tabs.keys().copied().collect();
+        // Keep the untitled/default query workspace at the leading edge of
+        // the tab strip regardless of the generated QueryId ordering.
+        let default_query_ids = ids
+            .iter()
+            .copied()
+            .filter(|id| self.tabs.get(id).is_some_and(|tab| tab.title == "Query"))
+            .collect::<Vec<_>>();
+        ids.retain(|id| !default_query_ids.contains(id));
+        ids.splice(0..0, default_query_ids);
         let mut close_tab = None;
         ui.horizontal_wrapped(|ui| {
             for id in ids {
