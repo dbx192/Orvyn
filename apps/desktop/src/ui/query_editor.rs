@@ -483,7 +483,6 @@ impl QueryEditor {
         self.tabs.insert(tab_id, tab);
         self.active_tab = Some(tab_id);
         self.refresh_metadata_for_tab(tab_id);
-        self.status = "SQL workspace ready".to_string();
         tab_id
     }
 
