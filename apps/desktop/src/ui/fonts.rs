@@ -10,6 +10,10 @@ pub fn install_global_fonts(ctx: &Context) {
         FontData::from_static(include_bytes!("../../fonts/Inter-Regular.ttf")),
     );
     fonts.font_data.insert(
+        "orvyn-cjk".to_string(),
+        FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf")),
+    );
+    fonts.font_data.insert(
         "orvyn-mono".to_string(),
         FontData::from_static(include_bytes!("../../fonts/JetBrainsMono-Regular.ttf")),
     );
@@ -26,7 +30,7 @@ pub fn install_global_fonts(ctx: &Context) {
         .unwrap_or_default();
     fonts.families.insert(
         FontFamily::Name("orvyn-inter".into()),
-        ["orvyn-inter"]
+        ["orvyn-inter", "orvyn-cjk"]
             .into_iter()
             .map(str::to_string)
             .chain(proportional_fallbacks)
@@ -34,7 +38,7 @@ pub fn install_global_fonts(ctx: &Context) {
     );
     fonts.families.insert(
         FontFamily::Name("orvyn-mono".into()),
-        ["orvyn-mono"]
+        ["orvyn-mono", "orvyn-cjk"]
             .into_iter()
             .map(str::to_string)
             .chain(monospace_fallbacks)
@@ -42,11 +46,13 @@ pub fn install_global_fonts(ctx: &Context) {
     );
     if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
         family.insert(0, "orvyn-inter".to_string());
+        family.push("orvyn-cjk".to_string());
     }
     if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
         family.insert(0, "orvyn-mono".to_string());
+        family.push("orvyn-cjk".to_string());
     }
-    installed += 2;
+    installed += 3;
 
     for path in global_font_candidates() {
         if let Ok(bytes) = std::fs::read(&path) {
