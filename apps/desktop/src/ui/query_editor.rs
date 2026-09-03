@@ -1715,7 +1715,7 @@ impl QueryEditor {
     }
 
     fn load_columns_for_tab(&mut self, tab_id: QueryId, table: String) {
-        let Some(tab) = self.tabs.get(&tab_id) else {
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
             return;
         };
         let kind = self
@@ -1726,9 +1726,6 @@ impl QueryEditor {
         if tab.database.is_none() && kind.is_some_and(mysql_metadata_requires_database) {
             return;
         }
-        let Some(tab) = self.tabs.get_mut(&tab_id) else {
-            return;
-        };
         let table_key = normalize_identifier(&table);
         if tab.columns_by_table.contains_key(&table_key)
             || !tab.pending_column_loads.insert(table_key)
