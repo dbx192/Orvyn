@@ -429,18 +429,21 @@ impl RelationalMetadataReader for MySqlMetadataReader {
         profile: &ConnectionProfile,
         password: Option<&str>,
         database: Option<&str>,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<TableTrigger>> {
         if brand_for(profile).is_some_and(|b| !b.supports_routines_metadata()) {
             return Ok(Vec::new());
         }
-        let database = database.or(profile.database.as_deref()).ok_or_else(|| {
-            AppError::new(
-                ErrorKind::Validation,
-                "database is required for MySQL triggers",
-            )
-        })?;
+        let database = database
+            .or(schema)
+            .or(profile.database.as_deref())
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorKind::Validation,
+                    "database is required for MySQL triggers",
+                )
+            })?;
         let pool = self.pool_for(profile, password).await?;
         let rows = sqlx::query(
             "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \
@@ -555,8 +558,7 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         if brand_for(profile).is_some_and(MysqlBrand::uses_text_protocol) {
             return doris::execute(pool, statements.to_vec()).await;
         }
-        let mut conn = pool.acquire().await.map_err(mysql_query_error)?;
-        execute_mysql_statements_on_connection(&mut conn, statements).await
+        execute_mysql_statements_on_pool(&pool, statements).await
     }
 
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
@@ -680,6 +682,41 @@ fn mysql_pool_key(profile: &ConnectionProfile) -> MySqlPoolKey {
     )
 }
 
+async fn execute_mysql_statements_on_pool(
+    pool: &MySqlPool,
+    statements: &[String],
+) -> Result<Vec<QueryResult>> {
+    let mut results = Vec::with_capacity(statements.len());
+
+    for statement in statements {
+        let started_at = Instant::now();
+        // User SQL is already split into complete statements and has no bound
+        // parameters. COM_QUERY (text protocol) is required for procedural DDL
+        // such as CREATE TRIGGER / PROCEDURE / FUNCTION, which MySQL rejects
+        // on the prepared-statement protocol.
+        if is_result_set_statement(statement) {
+            let rows = sqlx::raw_sql(statement)
+                .fetch_all(pool)
+                .await
+                .map_err(|error| mysql_execute_error(error, statement))?;
+            results.push(
+                mysql_rows_to_query_result(statement, rows).with_elapsed(started_at.elapsed()),
+            );
+            continue;
+        }
+
+        let done = sqlx::raw_sql(statement)
+            .execute(pool)
+            .await
+            .map_err(|error| mysql_execute_error(error, statement))?;
+        let mut result = QueryResult::empty(statement).with_elapsed(started_at.elapsed());
+        result.affected_rows = done.rows_affected();
+        results.push(result);
+    }
+
+    Ok(results)
+}
+
 async fn execute_mysql_statements_on_connection(
     conn: &mut MySqlConnection,
     statements: &[String],
@@ -691,9 +728,6 @@ async fn execute_mysql_statements_on_connection(
         let statement = statement.as_str();
 
         if is_result_set_statement(statement) {
-            // The Doris MySQL endpoint does not implement COM_STMT_PREPARE.
-            // User SQL in this path is already split into complete statements
-            // and contains no bound parameters, so use the text protocol.
             let statement = statement.to_owned();
             let rows = sqlx::query(&statement)
                 .persistent(false)
@@ -821,6 +855,33 @@ fn tls_ca_path(profile: &ConnectionProfile) -> Option<&str> {
 fn mysql_query_error(error: sqlx::Error) -> AppError {
     AppError::new(ErrorKind::Query, "failed to query MySQL metadata")
         .with_detail(redact_connection_url(&error.to_string()))
+}
+
+fn mysql_execute_error(error: sqlx::Error, statement: &str) -> AppError {
+    let sql = redact_connection_url(statement);
+    match error {
+        sqlx::Error::Database(db) => {
+            let message = db.message().trim();
+            let mut app = AppError::new(
+                ErrorKind::Query,
+                if message.is_empty() {
+                    "MySQL rejected the statement".to_string()
+                } else {
+                    message.to_string()
+                },
+            )
+            .with_detail(format!("SQL:\n{sql}"));
+            if let Some(code) = db.code() {
+                app = app.with_code(code.to_string());
+            }
+            app
+        }
+        other => AppError::new(ErrorKind::Query, "failed to execute MySQL statement")
+            .with_detail(format!(
+                "{}\n\nSQL:\n{sql}",
+                redact_connection_url(&other.to_string())
+            )),
+    }
 }
 
 async fn list_mysql_objects(

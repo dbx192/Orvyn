@@ -11,6 +11,7 @@ use super::{
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
+    state::UiError,
     table_editor::TableEditor,
     table_structure::{
         build_alter_table_sql, AlterTableRequest, CreateIndexRequest, DdlOperation,
@@ -385,8 +386,7 @@ impl DesktopApp {
                             self.active_panel = ActivePanel::TableStructure;
                         }
                         Err(error) => {
-                            self.state
-                                .set_status(format!("Alter table failed: {}", error.message));
+                            self.report_structure_error("Alter table failed", &error);
                         }
                     }
                 }
@@ -416,8 +416,7 @@ impl DesktopApp {
                             self.active_panel = ActivePanel::TableStructure;
                         }
                         Err(error) => {
-                            self.state
-                                .set_status(format!("DDL failed: {}", error.message));
+                            self.report_structure_error("DDL failed", &error);
                         }
                     }
                 }
@@ -624,40 +623,25 @@ impl DesktopApp {
                 metadata_service.get_create_table_sql(connection_id, db_ref, sch_ref, &tbl, None),
             );
 
-            let result = match (
-                columns_result,
-                indexes_result,
-                fks_result,
-                triggers_result,
-                functions_result,
-                sql_result,
-            ) {
-                (
-                    Ok(columns),
-                    Ok(indexes),
-                    Ok(foreign_keys),
-                    Ok(triggers),
-                    Ok(functions),
-                    Ok(create_sql),
-                ) => Ok(TableStructurePayload {
+            // Columns are required to render the designer. Indexes / FKs /
+            // triggers / functions / SHOW CREATE are optional: a missing
+            // privilege or unsupported object type must not blank the tab
+            // after a successful CREATE TRIGGER.
+            let result = match columns_result {
+                Ok(columns) => Ok(TableStructurePayload {
                     connection_id,
                     kind,
                     database: db,
                     schema: sch,
                     table: tbl,
                     columns,
-                    indexes,
-                    foreign_keys,
-                    triggers,
-                    functions,
-                    create_sql,
+                    indexes: indexes_result.unwrap_or_default(),
+                    foreign_keys: fks_result.unwrap_or_default(),
+                    triggers: triggers_result.unwrap_or_default(),
+                    functions: functions_result.unwrap_or_default(),
+                    create_sql: sql_result.unwrap_or_default(),
                 }),
-                (Err(e), ..) => Err(e),
-                (_, Err(e), ..) => Err(e),
-                (_, _, Err(e), ..) => Err(e),
-                (_, _, _, Err(e), ..) => Err(e),
-                (_, _, _, _, Err(e), _) => Err(e),
-                (_, _, _, _, _, Err(e)) => Err(e),
+                Err(error) => Err(error),
             };
 
             *cell.lock().unwrap() = Some(result);
@@ -1129,6 +1113,33 @@ impl DesktopApp {
         if let Some(op) = self.ddl_queue.pop_front() {
             self.spawn_structure_ddl(op);
         }
+    }
+
+    fn report_structure_error(&mut self, title: &str, error: &AppError) {
+        self.state
+            .set_status(format!("{title}: {}", error.message));
+        let mut ui_error = UiError::new(title, error.message.clone());
+        let mut detail = String::new();
+        if let Some(code) = error.code.as_deref().filter(|value| !value.trim().is_empty()) {
+            detail.push_str("Code: ");
+            detail.push_str(code);
+            detail.push('\n');
+        }
+        if let Some(extra) = error
+            .detail
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if !detail.is_empty() {
+                detail.push('\n');
+            }
+            detail.push_str(extra);
+        }
+        if !detail.is_empty() {
+            ui_error = ui_error.with_detail(detail);
+        }
+        self.state.push_error(ui_error);
+        self.error_window_open = true;
     }
 
     /// Target table for the current open structure view, if any.

@@ -18,8 +18,8 @@ use db_common::{
     QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use eframe::egui::{
-    pos2, vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Grid, Key, Layout,
-    Margin, Modifiers, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
+    pos2, vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Grid, Id, Key, Layout,
+    Margin, Modifiers, Pos2, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
     Window,
 };
 use std::{
@@ -162,9 +162,7 @@ pub struct TableEditor {
     last_commit_result: Option<(usize, Vec<usize>)>,
     pending_refresh_page: Option<usize>,
     pending_page_load: Option<Arc<Mutex<Option<Result<QueryResult>>>>>,
-    table_hovered_last_frame: bool,
-    hovered_dirty_cell: Option<CellKey>,
-    hovered_dirty_new_row: Option<usize>,
+    inline_focus_rect: Option<Rect>,
 }
 
 impl TableEditor {
@@ -213,9 +211,7 @@ impl TableEditor {
             last_commit_result: None,
             pending_refresh_page: None,
             pending_page_load: None,
-            table_hovered_last_frame: false,
-            hovered_dirty_cell: None,
-            hovered_dirty_new_row: None,
+            inline_focus_rect: None,
         }
     }
 
@@ -289,9 +285,8 @@ impl TableEditor {
         let visible_rows = self.visible_rows();
         let content_width = self.content_width();
         let viewport_width = ui.available_width();
-        let previous_hovered_dirty_cell = self.hovered_dirty_cell.take();
-        let previous_hovered_dirty_new_row = self.hovered_dirty_new_row.take();
-        let table_frame = Frame::default()
+        let previous_focus_rect = self.inline_focus_rect.take();
+        let _table_frame = Frame::default()
             .fill(ui.visuals().extreme_bg_color)
             .stroke(grid_stroke(ui))
             .inner_margin(Margin::same(0.0))
@@ -357,23 +352,18 @@ impl TableEditor {
                 ui.ctx().request_repaint();
             }
         }
-        let table_hovered = ui.ctx().input(|input| {
-            input
-                .pointer
-                .hover_pos()
-                .is_some_and(|pos| table_frame.response.rect.contains(pos))
-        });
-        if previous_hovered_dirty_cell.is_some_and(|key| {
-            self.hovered_dirty_cell != Some(key) && self.edits.contains_key(&key)
-        }) || previous_hovered_dirty_new_row.is_some_and(|row_index| {
-            self.hovered_dirty_new_row != Some(row_index) && self.new_row_has_values(row_index)
-        }) {
-            self.auto_save_pending_changes(&mut message);
+        if let Some(rect) = previous_focus_rect {
+            let clicked_away = ui.ctx().input(|input| {
+                pointer_clicked_outside(
+                    input.pointer.primary_pressed(),
+                    input.pointer.interact_pos(),
+                    rect,
+                )
+            });
+            if clicked_away {
+                self.auto_save_pending_changes(&mut message);
+            }
         }
-        if self.table_hovered_last_frame && !table_hovered {
-            self.auto_save_pending_changes(&mut message);
-        }
-        self.table_hovered_last_frame = table_hovered;
 
         message
     }
@@ -535,8 +525,7 @@ impl TableEditor {
         self.result = result;
         self.selected_row = None;
         self.selected_rows.clear();
-        self.hovered_dirty_cell = None;
-        self.hovered_dirty_new_row = None;
+        self.inline_focus_rect = None;
     }
 
     /// Return the fully qualified table name.
@@ -1847,6 +1836,7 @@ impl TableEditor {
             } else {
                 text_edit_cell(
                     ui,
+                    Id::new(("table_edit", "existing", row_index, column_index)),
                     width,
                     TABLE_ROW_HEIGHT,
                     &mut value,
@@ -1861,14 +1851,10 @@ impl TableEditor {
                     self.edits.insert(key, value);
                 }
             }
-            if cell.response.lost_focus() && self.edits.contains_key(&key) {
-                let mut ignored = None;
-                self.auto_save_pending_changes(&mut ignored);
+            if cell.response.has_focus() {
+                self.inline_focus_rect = Some(cell.rect);
             }
             if self.edits.contains_key(&key) {
-                if cell.response.hovered() {
-                    self.hovered_dirty_cell = Some(key);
-                }
                 paint_cell_outline(ui, cell.rect, Stroke::new(1.0, Color32::YELLOW));
             }
             cell
@@ -1935,6 +1921,7 @@ impl TableEditor {
         } else {
             text_edit_cell(
                 ui,
+                Id::new(("table_edit", "new", row_index, column_index)),
                 width,
                 TABLE_ROW_HEIGHT,
                 &mut value,
@@ -1950,12 +1937,8 @@ impl TableEditor {
                 }
             }
         }
-        if cell.response.lost_focus() && self.new_row_has_values(row_index) {
-            let mut ignored = None;
-            self.auto_save_pending_changes(&mut ignored);
-        }
-        if cell.response.hovered() && self.new_row_has_values(row_index) {
-            self.hovered_dirty_new_row = Some(row_index);
+        if cell.response.has_focus() {
+            self.inline_focus_rect = Some(cell.rect);
         }
 
         cell
@@ -1991,6 +1974,7 @@ impl TableEditor {
         let edit_response = edit_ui.add_sized(
             [edit_rect.width(), TABLE_ROW_HEIGHT],
             TextEdit::singleline(value)
+                .id(Id::new(("temporal_edit", row, column_index)))
                 .desired_width(edit_rect.width())
                 .frame(false),
         );
@@ -2372,8 +2356,7 @@ impl TableEditor {
         self.time_picker = None;
         self.commit_error = None;
         self.error_row_index = None;
-        self.hovered_dirty_cell = None;
-        self.hovered_dirty_new_row = None;
+        self.inline_focus_rect = None;
     }
 
     fn build_commit_sql(&self) -> std::result::Result<String, String> {
@@ -2953,6 +2936,10 @@ fn estimate_column_widths(columns: &[TableColumn], result: &QueryResult) -> Vec<
         .collect()
 }
 
+fn pointer_clicked_outside(pointer_pressed: bool, pointer_pos: Option<Pos2>, rect: Rect) -> bool {
+    pointer_pressed && pointer_pos.is_some_and(|pos| !rect.contains(pos))
+}
+
 fn table_cell_fill(ui: &Ui, row: usize, deleted: bool, selected: bool) -> Color32 {
     if selected {
         row_fill(ui, row, true)
@@ -3126,6 +3113,23 @@ mod tests {
         assert_eq!(
             summary.deletes[0].1,
             vec![("id".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn commits_inline_edit_only_when_clicking_outside_the_cell() {
+        let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(80.0, 22.0));
+        assert!(
+            !pointer_clicked_outside(false, Some(pos2(200.0, 200.0)), rect),
+            "typing / IME must not save"
+        );
+        assert!(
+            !pointer_clicked_outside(true, Some(pos2(20.0, 20.0)), rect),
+            "clicking the same cell must not save"
+        );
+        assert!(
+            pointer_clicked_outside(true, Some(pos2(200.0, 200.0)), rect),
+            "clicking elsewhere should save"
         );
     }
 

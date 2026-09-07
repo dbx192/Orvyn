@@ -78,6 +78,7 @@ pub fn label_cell(
 
 pub fn text_edit_cell(
     ui: &mut Ui,
+    id: Id,
     width: f32,
     height: f32,
     value: &mut String,
@@ -100,6 +101,7 @@ pub fn text_edit_cell(
     let edit_response = child_ui.add_sized(
         [inner_rect.width(), height],
         TextEdit::singleline(value)
+            .id(id)
             .desired_width(inner_rect.width())
             .frame(false),
     );

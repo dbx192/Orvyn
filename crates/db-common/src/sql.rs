@@ -10,8 +10,13 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     let mut chars = sql.char_indices().peekable();
     let mut single_quoted = false;
     let mut double_quoted = false;
+    let mut backtick_quoted = false;
     let mut line_comment = false;
     let mut block_comment = false;
+    // mysql CLI / Navicat `DELIMITER` is a client command, not server SQL.
+    // Track it so trigger bodies terminated with `//` (etc.) stay intact and
+    // the DELIMITER lines are never sent to the server.
+    let mut terminator = ";".to_string();
 
     while let Some((index, ch)) = chars.next() {
         let next = chars.peek().map(|(_, ch)| *ch);
@@ -60,6 +65,50 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             continue;
         }
 
+        if backtick_quoted {
+            current.push(ch);
+            if ch == '`' {
+                if next == Some('`') {
+                    current.push('`');
+                    chars.next();
+                } else {
+                    backtick_quoted = false;
+                }
+            }
+            continue;
+        }
+
+        if current.trim().is_empty() {
+            if let Some((end, new_terminator)) = parse_delimiter_command(sql, index) {
+                terminator = new_terminator;
+                current.clear();
+                while chars.peek().is_some_and(|(next_index, _)| *next_index < end) {
+                    chars.next();
+                }
+                continue;
+            }
+        }
+
+        if !terminator.is_empty() && sql[index..].starts_with(&terminator) {
+            if terminator == ";" && is_unfinished_procedural_ddl(&current) {
+                current.push(ch);
+                continue;
+            }
+            let statement = trim_sql(&current);
+            if !statement.is_empty() {
+                statements.push(statement.to_string());
+            }
+            current.clear();
+            let mut skipped = ch.len_utf8();
+            while skipped < terminator.len() {
+                match chars.next() {
+                    Some((_, extra)) => skipped += extra.len_utf8(),
+                    None => break,
+                }
+            }
+            continue;
+        }
+
         match (ch, next) {
             ('-', Some('-')) => {
                 current.push(ch);
@@ -81,6 +130,10 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                 current.push(ch);
                 double_quoted = true;
             }
+            ('`', _) => {
+                current.push(ch);
+                backtick_quoted = true;
+            }
             ('$', _) => {
                 if let Some(delimiter) = dollar_quote_delimiter(sql, index) {
                     current.push(ch);
@@ -88,25 +141,6 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                 } else {
                     current.push(ch);
                 }
-            }
-            (';', _) => {
-                // Procedural DDL (notably SQLite/SQL Server triggers) contains
-                // statement terminators inside a BEGIN ... END body. Keep
-                // those terminators in the same statement; only split after
-                // the matching END so the database receives the complete DDL.
-                let upper = current.to_ascii_uppercase();
-                let procedural = upper.contains("CREATE TRIGGER")
-                    && upper.contains("BEGIN")
-                    && !upper.trim_end().ends_with("END");
-                if procedural {
-                    current.push(ch);
-                    continue;
-                }
-                let statement = trim_sql(&current);
-                if !statement.is_empty() {
-                    statements.push(statement.to_string());
-                }
-                current.clear();
             }
             _ => current.push(ch),
         }
@@ -118,6 +152,99 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     }
 
     statements
+}
+
+fn parse_delimiter_command(sql: &str, index: usize) -> Option<(usize, String)> {
+    let rest = sql.get(index..)?;
+    const KEYWORD: &str = "delimiter";
+    let prefix = rest.get(..KEYWORD.len())?;
+    if !prefix.eq_ignore_ascii_case(KEYWORD) {
+        return None;
+    }
+    let mut pos = index + KEYWORD.len();
+    let bytes = sql.as_bytes();
+    if pos < sql.len() {
+        let next = bytes[pos];
+        if next.is_ascii_alphanumeric() || next == b'_' {
+            return None;
+        }
+    }
+    while pos < sql.len() && matches!(bytes[pos], b' ' | b'\t') {
+        pos += 1;
+    }
+    if pos >= sql.len() || matches!(bytes[pos], b'\n' | b'\r') {
+        return None;
+    }
+    let delim_start = pos;
+    while pos < sql.len() && !matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+        pos += 1;
+    }
+    let new_terminator = sql.get(delim_start..pos)?.to_string();
+    if new_terminator.is_empty() {
+        return None;
+    }
+    while pos < sql.len() {
+        let c = bytes[pos];
+        pos += 1;
+        if c == b'\n' {
+            break;
+        }
+        if c == b'\r' {
+            if pos < sql.len() && bytes[pos] == b'\n' {
+                pos += 1;
+            }
+            break;
+        }
+    }
+    Some((pos, new_terminator))
+}
+
+fn is_unfinished_procedural_ddl(current: &str) -> bool {
+    is_procedural_ddl(current) && procedural_begin_depth(current) > 0
+}
+
+fn is_procedural_ddl(sql: &str) -> bool {
+    let tokens = sql_keyword_tokens(sql);
+    let mut rest = tokens.as_slice();
+    if rest.first().map(String::as_str) != Some("CREATE") {
+        return false;
+    }
+    rest = &rest[1..];
+    if rest.len() >= 2 && rest[0] == "OR" && rest[1] == "REPLACE" {
+        rest = &rest[2..];
+    }
+    matches!(
+        rest.first().map(String::as_str),
+        Some("TRIGGER" | "FUNCTION" | "PROCEDURE" | "EVENT")
+    )
+}
+
+fn procedural_begin_depth(sql: &str) -> i32 {
+    let tokens = sql_keyword_tokens(sql);
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < tokens.len() {
+        match tokens[i].as_str() {
+            "BEGIN" => depth += 1,
+            "END" => {
+                let next = tokens.get(i + 1).map(String::as_str).unwrap_or("");
+                if !matches!(next, "IF" | "LOOP" | "CASE" | "WHILE" | "REPEAT") {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    depth
+}
+
+fn sql_keyword_tokens(sql: &str) -> Vec<String> {
+    sql.to_ascii_uppercase()
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<String> {
@@ -977,6 +1104,93 @@ mod tests {
                 "SELECT 3"
             ]
         );
+    }
+
+    #[test]
+    fn keeps_mysql_trigger_begin_end_together() {
+        assert_eq!(
+            split_statements(
+                "CREATE TRIGGER t BEFORE INSERT ON tab FOR EACH ROW BEGIN SET NEW.x = 1; SET NEW.y = 2; END; SELECT 1"
+            ),
+            vec![
+                "CREATE TRIGGER t BEFORE INSERT ON tab FOR EACH ROW BEGIN SET NEW.x = 1; SET NEW.y = 2; END",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_end_if_inside_trigger_body() {
+        assert_eq!(
+            split_statements(
+                "CREATE TRIGGER t BEFORE INSERT ON tab FOR EACH ROW BEGIN IF NEW.x IS NULL THEN SET NEW.x = 0; END IF; END"
+            ),
+            vec![
+                "CREATE TRIGGER t BEFORE INSERT ON tab FOR EACH ROW BEGIN IF NEW.x IS NULL THEN SET NEW.x = 0; END IF; END"
+            ]
+        );
+    }
+
+    #[test]
+    fn splits_mysql_set_form_trigger() {
+        assert_eq!(
+            split_statements(
+                "CREATE TRIGGER t BEFORE INSERT ON tab FOR EACH ROW SET NEW.x = NEW.x; SELECT 1"
+            ),
+            vec![
+                "CREATE TRIGGER t BEFORE INSERT ON tab FOR EACH ROW SET NEW.x = NEW.x",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn strips_mysql_client_delimiter_around_trigger() {
+        let sql = "DELIMITER //
+CREATE TRIGGER trg_articles_update_title BEFORE UPDATE ON `articles`
+FOR EACH ROW
+BEGIN
+    IF NEW.content IS NOT NULL AND NEW.content <> '' THEN
+        SET NEW.title = LEFT(NEW.content, 10);
+    ELSE
+        SET NEW.title = '';
+    END IF;
+END //
+DELIMITER ;";
+        let statements = split_statements(sql);
+        assert_eq!(statements.len(), 1);
+        assert!(
+            statements[0].starts_with("CREATE TRIGGER trg_articles_update_title"),
+            "{}",
+            statements[0]
+        );
+        assert!(statements[0].contains("SET NEW.title = LEFT(NEW.content, 10);"));
+        assert!(statements[0].trim_end().ends_with("END"));
+        assert!(!statements[0].to_ascii_uppercase().contains("DELIMITER"));
+        assert!(!statements[0].contains("//"));
+    }
+
+    #[test]
+    fn delimiter_script_keeps_leading_drop_separate() {
+        let sql = "DROP TRIGGER IF EXISTS `app`.`trg_articles_update_title`;
+DELIMITER //
+CREATE TRIGGER trg_articles_update_title BEFORE UPDATE ON `articles`
+FOR EACH ROW
+BEGIN
+    SET NEW.title = LEFT(NEW.content, 10);
+END //
+DELIMITER ;";
+        let statements = split_statements(sql);
+        assert_eq!(statements.len(), 2);
+        assert_eq!(
+            statements[0],
+            "DROP TRIGGER IF EXISTS `app`.`trg_articles_update_title`"
+        );
+        assert!(statements[1].starts_with("CREATE TRIGGER trg_articles_update_title"));
+        assert!(statements[1].contains("SET NEW.title = LEFT(NEW.content, 10);"));
+        assert!(statements[1].trim_end().ends_with("END"));
+        assert!(!statements[1].contains("DELIMITER"));
+        assert!(!statements[1].contains("//"));
     }
 
     #[test]

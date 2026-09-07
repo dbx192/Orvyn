@@ -188,11 +188,10 @@ fn sanitize_filename(value: &str) -> String {
 fn parse_ddl_object(sql: &str) -> Option<(ObjectKind, String)> {
     let tokens: Vec<&str> = sql.split_whitespace().collect();
     // PostgreSQL trigger DDL commonly contains a helper CREATE FUNCTION
-    // followed by CREATE TRIGGER. Prefer the trigger object when both exist.
-    let trigger_create = tokens.iter().position(|token| token.eq_ignore_ascii_case("trigger"))
-        .and_then(|index| index.checked_sub(1))
-        .filter(|index| tokens[*index].eq_ignore_ascii_case("create"));
-    let create = trigger_create.or_else(|| tokens.iter().position(|token| token.eq_ignore_ascii_case("create")))?;
+    // (which itself mentions RETURNS TRIGGER) followed by CREATE TRIGGER.
+    // Prefer the trigger object when both exist, and ignore the type name.
+    let create = find_create_kind(&tokens, "trigger")
+        .or_else(|| tokens.iter().position(|token| token.eq_ignore_ascii_case("create")))?;
     let mut kind_index = create + 1;
     if tokens.get(kind_index).is_some_and(|token| token.eq_ignore_ascii_case("or")) { kind_index += 2; }
     let kind = match tokens.get(kind_index)?.to_ascii_lowercase().as_str() {
@@ -211,6 +210,32 @@ fn parse_ddl_object(sql: &str) -> Option<(ObjectKind, String)> {
         .unwrap_or("")
         .trim_end_matches(']');
     (!name.is_empty()).then(|| (kind, name.to_string()))
+}
+
+fn find_create_kind(tokens: &[&str], kind: &str) -> Option<usize> {
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index].eq_ignore_ascii_case("create") {
+            let mut kind_index = index + 1;
+            if tokens
+                .get(kind_index)
+                .is_some_and(|token| token.eq_ignore_ascii_case("or"))
+                && tokens
+                    .get(kind_index + 1)
+                    .is_some_and(|token| token.eq_ignore_ascii_case("replace"))
+            {
+                kind_index += 2;
+            }
+            if tokens
+                .get(kind_index)
+                .is_some_and(|token| token.eq_ignore_ascii_case(kind))
+            {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 fn save_local_ddl(table: &str, title: &str, sql: &str) -> Result<PathBuf, String> {
@@ -702,7 +727,6 @@ impl TableStructureView {
     ) -> Self {
         let column_count = columns.len();
         let col_original_name = columns.iter().map(|c| Some(c.name.clone())).collect();
-        let (triggers, functions) = merge_local_ddl(&table, triggers, functions);
         Self {
             connection_id,
             kind,
@@ -2184,7 +2208,33 @@ impl TableStructureView {
         let dialect = dialect_for_kind(self.kind);
         let name_sql = quote_id(dialect.as_ref(), name).unwrap_or_else(|_| name.to_string());
         match kind {
-            ObjectKind::Trigger => format!("DROP TRIGGER IF EXISTS {name_sql}"),
+            ObjectKind::Trigger => match self.kind.protocol_family() {
+                ProtocolFamily::PostgreSql => {
+                    let table_sql = qualified_table_sql(
+                        dialect.as_ref(),
+                        self.kind,
+                        self.database.as_deref(),
+                        self.schema.as_deref(),
+                        &self.table,
+                    )
+                    .unwrap_or_else(|_| self.table.clone());
+                    format!("DROP TRIGGER IF EXISTS {name_sql} ON {table_sql}")
+                }
+                ProtocolFamily::MySql => {
+                    let qualifier = self
+                        .database
+                        .as_deref()
+                        .or(self.schema.as_deref())
+                        .filter(|value| !value.is_empty());
+                    if let Some(database) = qualifier {
+                        if let Ok(database_sql) = quote_id(dialect.as_ref(), database) {
+                            return format!("DROP TRIGGER IF EXISTS {database_sql}.{name_sql}");
+                        }
+                    }
+                    format!("DROP TRIGGER IF EXISTS {name_sql}")
+                }
+                _ => format!("DROP TRIGGER IF EXISTS {name_sql}"),
+            },
             ObjectKind::Function => {
                 if self.kind.protocol_family() == ProtocolFamily::PostgreSql {
                     format!("DROP FUNCTION IF EXISTS {name_sql}()")
@@ -2195,35 +2245,56 @@ impl TableStructureView {
         }
     }
 
+    /// Prepend DROP IF EXISTS so Save can create or replace the object.
+    fn replaceable_object_ddl(&self, sql: &str) -> String {
+        let trimmed = sql.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        let already_drop = trimmed
+            .split_whitespace()
+            .next()
+            .is_some_and(|token| token.eq_ignore_ascii_case("drop"));
+        if already_drop {
+            return trimmed.to_string();
+        }
+        let Some((kind, name)) = parse_ddl_object(trimmed) else {
+            return trimmed.to_string();
+        };
+        format!("{};\n{trimmed}", self.build_object_drop_sql(kind, &name))
+    }
+
     /// Baseline CREATE text shown when authoring a new trigger in the DDL editor.
     fn trigger_create_template(&self) -> String {
+        let dialect = dialect_for_kind(self.kind);
         let name = format!("trigger_{}", self.table_name_display());
-        let tbl = self.table_name();
+        let name_sql = quote_id(dialect.as_ref(), &name).unwrap_or_else(|_| name.clone());
+        let tbl = qualified_table_sql(
+            dialect.as_ref(),
+            self.kind,
+            self.database.as_deref(),
+            self.schema.as_deref(),
+            &self.table,
+        )
+        .unwrap_or_else(|_| self.table.clone());
         match self.kind.protocol_family() {
-            // MySQL: a trigger body cannot contain a literal `;` because the
-            // query executor splits statements on it, so use a semicolon-free
-            // single SET action that is valid and user-editable.
-            ProtocolFamily::MySql => {
-                if let Some(col) = self.columns.first().map(|c| c.name.clone()) {
-                    format!(
-                        "CREATE TRIGGER {name}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW SET NEW.{col} = NEW.{col}"
-                    )
-                } else {
-                    format!(
-                        "CREATE TRIGGER {name}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW\nBEGIN\n-- add logic here\nEND"
-                    )
-                }
-            }
-            // PostgreSQL: a trigger needs a trigger function plus the trigger.
-            // The executor runs the two `;`-separated statements in order.
-            ProtocolFamily::PostgreSql => format!(
-                "CREATE FUNCTION {name}_fn() RETURNS TRIGGER AS $$\nBEGIN\n    RETURN NEW; -- add logic here\nEND;\n$$ LANGUAGE plpgsql;\n\nCREATE TRIGGER {name}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW EXECUTE FUNCTION {name}_fn();"
+            ProtocolFamily::MySql => format!(
+                "CREATE TRIGGER {name_sql}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW\nBEGIN\n    -- add trigger logic here\n    SET @orvyn_ok = 1;\nEND"
             ),
+            // PostgreSQL: a trigger needs a trigger function plus the trigger.
+            // EXECUTE PROCEDURE is valid on PG 11+; EXECUTE FUNCTION is PG 14+.
+            ProtocolFamily::PostgreSql => {
+                let fn_name = format!("{name}_fn");
+                let fn_sql = quote_id(dialect.as_ref(), &fn_name).unwrap_or(fn_name);
+                format!(
+                    "CREATE OR REPLACE FUNCTION {fn_sql}() RETURNS TRIGGER AS $$\nBEGIN\n    RETURN NEW; -- add logic here\nEND;\n$$ LANGUAGE plpgsql;\n\nCREATE TRIGGER {name_sql}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW EXECUTE PROCEDURE {fn_sql}();"
+                )
+            }
             ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => format!(
-                "CREATE TRIGGER {name}\nAFTER INSERT ON {tbl}\nBEGIN\n    SELECT 1; -- add logic here\nEND"
+                "CREATE TRIGGER {name_sql}\nAFTER INSERT ON {tbl}\nBEGIN\n    SELECT 1; -- add logic here\nEND"
             ),
             _ => format!(
-                "CREATE TRIGGER {name}\nON {tbl}\nAFTER INSERT\nAS\nBEGIN\n-- add logic here\nEND"
+                "CREATE TRIGGER {name_sql}\nON {tbl}\nAFTER INSERT\nAS\nBEGIN\n    -- add logic here\nEND"
             ),
         }
     }
@@ -2738,14 +2809,40 @@ impl TableStructureView {
     fn open_trigger_editor(&mut self, index: usize) {
         if let Some(trg) = self.triggers.get(index) {
             let stmt = trg.statement.clone().unwrap_or_default();
-            let sql = format!(
-                "CREATE TRIGGER {}\n{} {}\nON {}\nFOR EACH ROW\n{}\n",
-                trg.name,
-                trg.timing.to_uppercase(),
-                trg.event.to_uppercase(),
-                self.table_name_display(),
-                stmt,
-            );
+            let sql = if stmt
+                .trim_start()
+                .get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("create"))
+            {
+                stmt
+            } else {
+                let dialect = dialect_for_kind(self.kind);
+                let name_sql =
+                    quote_id(dialect.as_ref(), &trg.name).unwrap_or_else(|_| trg.name.clone());
+                let tbl = qualified_table_sql(
+                    dialect.as_ref(),
+                    self.kind,
+                    self.database.as_deref(),
+                    self.schema.as_deref(),
+                    &self.table,
+                )
+                .unwrap_or_else(|_| self.table.clone());
+                let timing = if trg.timing.is_empty() {
+                    "BEFORE"
+                } else {
+                    trg.timing.as_str()
+                };
+                let event = if trg.event.is_empty() {
+                    "INSERT"
+                } else {
+                    trg.event.as_str()
+                };
+                format!(
+                    "CREATE TRIGGER {name_sql}\n{} {}\nON {tbl}\nFOR EACH ROW\n{stmt}",
+                    timing.to_uppercase(),
+                    event.to_uppercase(),
+                )
+            };
             self.ddl_editor = Some(DdlEditorState {
                 title: trf("Edit Trigger - {name}", &[("name", trg.name.clone())]),
                 sql,
@@ -2893,12 +2990,7 @@ impl TableStructureView {
             if let Some(editor) = self.ddl_editor.take() {
                 let sql = editor.sql.trim().to_string();
                 if !sql.is_empty() {
-                    if let Err(error) = save_local_ddl(&self.table, &editor.title, &sql) {
-                        *message = Some(format!("Failed to save local DDL: {error}"));
-                        self.ddl_editor = Some(editor);
-                        return;
-                    }
-                    self.add_local_ddl_to_view(&sql);
+                    let sql = self.replaceable_object_ddl(&sql);
                     self.pending_ddl.push(DdlOperation {
                         sql,
                         label: editor.title,
@@ -2908,19 +3000,6 @@ impl TableStructureView {
             }
         } else if cancel || !open {
             self.ddl_editor = None;
-        }
-    }
-
-    fn add_local_ddl_to_view(&mut self, sql: &str) {
-        let Some((kind, name)) = parse_ddl_object(sql) else { return };
-        match kind {
-            ObjectKind::Trigger if !self.triggers.iter().any(|item| item.name == name) => {
-                self.triggers.push(TableTrigger { name, event: String::new(), timing: String::new(), statement: Some(sql.to_string()) });
-            }
-            ObjectKind::Function if !self.functions.iter().any(|item| item.name == name) => {
-                self.functions.push(DatabaseFunction { name, return_type: None, language: None, kind: "local".to_string() });
-            }
-            _ => {}
         }
     }
 }
@@ -3386,5 +3465,48 @@ mod tests {
         view.col_original_name.pop();
 
         assert!(view.staged_requests().is_empty());
+    }
+
+    #[test]
+    fn mysql_trigger_template_quotes_identifiers() {
+        let view = structure(vec![column("id")]);
+        let sql = view.trigger_create_template();
+        assert!(sql.contains("CREATE TRIGGER `trigger_users`"));
+        assert!(sql.contains("ON `app`.`users`"));
+        assert!(sql.contains("FOR EACH ROW"));
+        assert!(sql.contains("BEGIN"));
+        assert!(
+            sql.contains("SET @orvyn_ok = 1;"),
+            "MySQL compound trigger bodies must contain at least one statement"
+        );
+    }
+
+    #[test]
+    fn postgres_drop_trigger_includes_table() {
+        let mut view = structure(vec![column("id")]);
+        view.kind = DataSourceKind::PostgreSql;
+        view.database = None;
+        view.schema = Some("public".to_string());
+        let sql = view.build_object_drop_sql(ObjectKind::Trigger, "trg");
+        assert_eq!(sql, "DROP TRIGGER IF EXISTS \"trg\" ON \"public\".\"users\"");
+    }
+
+    #[test]
+    fn mysql_save_wraps_create_trigger_with_drop() {
+        let view = structure(vec![column("id")]);
+        let sql = view.replaceable_object_ddl(
+            "CREATE TRIGGER `trigger_users`\nBEFORE INSERT ON `app`.`users`\nFOR EACH ROW\nBEGIN\n    -- add trigger logic here\nEND",
+        );
+        assert!(sql.starts_with("DROP TRIGGER IF EXISTS `app`.`trigger_users`;"));
+        assert!(sql.contains("CREATE TRIGGER `trigger_users`"));
+    }
+
+    #[test]
+    fn parse_ddl_object_prefers_trigger_in_postgres_script() {
+        let sql = "CREATE OR REPLACE FUNCTION trigger_users_fn() RETURNS TRIGGER AS $$\nBEGIN\n    RETURN NEW;\nEND;\n$$ LANGUAGE plpgsql;\n\nCREATE TRIGGER trigger_users\nBEFORE INSERT ON users\nFOR EACH ROW EXECUTE PROCEDURE trigger_users_fn();";
+        assert_eq!(
+            parse_ddl_object(sql),
+            Some((ObjectKind::Trigger, "trigger_users".to_string()))
+        );
     }
 }
