@@ -90,6 +90,18 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                 }
             }
             (';', _) => {
+                // Procedural DDL (notably SQLite/SQL Server triggers) contains
+                // statement terminators inside a BEGIN ... END body. Keep
+                // those terminators in the same statement; only split after
+                // the matching END so the database receives the complete DDL.
+                let upper = current.to_ascii_uppercase();
+                let procedural = upper.contains("CREATE TRIGGER")
+                    && upper.contains("BEGIN")
+                    && !upper.trim_end().ends_with("END");
+                if procedural {
+                    current.push(ch);
+                    continue;
+                }
                 let statement = trim_sql(&current);
                 if !statement.is_empty() {
                     statements.push(statement.to_string());
@@ -953,6 +965,17 @@ mod tests {
         assert_eq!(
             split_statements("select $$a;b$$; select $tag$c;d$tag$; select 3"),
             vec!["select $$a;b$$", "select $tag$c;d$tag$", "select 3"]
+        );
+    }
+
+    #[test]
+    fn keeps_trigger_body_semicolons_together() {
+        assert_eq!(
+            split_statements("CREATE TRIGGER t AFTER INSERT ON tab BEGIN SELECT 1; SELECT 2; END; SELECT 3"),
+            vec![
+                "CREATE TRIGGER t AFTER INSERT ON tab BEGIN SELECT 1; SELECT 2; END",
+                "SELECT 3"
+            ]
         );
     }
 

@@ -187,7 +187,12 @@ fn sanitize_filename(value: &str) -> String {
 
 fn parse_ddl_object(sql: &str) -> Option<(ObjectKind, String)> {
     let tokens: Vec<&str> = sql.split_whitespace().collect();
-    let create = tokens.iter().position(|token| token.eq_ignore_ascii_case("create"))?;
+    // PostgreSQL trigger DDL commonly contains a helper CREATE FUNCTION
+    // followed by CREATE TRIGGER. Prefer the trigger object when both exist.
+    let trigger_create = tokens.iter().position(|token| token.eq_ignore_ascii_case("trigger"))
+        .and_then(|index| index.checked_sub(1))
+        .filter(|index| tokens[*index].eq_ignore_ascii_case("create"));
+    let create = trigger_create.or_else(|| tokens.iter().position(|token| token.eq_ignore_ascii_case("create")))?;
     let mut kind_index = create + 1;
     if tokens.get(kind_index).is_some_and(|token| token.eq_ignore_ascii_case("or")) { kind_index += 2; }
     let kind = match tokens.get(kind_index)?.to_ascii_lowercase().as_str() {
@@ -195,15 +200,33 @@ fn parse_ddl_object(sql: &str) -> Option<(ObjectKind, String)> {
         "function" => ObjectKind::Function,
         _ => return None,
     };
-    let name = tokens.get(kind_index + 1)?.trim_matches(|ch: char| "(`\"'[".contains(ch)).trim_end_matches(';');
+    let name = tokens
+        .get(kind_index + 1)?
+        .trim_matches(|ch: char| "(`\"'[".contains(ch))
+        .trim_end_matches(';')
+        // Function definitions are commonly written as `name(...)`; object
+        // metadata stores only the routine name (without its signature).
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(']');
     (!name.is_empty()).then(|| (kind, name.to_string()))
 }
 
 fn save_local_ddl(table: &str, title: &str, sql: &str) -> Result<PathBuf, String> {
     let dir = local_ddl_dir();
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    let kind = if title.to_ascii_lowercase().contains("function") { "function" } else { "trigger" };
-    let name = parse_ddl_object(sql).map(|(_, name)| name).unwrap_or_else(|| title.to_string());
+    let parsed = parse_ddl_object(sql);
+    // Use the SQL object kind as the source of truth. Titles are localized,
+    // so checking for the English word "function" misclassifies new routines
+    // in non-English locales.
+    let kind = match parsed.as_ref().map(|(kind, _)| kind) {
+        Some(ObjectKind::Function) => "function",
+        Some(ObjectKind::Trigger) => "trigger",
+        None if title.to_ascii_lowercase().contains("function") => "function",
+        None => "trigger",
+    };
+    let name = parsed.map(|(_, name)| name).unwrap_or_else(|| title.to_string());
     let path = dir.join(format!("{}__{}__{}.sql", sanitize_filename(table), kind, sanitize_filename(&name)));
     fs::write(&path, sql.as_bytes()).map_err(|error| error.to_string())?;
     Ok(path)
@@ -2196,6 +2219,9 @@ impl TableStructureView {
             ProtocolFamily::PostgreSql => format!(
                 "CREATE FUNCTION {name}_fn() RETURNS TRIGGER AS $$\nBEGIN\n    RETURN NEW; -- add logic here\nEND;\n$$ LANGUAGE plpgsql;\n\nCREATE TRIGGER {name}\nBEFORE INSERT ON {tbl}\nFOR EACH ROW EXECUTE FUNCTION {name}_fn();"
             ),
+            ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => format!(
+                "CREATE TRIGGER {name}\nAFTER INSERT ON {tbl}\nBEGIN\n    SELECT 1; -- add logic here\nEND"
+            ),
             _ => format!(
                 "CREATE TRIGGER {name}\nON {tbl}\nAFTER INSERT\nAS\nBEGIN\n-- add logic here\nEND"
             ),
@@ -2214,6 +2240,9 @@ impl TableStructureView {
             ProtocolFamily::PostgreSql => format!(
                 "CREATE OR REPLACE FUNCTION {name}() RETURNS void AS $$\nBEGIN\n    -- add logic here\nEND;\n$$ LANGUAGE plpgsql;"
             ),
+            ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => {
+                "-- Stored functions are not supported by this database.".to_string()
+            }
             _ => format!("CREATE FUNCTION {name}() RETURNS INT AS BEGIN RETURN 1 END"),
         }
     }
@@ -2683,7 +2712,19 @@ impl TableStructureView {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button(tr("New Function")).clicked() {
+                    let supports_functions = !matches!(
+                        self.kind.protocol_family(),
+                        ProtocolFamily::Sqlite | ProtocolFamily::DuckDb
+                    );
+                    if ui
+                        .add_enabled(supports_functions, Button::new(tr("New Function")))
+                        .on_hover_text(if supports_functions {
+                            tr("Create a stored function")
+                        } else {
+                            tr("Stored functions are not supported by this database")
+                        })
+                        .clicked()
+                    {
                         self.ddl_editor = Some(DdlEditorState {
                             title: tr("New Function").to_string(),
                             sql: self.function_create_template(),
@@ -2720,7 +2761,7 @@ impl TableStructureView {
             let ret = func.return_type.as_deref().unwrap_or("void");
             let lang = func.language.as_deref().unwrap_or("plpgsql");
             let sql = format!(
-                "CREATE OR REPLACE FUNCTION {}\nRETURNS {}\nAS $$\n    -- Full definition not retained by metadata; paste it here.\nBEGIN\n    RAISE NOTICE 'TODO';\nEND;\n$$ LANGUAGE {};",
+                "CREATE OR REPLACE FUNCTION {}()\nRETURNS {}\nAS $$\n    -- Full definition not retained by metadata; paste it here.\nBEGIN\n    RAISE NOTICE 'TODO';\nEND;\n$$ LANGUAGE {};",
                 func.name, ret, lang,
             );
             self.ddl_editor = Some(DdlEditorState {
