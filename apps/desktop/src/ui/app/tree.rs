@@ -291,6 +291,20 @@ impl DesktopApp {
                     });
                     self.state.set_status(format!("Confirm drop view: {view}"));
                 }
+                ObjectTreeAction::DropDatabase {
+                    connection_id,
+                    database,
+                } => {
+                    self.drop_table_request = Some(DropTableRequest {
+                        connection_id,
+                        database: None,
+                        schema: None,
+                        table: database.clone(),
+                        object_kind: DropObjectKind::Database,
+                    });
+                    self.state
+                        .set_status(format!("Confirm drop database: {database}"));
+                }
                 ObjectTreeAction::ClearTable {
                     connection_id,
                     database,

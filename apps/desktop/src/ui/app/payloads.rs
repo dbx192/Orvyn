@@ -97,6 +97,7 @@ pub(super) struct DropTableRequest {
 pub(super) enum DropObjectKind {
     Table,
     View,
+    Database,
 }
 
 pub(super) struct DropTablePayload {

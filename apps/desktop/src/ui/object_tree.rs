@@ -188,6 +188,10 @@ pub enum ObjectTreeAction {
         schema: Option<String>,
         view: String,
     },
+    DropDatabase {
+        connection_id: ConnectionId,
+        database: String,
+    },
     ClearTable {
         connection_id: ConnectionId,
         database: Option<String>,
@@ -794,6 +798,15 @@ impl ObjectTree {
             actions.push(ObjectTreeAction::EditConnection(connection_id));
             ui.close_menu();
         }
+        if ui.button(tr("Copy Name")).clicked() {
+            let name = self
+                .connection_node(connection_id)
+                .map(|node| node.label)
+                .unwrap_or_default();
+            ui.output_mut(|o| o.copied_text = name.clone());
+            *message = Some(format!("Copied: {name}"));
+            ui.close_menu();
+        }
         if ui.button(tr("Delete Connection")).clicked() {
             actions.push(ObjectTreeAction::DeleteConnection(connection_id));
             ui.close_menu();
@@ -829,6 +842,18 @@ impl ObjectTree {
                         ui.close_menu();
                     }
                 });
+                ui.separator();
+                if ui.button(tr("Delete Database...")).clicked() {
+                    actions.push(ObjectTreeAction::DropDatabase {
+                        connection_id: node.path.connection_id,
+                        database: node
+                            .path
+                            .database
+                            .clone()
+                            .unwrap_or_else(|| node.label.clone()),
+                    });
+                    ui.close_menu();
+                }
                 ui.separator();
             }
             MetadataNodeKind::Table => {

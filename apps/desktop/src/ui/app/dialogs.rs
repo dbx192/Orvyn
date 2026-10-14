@@ -246,8 +246,11 @@ impl DesktopApp {
                 }),
             &request.table,
         );
-        let is_view = matches!(request.object_kind, super::payloads::DropObjectKind::View);
-        let object_name = if is_view { tr("View") } else { tr("Table") };
+        let object_name = match request.object_kind {
+            super::payloads::DropObjectKind::View => tr("View"),
+            super::payloads::DropObjectKind::Database => tr("Database"),
+            super::payloads::DropObjectKind::Table => tr("Table"),
+        };
         let mut open = true;
         let mut confirm = false;
         let mut cancel = false;

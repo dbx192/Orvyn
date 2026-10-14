@@ -247,53 +247,64 @@ impl DesktopApp {
                     done = true;
                     match result {
                         Ok(payload) => {
-                            let table_name = qualified_table_label(
-                                payload
-                                    .schema
-                                    .as_deref()
-                                    .filter(|value| !value.is_empty())
-                                    .or_else(|| {
-                                        payload
-                                            .database
-                                            .as_deref()
-                                            .filter(|value| !value.is_empty())
-                                    }),
-                                &payload.table,
-                            );
-                            let closed_editor_ids = self
-                                .table_editors
-                                .iter()
-                                .filter_map(|(id, editor)| {
-                                    (editor.table_name() == table_name).then_some(*id)
-                                })
-                                .collect::<Vec<_>>();
-                            self.table_editors
-                                .retain(|id, _| !closed_editor_ids.contains(id));
-                            self.table_structures
-                                .retain(|id, _| !closed_editor_ids.contains(id));
-                            self.table_tab_order
-                                .retain(|id| !closed_editor_ids.contains(id));
-                            if self.table_editors.is_empty() {
-                                self.table_structures.clear();
-                                self.table_tab_order.clear();
-                                self.active_structure = None;
-                                self.active_panel = ActivePanel::QueryEditor;
-                                self.active_table_editor = None;
-                            } else if self
-                                .active_table_editor
-                                .is_some_and(|id| !self.table_editors.contains_key(&id))
-                            {
-                                self.active_table_editor =
-                                    self.table_editors.keys().next().copied();
-                                self.active_structure = self.active_table_editor;
+                            if matches!(
+                                payload.object_kind,
+                                super::payloads::DropObjectKind::Database
+                            ) {
+                                self.object_tree.reload_root();
+                                let database = payload.table;
+                                self.state
+                                    .set_status(format!("Dropped database: {database}"));
+                            } else {
+                                let table_name = qualified_table_label(
+                                    payload
+                                        .schema
+                                        .as_deref()
+                                        .filter(|value| !value.is_empty())
+                                        .or_else(|| {
+                                            payload
+                                                .database
+                                                .as_deref()
+                                                .filter(|value| !value.is_empty())
+                                        }),
+                                    &payload.table,
+                                );
+                                let closed_editor_ids = self
+                                    .table_editors
+                                    .iter()
+                                    .filter_map(|(id, editor)| {
+                                        (editor.table_name() == table_name).then_some(*id)
+                                    })
+                                    .collect::<Vec<_>>();
+                                self.table_editors
+                                    .retain(|id, _| !closed_editor_ids.contains(id));
+                                self.table_structures
+                                    .retain(|id, _| !closed_editor_ids.contains(id));
+                                self.table_tab_order
+                                    .retain(|id| !closed_editor_ids.contains(id));
+                                if self.table_editors.is_empty() {
+                                    self.table_structures.clear();
+                                    self.table_tab_order.clear();
+                                    self.active_structure = None;
+                                    self.active_panel = ActivePanel::QueryEditor;
+                                    self.active_table_editor = None;
+                                } else if self
+                                    .active_table_editor
+                                    .is_some_and(|id| !self.table_editors.contains_key(&id))
+                                {
+                                    self.active_table_editor =
+                                        self.table_editors.keys().next().copied();
+                                    self.active_structure = self.active_table_editor;
+                                }
+                                self.object_tree.reload_root();
+                                let object_label = match payload.object_kind {
+                                    super::payloads::DropObjectKind::Table => "table",
+                                    super::payloads::DropObjectKind::View => "view",
+                                    super::payloads::DropObjectKind::Database => "database",
+                                };
+                                self.state
+                                    .set_status(format!("Dropped {object_label}: {table_name}"));
                             }
-                            self.object_tree.reload_root();
-                            let object_label = match payload.object_kind {
-                                super::payloads::DropObjectKind::Table => "table",
-                                super::payloads::DropObjectKind::View => "view",
-                            };
-                            self.state
-                                .set_status(format!("Dropped {object_label}: {table_name}"));
                         }
                         Err(error) => {
                             self.state
@@ -869,6 +880,7 @@ impl DesktopApp {
                                 match request.object_kind {
                                     super::payloads::DropObjectKind::Table => "TABLE",
                                     super::payloads::DropObjectKind::View => "VIEW",
+                                    super::payloads::DropObjectKind::Database => "DATABASE",
                                 }
                             ),
                             mode: QueryExecutionMode::All,
