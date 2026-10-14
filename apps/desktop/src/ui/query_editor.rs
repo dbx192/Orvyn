@@ -1396,7 +1396,7 @@ impl QueryEditor {
             mode: QueryExecutionMode::All,
             cursor_offset: 0,
             selection: None,
-            timeout_ms: 30_000,
+            timeout_ms: 120_000,
             result_limit: Some(page_size),
             result_offset: offset,
             result_total_rows: tab

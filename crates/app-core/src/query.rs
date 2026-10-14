@@ -883,6 +883,10 @@ impl ExecutionPlan {
                     offset,
                     total_rows,
                 } => {
+                    // Execution order is page first, count second.
+                    let mut page_result = execution_results.next().ok_or_else(|| {
+                        AppError::new(ErrorKind::Internal, "query page result missing")
+                    })?;
                     let (total_rows, count_execution_time_ms) = if let Some(total_rows) = total_rows
                     {
                         (total_rows, 0)
@@ -893,9 +897,6 @@ impl ExecutionPlan {
                         let total_rows = query_count_from_result(&count_result)?;
                         (total_rows, count_result.execution_time_ms)
                     };
-                    let mut page_result = execution_results.next().ok_or_else(|| {
-                        AppError::new(ErrorKind::Internal, "query page result missing")
-                    })?;
                     page_result.statement = statement;
                     page_result.execution_time_ms += count_execution_time_ms;
                     page_result.metadata.insert(
@@ -971,9 +972,14 @@ fn execution_plan_for(
                 });
                 continue;
             };
+            // Run the page query before the count: filtered scans on large
+            // tables can take tens of seconds, and the visible rows should
+            // not wait behind the count.
+            execution_statements.push(page_statement);
             execution_statements.push(count_statement);
+        } else {
+            execution_statements.push(page_statement);
         }
-        execution_statements.push(page_statement);
         result_plans.push(ResultPlan::Paged {
             statement: statement.clone(),
             limit,
@@ -1086,8 +1092,8 @@ mod tests {
         assert_eq!(
             plan.execution_statements,
             vec![
-                "SELECT COUNT(*) AS total_rows FROM (select * from books) AS __query_count",
-                "select * from books\nLIMIT 500 OFFSET 1000"
+                "select * from books\nLIMIT 500 OFFSET 1000",
+                "SELECT COUNT(*) AS total_rows FROM (select * from books) AS __query_count"
             ]
         );
     }

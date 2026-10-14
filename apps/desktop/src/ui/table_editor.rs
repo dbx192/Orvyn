@@ -1058,7 +1058,7 @@ impl TableEditor {
                         mode: db_common::QueryExecutionMode::All,
                         cursor_offset: 0,
                         selection: None,
-                        timeout_ms: 30000,
+                        timeout_ms: 120_000,
                         result_limit: None,
                         result_offset: 0,
                         result_total_rows: None,
@@ -1172,7 +1172,7 @@ impl TableEditor {
                     mode: QueryExecutionMode::All,
                     cursor_offset: 0,
                     selection: None,
-                    timeout_ms: 30_000,
+                    timeout_ms: 120_000,
                     // The SQL already contains a bounded LIMIT. Passing no
                     // result_limit avoids QueryService's expensive automatic
                     // COUNT(*) planning for the first page of huge tables.
@@ -1300,7 +1300,7 @@ impl TableEditor {
                         mode: QueryExecutionMode::All,
                         cursor_offset: 0,
                         selection: None,
-                        timeout_ms: 30_000,
+                        timeout_ms: 120_000,
                         result_limit: (!uses_keyset).then_some(page_size),
                         result_offset: if uses_keyset { 0 } else { offset },
                         result_total_rows: (!uses_keyset).then_some(total_rows).flatten(),
