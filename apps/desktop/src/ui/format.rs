@@ -79,6 +79,18 @@ pub fn truncate_display(value: String) -> String {
     }
 }
 
+/// Pretty-print `text` as JSON when it parses successfully.
+/// Returns `None` when the text is not valid JSON so callers can fall back to
+/// the raw representation.
+pub fn pretty_json_if_valid(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    serde_json::to_string_pretty(&value).ok()
+}
+
 /// Convert a cell value to its clipboard-friendly form.
 ///
 /// Distinct outputs:

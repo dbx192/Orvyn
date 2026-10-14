@@ -18,6 +18,7 @@
 //! - Refresh functionality
 //! - Full editing support for all Redis data types
 
+use crate::ui::format::pretty_json_if_valid;
 use crate::ui::i18n::text as tr;
 use app_core::{
     connection::ConnectionManager, metadata::MetadataService, redis_service::RedisService,
@@ -27,11 +28,12 @@ use db_common::{
     RedisDatabase, RedisKeyInfo, RedisValue,
 };
 use eframe::egui::{
-    vec2, Align, Align2, Button, Color32, ComboBox, Context, Frame, Grid, Layout, Margin, Rect,
-    RichText, Rounding, ScrollArea, Sense, Spinner, Stroke, TextEdit, Ui, Vec2, Window,
+    vec2, Align, Align2, Button, Color32, ComboBox, Context, Frame, Grid, Label, Layout, Margin,
+    Rect, RichText, Rounding, ScrollArea, Sense, Spinner, Stroke, TextEdit, Ui, Vec2, Window,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
     sync::mpsc::{self, Receiver, Sender},
 };
 
@@ -40,8 +42,13 @@ const PREVIEW_MAX_BYTES: usize = 1024;
 const LARGE_VALUE_THRESHOLD: usize = 64 * 1024;
 const REDIS_KEY_SIDEBAR_WIDTH: f32 = 330.0;
 const REDIS_VALUE_ROW_LIMIT: usize = 250;
+const KEY_TREE_ROW_HEIGHT: f32 = 26.0;
+/// Fixed row height for the virtualized string-value viewer.
+const VALUE_ROW_HEIGHT: f32 = 18.0;
+/// Above this key count the sidebar falls back to the flat grouped list.
+const KEY_TREE_MAX_KEYS: usize = 20_000;
 
-type RedisKeyGroupRow = (String, Option<i64>, Option<u64>);
+type RedisKeyGroupRow = (usize, String, Option<i64>, Option<u64>);
 type RedisKeyGroup = (String, Vec<RedisKeyGroupRow>);
 
 /// Events emitted by the Redis browser.
@@ -153,6 +160,29 @@ pub struct RedisBrowserUi {
     cli_command: String,
     cli_result: Option<String>,
     cli_running: bool,
+
+    // Hierarchical key tree
+    tree_mode: bool,
+    key_tree: KeyTree,
+    collapsed: BTreeSet<String>,
+    tree_rows: Vec<VisibleRow>,
+    tree_dirty: bool,
+    flatten_dirty: bool,
+    selected_keys: BTreeSet<String>,
+    last_clicked_key: Option<String>,
+
+    // Value viewer
+    value_format: ValueFormat,
+    /// Pretty-printed string value memoized per format; cleared whenever a new
+    /// value is loaded or the selection changes.
+    string_formatted: Option<(ValueFormat, Rc<String>)>,
+
+    // Rename dialog
+    rename_dialog: Option<String>,
+    rename_new_name: String,
+
+    // Batch delete
+    confirm_delete_keys: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +287,15 @@ enum BrowserCommand {
         key: String,
         member: String,
     },
+    RenameKey {
+        database: u8,
+        from: String,
+        to: String,
+    },
+    DeleteKeys {
+        database: u8,
+        keys: Vec<String>,
+    },
     Refresh,
 }
 
@@ -282,6 +321,13 @@ enum BrowserResponse {
     },
     KeyDeleted {
         key: String,
+    },
+    KeysRenamed {
+        from: String,
+        to: String,
+    },
+    KeysDeleted {
+        count: usize,
     },
     TtlUpdated {
         key: String,
@@ -317,6 +363,108 @@ enum BrowserResponse {
     CommandExecuted(Result<RedisValue, AppError>),
     Error(String),
     Status(String),
+}
+
+/// Display format for string values in the viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueFormat {
+    /// Pretty-print JSON when the value parses, otherwise show raw text.
+    Auto,
+    /// Force JSON pretty-print (falls back to raw when invalid).
+    Json,
+    /// Show the decoded text as-is.
+    Raw,
+}
+
+/// One renderable row of the hierarchical key tree.
+#[derive(Debug, Clone)]
+enum VisibleRow {
+    Folder {
+        path: String,
+        segment: String,
+        depth: usize,
+        count: usize,
+        expanded: bool,
+    },
+    Key {
+        key_index: usize,
+        depth: usize,
+    },
+}
+
+#[derive(Default)]
+struct KeyTreeNode {
+    children: BTreeMap<String, KeyTreeNode>,
+    /// Index into `RedisBrowserUi::keys` when a key ends exactly at this node.
+    leaf: Option<usize>,
+    /// Number of keys at or below this node.
+    count: usize,
+}
+
+#[derive(Default)]
+struct KeyTree {
+    root: KeyTreeNode,
+}
+
+impl KeyTree {
+    fn insert(&mut self, key: &str, index: usize) {
+        let mut node = &mut self.root;
+        node.count += 1;
+        for segment in key.split(':') {
+            node = node.children.entry(segment.to_string()).or_default();
+            node.count += 1;
+        }
+        node.leaf = Some(index);
+    }
+
+    fn flatten(&self, collapsed: &BTreeSet<String>) -> Vec<VisibleRow> {
+        let mut rows = Vec::new();
+        Self::flatten_node(&self.root, String::new(), 0, collapsed, &mut rows);
+        rows
+    }
+
+    fn flatten_node(
+        node: &KeyTreeNode,
+        path: String,
+        depth: usize,
+        collapsed: &BTreeSet<String>,
+        rows: &mut Vec<VisibleRow>,
+    ) {
+        for (segment, child) in &node.children {
+            let child_path = if path.is_empty() {
+                segment.clone()
+            } else {
+                format!("{path}:{segment}")
+            };
+            if child.children.is_empty() {
+                // Plain key without a separator: render it directly.
+                if let Some(key_index) = child.leaf {
+                    rows.push(VisibleRow::Key {
+                        key_index,
+                        depth,
+                    });
+                }
+                continue;
+            }
+            let expanded = !collapsed.contains(&child_path);
+            rows.push(VisibleRow::Folder {
+                path: child_path.clone(),
+                segment: segment.clone(),
+                depth,
+                count: child.count,
+                expanded,
+            });
+            if let Some(key_index) = child.leaf {
+                rows.push(VisibleRow::Key {
+                    key_index,
+                    depth: depth + 1,
+                });
+            }
+            if expanded {
+                Self::flatten_node(child, child_path, depth + 1, collapsed, rows);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -477,6 +625,19 @@ impl RedisBrowserUi {
             cli_command: String::new(),
             cli_result: None,
             cli_running: false,
+            tree_mode: true,
+            key_tree: KeyTree::default(),
+            collapsed: BTreeSet::new(),
+            tree_rows: Vec::new(),
+            tree_dirty: true,
+            flatten_dirty: true,
+            selected_keys: BTreeSet::new(),
+            last_clicked_key: None,
+            value_format: ValueFormat::Auto,
+            string_formatted: None,
+            rename_dialog: None,
+            rename_new_name: String::new(),
+            confirm_delete_keys: None,
         };
 
         ui.load_connection_profile();
@@ -558,6 +719,12 @@ impl RedisBrowserUi {
 
         // Delete confirmation dialog
         self.delete_confirmation_window(ctx);
+
+        // Batch delete confirmation dialog
+        self.confirm_delete_keys_window(ctx);
+
+        // Rename dialog
+        self.rename_dialog_window(ctx);
 
         // Load full value confirmation dialog
         self.load_full_confirmation_window(ctx);
@@ -743,16 +910,21 @@ impl RedisBrowserUi {
 
     fn key_groups(&self) -> Vec<RedisKeyGroup> {
         let mut groups: BTreeMap<String, Vec<RedisKeyGroupRow>> = BTreeMap::new();
-        for entry in &self.keys {
+        for (index, entry) in self.keys.iter().enumerate() {
             groups
                 .entry(entry.info.type_name.clone())
                 .or_default()
-                .push((entry.info.name.clone(), entry.info.ttl_seconds, entry.size));
+                .push((
+                    index,
+                    entry.info.name.clone(),
+                    entry.info.ttl_seconds,
+                    entry.size,
+                ));
         }
 
         let mut groups = groups.into_iter().collect::<Vec<_>>();
         for (_, rows) in &mut groups {
-            rows.sort_by(|left, right| left.0.cmp(&right.0));
+            rows.sort_by(|left, right| left.1.cmp(&right.1));
         }
         groups.sort_by(|left, right| {
             redis_type_rank(&left.0)
@@ -850,9 +1022,26 @@ impl RedisBrowserUi {
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tree_mode, true, tr("Tree"));
+                ui.selectable_value(&mut self.tree_mode, false, tr("Flat"));
+                ui.separator();
+                if ui
+                    .add_enabled(self.tree_mode, Button::new(tr("Collapse All")))
+                    .clicked()
+                {
+                    self.collapse_all();
+                }
+                if ui.button(tr("Expand All")).clicked() {
+                    self.collapsed.clear();
+                    self.flatten_dirty = true;
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
                 let response = ui.add(
                     TextEdit::singleline(&mut self.search_pattern)
-                        .hint_text("Filter key pattern")
+                        .hint_text(tr("Filter key pattern"))
                         .desired_width((ui.available_width() - 62.0).max(120.0)),
                 );
                 if response.lost_focus() && self.search_pattern != self.pattern {
@@ -869,64 +1058,280 @@ impl RedisBrowserUi {
                 .stroke(Stroke::new(1.0, style.border))
                 .inner_margin(Margin::same(4.0))
                 .show(ui, |ui| {
-                    ScrollArea::vertical()
-                        .id_source("key_list_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            if self.keys.is_empty() && !self.is_loading {
-                                ui.add_space(16.0);
-                                ui.centered_and_justified(|ui| {
-                                    ui.label(
-                                        RichText::new("No keys found").color(style.muted).italics(),
-                                    );
-                                });
-                                return;
-                            }
-
-                            let groups = self.key_groups();
-                            for (type_name, rows) in groups {
-                                self.render_key_group_header(ui, style, &type_name, rows.len());
-                                for (name, ttl_seconds, size) in rows {
-                                    self.render_key_row(
-                                        ui,
-                                        style,
-                                        &name,
-                                        &type_name,
-                                        ttl_seconds,
-                                        size,
-                                    );
-                                }
-                            }
-
-                            ui.add_space(6.0);
-                            if self.is_loading {
-                                ui.horizontal(|ui| {
-                                    ui.add(Spinner::new());
-                                    ui.label(RichText::new("Loading...").color(style.muted));
-                                });
-                            } else if self.has_more {
-                                if ui.button(tr("Load More")).clicked() {
-                                    self.load_more_keys();
-                                }
-                            }
-                        });
+                    if self.tree_mode
+                        && self.pattern.is_empty()
+                        && self.keys.len() > KEY_TREE_MAX_KEYS
+                    {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(tr("Too many keys for tree view; showing flat list"))
+                                .small()
+                                .color(style.muted),
+                        );
+                        ui.add_space(4.0);
+                    }
+                    if self.use_tree_view() {
+                        self.render_key_tree(ui, style);
+                    } else {
+                        self.render_flat_key_list(ui, style);
+                    }
                 });
         });
     }
 
-    fn render_key_row(
+    fn use_tree_view(&self) -> bool {
+        self.tree_mode && self.pattern.is_empty() && self.keys.len() <= KEY_TREE_MAX_KEYS
+    }
+
+    fn render_key_tree(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
+        if self.tree_dirty {
+            self.rebuild_key_tree();
+        }
+        if self.flatten_dirty {
+            self.tree_rows = self.key_tree.flatten(&self.collapsed);
+            self.flatten_dirty = false;
+        }
+
+        ScrollArea::vertical()
+            .id_source("key_tree_scroll")
+            .auto_shrink([false, false])
+            .show_rows(
+                ui,
+                KEY_TREE_ROW_HEIGHT,
+                self.tree_rows.len(),
+                |ui, range| {
+                    for row_index in range {
+                        let Some(row) = self.tree_rows.get(row_index).cloned() else {
+                            continue;
+                        };
+                        self.render_tree_row(ui, style, &row);
+                    }
+                },
+            );
+
+        ui.add_space(6.0);
+        if self.is_loading {
+            ui.horizontal(|ui| {
+                ui.add(Spinner::new());
+                ui.label(RichText::new("Loading...").color(style.muted));
+            });
+        } else if self.has_more {
+            if ui.button(tr("Load More")).clicked() {
+                self.load_more_keys();
+            }
+        }
+    }
+
+    fn render_flat_key_list(&mut self, ui: &mut Ui, style: RedisBrowserStyle) {
+        ScrollArea::vertical()
+            .id_source("key_list_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if self.keys.is_empty() && !self.is_loading {
+                    ui.add_space(16.0);
+                    ui.centered_and_justified(|ui| {
+                        ui.label(RichText::new("No keys found").color(style.muted).italics());
+                    });
+                    return;
+                }
+
+                let groups = self.key_groups();
+                for (type_name, rows) in groups {
+                    self.render_key_group_header(ui, style, &type_name, rows.len());
+                    for (key_index, _, _, _) in rows {
+                        self.render_key_row_at(ui, style, key_index, 0);
+                    }
+                }
+
+                ui.add_space(6.0);
+                if self.is_loading {
+                    ui.horizontal(|ui| {
+                        ui.add(Spinner::new());
+                        ui.label(RichText::new("Loading...").color(style.muted));
+                    });
+                } else if self.has_more {
+                    if ui.button(tr("Load More")).clicked() {
+                        self.load_more_keys();
+                    }
+                }
+            });
+    }
+
+    fn rebuild_key_tree(&mut self) {
+        let mut tree = KeyTree::default();
+        for (index, entry) in self.keys.iter().enumerate() {
+            tree.insert(&entry.info.name, index);
+        }
+        self.key_tree = tree;
+        self.tree_dirty = false;
+        self.flatten_dirty = true;
+    }
+
+    fn collapse_all(&mut self) {
+        self.collapsed.clear();
+        let mut paths = BTreeSet::new();
+        Self::collect_folder_paths(&self.key_tree.root, String::new(), &mut paths);
+        self.collapsed = paths;
+        self.flatten_dirty = true;
+    }
+
+    fn collect_folder_paths(
+        node: &KeyTreeNode,
+        path: String,
+        paths: &mut BTreeSet<String>,
+    ) {
+        for (segment, child) in &node.children {
+            if child.children.is_empty() {
+                continue;
+            }
+            let child_path = if path.is_empty() {
+                segment.clone()
+            } else {
+                format!("{path}:{segment}")
+            };
+            paths.insert(child_path.clone());
+            Self::collect_folder_paths(child, child_path, paths);
+        }
+    }
+
+    /// Visible key order for shift-range selection.
+    fn visible_key_indices(&self) -> Vec<usize> {
+        if self.use_tree_view() {
+            self.tree_rows
+                .iter()
+                .filter_map(|row| match row {
+                    VisibleRow::Key { key_index, .. } => Some(*key_index),
+                    VisibleRow::Folder { .. } => None,
+                })
+                .collect()
+        } else {
+            let order: BTreeMap<&str, usize> = self
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| (entry.info.name.as_str(), index))
+                .collect();
+            self.key_groups()
+                .into_iter()
+                .flat_map(|(_, rows)| rows.into_iter().map(|(key_index, ..)| key_index))
+                .filter(|index| order.values().any(|kept| kept == index))
+                .collect()
+        }
+    }
+
+    fn toggle_key_selection(&mut self, key_name: &str, modifiers: eframe::egui::Modifiers) {
+        if modifiers.shift {
+            let order = self.visible_key_indices();
+            let name_of = |index: usize| {
+                self.keys
+                    .get(index)
+                    .map(|entry| entry.info.name.clone())
+                    .unwrap_or_default()
+            };
+            let anchor = self
+                .last_clicked_key
+                .as_ref()
+                .and_then(|anchor| order.iter().position(|index| name_of(*index) == *anchor));
+            let target = order.iter().position(|index| name_of(*index) == key_name);
+            if let (Some(start), Some(end)) = (anchor, target) {
+                let (lo, hi) = (start.min(end), start.max(end));
+                for index in &order[lo..=hi] {
+                    self.selected_keys.insert(name_of(*index));
+                }
+                self.last_clicked_key = Some(key_name.to_string());
+                return;
+            }
+        }
+        if modifiers.ctrl || modifiers.command {
+            if !self.selected_keys.remove(key_name) {
+                self.selected_keys.insert(key_name.to_string());
+            }
+            self.last_clicked_key = Some(key_name.to_string());
+            return;
+        }
+        // Plain click: single-select.
+        self.selected_keys.clear();
+        self.selected_keys.insert(key_name.to_string());
+        self.last_clicked_key = Some(key_name.to_string());
+    }
+
+    fn render_tree_row(&mut self, ui: &mut Ui, style: RedisBrowserStyle, row: &VisibleRow) {
+        match row {
+            VisibleRow::Folder {
+                path,
+                segment,
+                depth,
+                count,
+                expanded,
+            } => {
+                let (rect, response) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), KEY_TREE_ROW_HEIGHT),
+                    Sense::click(),
+                );
+                let painter = ui.painter();
+                let fill = if response.hovered() {
+                    style.row_hover
+                } else {
+                    Color32::TRANSPARENT
+                };
+                if fill != Color32::TRANSPARENT {
+                    painter.rect_filled(rect.shrink2(vec2(1.0, 1.0)), Rounding::same(3.0), fill);
+                }
+
+                let indent = 6.0 + *depth as f32 * 14.0;
+                let arrow = if *expanded { "\u{25be}" } else { "\u{25b8}" };
+                painter.text(
+                    rect.left_center() + vec2(indent, 0.0),
+                    Align2::LEFT_CENTER,
+                    arrow,
+                    eframe::egui::FontId::proportional(11.0),
+                    style.accent,
+                );
+                let label = format!("{segment} ({count})");
+                painter.text(
+                    rect.left_center() + vec2(indent + 16.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    label,
+                    eframe::egui::FontId::proportional(12.0),
+                    style.text,
+                );
+
+                if response.clicked() {
+                    if *expanded {
+                        self.collapsed.insert(path.clone());
+                    } else {
+                        self.collapsed.remove(path);
+                    }
+                    self.flatten_dirty = true;
+                }
+            }
+            VisibleRow::Key { key_index, depth } => {
+                self.render_key_row_at(ui, style, *key_index, *depth);
+            }
+        }
+    }
+
+    fn render_key_row_at(
         &mut self,
         ui: &mut Ui,
         style: RedisBrowserStyle,
-        key_name: &str,
-        key_type: &str,
-        ttl_seconds: Option<i64>,
-        size: Option<u64>,
+        key_index: usize,
+        depth: usize,
     ) {
-        let is_selected = self.selected_key.as_ref().map(|value| value.as_str()) == Some(key_name);
-        let row_height = 28.0;
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), row_height), Sense::click());
+        let Some(entry) = self.keys.get(key_index) else {
+            return;
+        };
+        let key_name = entry.info.name.clone();
+        let key_type = entry.info.type_name.clone();
+        let ttl_seconds = entry.info.ttl_seconds;
+        let size = entry.size;
+
+        let is_selected = self.selected_key.as_deref() == Some(key_name.as_str())
+            || self.selected_keys.contains(&key_name);
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), KEY_TREE_ROW_HEIGHT),
+            Sense::click(),
+        );
         let painter = ui.painter();
         let fill = if is_selected {
             style.selected_fill
@@ -939,17 +1344,20 @@ impl RedisBrowserUi {
             painter.rect_filled(rect.shrink2(vec2(1.0, 1.0)), Rounding::same(3.0), fill);
         }
 
-        let badge_rect =
-            Rect::from_min_size(rect.left_top() + vec2(10.0, 5.0), Vec2::new(18.0, 18.0));
+        let indent = 6.0 + depth as f32 * 14.0;
+        let badge_rect = Rect::from_min_size(
+            rect.left_top() + vec2(indent + 4.0, 4.0),
+            Vec2::new(18.0, 18.0),
+        );
         painter.rect_filled(
             badge_rect,
             Rounding::same(3.0),
-            key_type_badge_fill(key_type, style),
+            key_type_badge_fill(&key_type, style),
         );
         painter.text(
             badge_rect.center(),
             Align2::CENTER_CENTER,
-            key_type_short_label(key_type),
+            key_type_short_label(&key_type),
             eframe::egui::FontId::monospace(10.0),
             Color32::WHITE,
         );
@@ -959,28 +1367,18 @@ impl RedisBrowserUi {
         } else {
             style.text
         };
-        let leaf = key_leaf_label(key_name);
-        let prefix = key_parent_label(key_name);
+        let leaf = key_leaf_label(&key_name);
         painter.text(
-            rect.left_top() + vec2(34.0, 8.0),
+            rect.left_top() + vec2(indent + 28.0, 7.0),
             Align2::LEFT_TOP,
             &leaf,
             eframe::egui::FontId::proportional(12.5),
             label_color,
         );
-        if let Some(prefix) = prefix {
-            painter.text(
-                rect.left_top() + vec2(34.0 + leaf.len() as f32 * 7.0 + 6.0, 8.0),
-                Align2::LEFT_TOP,
-                &prefix,
-                eframe::egui::FontId::proportional(11.0),
-                style.muted,
-            );
-        }
-        let meta = key_row_meta(key_type, ttl_seconds, size);
+        let meta = key_row_meta(&key_type, ttl_seconds, size);
         if !meta.is_empty() && rect.width() > 220.0 {
             painter.text(
-                rect.right_top() + vec2(-8.0, 8.0),
+                rect.right_top() + vec2(-8.0, 7.0),
                 Align2::RIGHT_TOP,
                 meta,
                 eframe::egui::FontId::proportional(10.5),
@@ -989,11 +1387,15 @@ impl RedisBrowserUi {
         }
 
         if response.clicked() {
-            self.select_key(key_name.to_string());
+            let modifiers = ui.ctx().input(|input| input.modifiers);
+            self.toggle_key_selection(&key_name, modifiers);
+            if !modifiers.ctrl && !modifiers.shift {
+                self.select_key(key_name.clone());
+            }
         }
 
         response.context_menu(|ui| {
-            self.key_context_menu(ui, key_name);
+            self.key_context_menu(ui, &key_name);
         });
     }
 
@@ -1008,8 +1410,31 @@ impl RedisBrowserUi {
             ui.close_menu();
         }
         ui.separator();
+        if ui.button(tr("Rename")).clicked() {
+            self.rename_dialog = Some(key_name.to_string());
+            self.rename_new_name.clear();
+            ui.close_menu();
+        }
+        if ui.button(tr("TTL")).clicked() {
+            let ttl = self
+                .keys
+                .iter()
+                .find(|entry| entry.info.name == key_name)
+                .and_then(|entry| entry.info.ttl_seconds);
+            self.editing_ttl = Some((key_name.to_string(), ttl.unwrap_or(-1)));
+            self.ttl_edit_value = ttl
+                .filter(|ttl| *ttl > 0)
+                .map(|ttl| ttl.to_string())
+                .unwrap_or_default();
+            ui.close_menu();
+        }
+        ui.separator();
         if ui.button(tr("Delete")).clicked() {
             self.confirm_delete = Some(key_name.to_string());
+            ui.close_menu();
+        }
+        if self.selected_keys.len() > 1 && ui.button(tr("Delete Selected")).clicked() {
+            self.confirm_delete_keys = Some(self.selected_keys.iter().cloned().collect());
             ui.close_menu();
         }
     }
@@ -1222,23 +1647,104 @@ impl RedisBrowserUi {
     }
 
     fn render_string_value(&mut self, ui: &mut Ui, style: RedisBrowserStyle, bytes: &[u8]) {
-        let text_preview = redis_display_text(bytes);
+        let raw_text = redis_display_text(bytes);
+        self.value_format_bar(ui, style, &raw_text);
+
+        let json_invalid = matches!(self.value_format, ValueFormat::Json)
+            && pretty_json_if_valid(&raw_text).is_none();
+        let formatted = self.formatted_string_value(&raw_text);
+        let lines: Vec<&str> = formatted.lines().collect();
+        let line_count = lines.len().max(1);
 
         self.value_filter_bar(ui, style, bytes.len(), "bytes");
+        if json_invalid {
+            ui.label(
+                RichText::new("Not valid JSON — showing raw text")
+                    .small()
+                    .color(Color32::YELLOW),
+            );
+        }
         style.inset_frame().show(ui, |ui| {
-            ScrollArea::vertical()
+            ScrollArea::both()
                 .id_source("string_value_scroll")
                 .auto_shrink([false, false])
                 .max_height(420.0)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(text_preview)
-                            .family(eframe::egui::FontFamily::Monospace)
-                            .size(12.0)
-                            .color(style.text),
-                    );
+                .show_rows(ui, VALUE_ROW_HEIGHT, line_count, |ui, range| {
+                    for row_index in range {
+                        let line = lines.get(row_index).copied().unwrap_or("");
+                        ui.horizontal(|ui| {
+                            ui.set_min_width(ui.available_width());
+                            let gutter = Label::new(
+                                RichText::new(format!("{:>5}", row_index + 1))
+                                    .family(eframe::egui::FontFamily::Monospace)
+                                    .size(12.0)
+                                    .color(style.muted),
+                            );
+                            ui.add_sized([42.0, VALUE_ROW_HEIGHT], gutter);
+                            ui.separator();
+                            ui.label(
+                                RichText::new(line)
+                                    .family(eframe::egui::FontFamily::Monospace)
+                                    .size(12.0)
+                                    .color(style.text),
+                            );
+                        });
+                    }
                 });
         });
+    }
+
+    /// Text shown in the viewer for the current format (Auto pretty-prints
+    /// JSON and falls back to raw; Raw never reformats).
+    fn formatted_string_value(&mut self, raw_text: &str) -> Rc<String> {
+        match self.value_format {
+            ValueFormat::Raw => Rc::new(raw_text.to_string()),
+            ValueFormat::Auto | ValueFormat::Json => {
+                if let Some((format, text)) = &self.string_formatted {
+                    if *format == self.value_format {
+                        return text.clone();
+                    }
+                }
+                let text = Rc::new(
+                    pretty_json_if_valid(raw_text).unwrap_or_else(|| raw_text.to_string()),
+                );
+                self.string_formatted = Some((self.value_format, text.clone()));
+                text
+            }
+        }
+    }
+
+    fn value_format_bar(&mut self, ui: &mut Ui, style: RedisBrowserStyle, raw_text: &str) {
+        Frame::none()
+            .fill(style.toolbar_fill)
+            .stroke(Stroke::new(1.0, style.border))
+            .inner_margin(Margin::symmetric(8.0, 5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tr("Format")).small().color(style.muted));
+                    let formats = [
+                        (ValueFormat::Auto, tr("Auto")),
+                        (ValueFormat::Json, "JSON".to_string()),
+                        (ValueFormat::Raw, tr("Raw")),
+                    ];
+                    for (format, label) in formats {
+                        if ui
+                            .selectable_label(self.value_format == format, label)
+                            .clicked()
+                        {
+                            self.value_format = format;
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button(tr("Copy Value")).clicked() {
+                            let text = self.formatted_string_value(raw_text);
+                            ui.output_mut(|output| output.copied_text = (*text).clone());
+                            self.status = "Copied value to clipboard".to_string();
+                        }
+                    });
+                });
+            });
+        ui.add_space(6.0);
     }
 
     fn render_hash_value(
@@ -1718,6 +2224,88 @@ impl RedisBrowserUi {
         }
     }
 
+    fn confirm_delete_keys_window(&mut self, ctx: &Context) {
+        let Some(keys) = self.confirm_delete_keys.clone() else {
+            return;
+        };
+
+        let mut open = true;
+        Window::new(tr("Confirm Delete"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(tr("Delete {n} keys?").replace("{n}", &keys.len().to_string()));
+                ui.label(RichText::new(tr("This action cannot be undone.")).color(Color32::RED));
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Delete")).clicked() {
+                        self.delete_keys(keys);
+                    }
+                    if ui.button(tr("Cancel")).clicked() {
+                        self.confirm_delete_keys = None;
+                    }
+                });
+            });
+
+        if !open {
+            self.confirm_delete_keys = None;
+        }
+    }
+
+    fn rename_dialog_window(&mut self, ctx: &Context) {
+        let Some(from) = self.rename_dialog.clone() else {
+            return;
+        };
+
+        let mut open = true;
+        Window::new(tr("Rename"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(&from)
+                        .monospace()
+                        .small()
+                        .color(eframe::egui::Color32::GRAY),
+                );
+                ui.add_space(4.0);
+                ui.label(tr("New Name"));
+                let response = ui.add(
+                    TextEdit::singleline(&mut self.rename_new_name)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(&from),
+                );
+                if response.lost_focus()
+                    && ui.input(|input| input.key_pressed(eframe::egui::Key::Enter))
+                {
+                    self.submit_rename(&from);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Rename")).clicked() {
+                        self.submit_rename(&from);
+                    }
+                    if ui.button(tr("Cancel")).clicked() {
+                        self.rename_dialog = None;
+                        self.rename_new_name.clear();
+                    }
+                });
+            });
+
+        if !open {
+            self.rename_dialog = None;
+            self.rename_new_name.clear();
+        }
+    }
+
+    fn submit_rename(&mut self, from: &str) {
+        let to = self.rename_new_name.trim().to_string();
+        if to.is_empty() || to == from {
+            return;
+        }
+        self.rename_key(from.to_string(), to);
+    }
+
     fn load_full_confirmation_window(&mut self, ctx: &Context) {
         let Some((key_name, size)) = self.confirm_load_full.clone() else {
             return;
@@ -1801,6 +2389,7 @@ impl RedisBrowserUi {
                     } else {
                         self.status = format!("{} keys loaded", self.keys.len());
                     }
+                    self.tree_dirty = true;
                 }
                 BrowserResponse::KeyValueLoaded {
                     key,
@@ -1816,6 +2405,7 @@ impl RedisBrowserUi {
                     }
 
                     self.selected_key_type = Some(key_type);
+                    self.string_formatted = None;
                     if total_size > LARGE_VALUE_THRESHOLD && !force_full {
                         self.value_display = ValueDisplay::TooLarge {
                             preview,
@@ -1833,12 +2423,50 @@ impl RedisBrowserUi {
                 }
                 BrowserResponse::KeyDeleted { key } => {
                     self.keys.retain(|k| k.info.name != key);
+                    self.selected_keys.remove(&key);
                     if self.selected_key.as_ref() == Some(&key) {
                         self.selected_key = None;
                         self.selected_key_type = None;
                         self.value_display = ValueDisplay::NotLoaded;
                     }
+                    self.tree_dirty = true;
                     self.status = format!("Deleted key: {}", key);
+                }
+                BrowserResponse::KeysRenamed { from, to } => {
+                    if let Some(entry) = self
+                        .keys
+                        .iter_mut()
+                        .find(|entry| entry.info.name == from)
+                    {
+                        entry.info.name = to.clone();
+                    }
+                    self.selected_keys.remove(&from);
+                    self.selected_keys.insert(to.clone());
+                    if self.selected_key.as_ref() == Some(&from) {
+                        self.selected_key = Some(to.clone());
+                    }
+                    self.tree_dirty = true;
+                    self.rename_dialog = None;
+                    self.rename_new_name.clear();
+                    self.status = format!("Key renamed: {from} -> {to}");
+                }
+                BrowserResponse::KeysDeleted { count } => {
+                    if let Some(keys) = self.confirm_delete_keys.take() {
+                        self.keys
+                            .retain(|entry| !keys.contains(&entry.info.name));
+                    }
+                    self.selected_keys.clear();
+                    let selected_still_exists = self
+                        .selected_key
+                        .as_ref()
+                        .is_some_and(|key| self.keys.iter().any(|entry| &entry.info.name == key));
+                    if !selected_still_exists {
+                        self.selected_key = None;
+                        self.selected_key_type = None;
+                        self.value_display = ValueDisplay::NotLoaded;
+                    }
+                    self.tree_dirty = true;
+                    self.status = format!("Deleted {count} keys");
                 }
                 BrowserResponse::TtlUpdated { key, ttl } => {
                     if let Some(entry) = self.keys.iter_mut().find(|k| k.info.name == key) {
@@ -1940,6 +2568,8 @@ impl RedisBrowserUi {
         self.selected_key = Some(key_name.clone());
         self.value_display = ValueDisplay::NotLoaded;
         self.value_filter.clear();
+        self.value_format = ValueFormat::Auto;
+        self.string_formatted = None;
         self.string_editing = false;
         self.hash_edit_field = None;
         self.zset_edit_score = None;
@@ -1963,6 +2593,9 @@ impl RedisBrowserUi {
         self.cursor = 0;
         self.has_more = false;
         self.error = None;
+        self.selected_keys.clear();
+        self.last_clicked_key = None;
+        self.tree_dirty = true;
         self.select_key(key_name.clone());
         self.scan_keys();
     }
@@ -1982,6 +2615,9 @@ impl RedisBrowserUi {
         self.cursor = 0;
         self.has_more = false;
         self.error = None;
+        self.selected_keys.clear();
+        self.last_clicked_key = None;
+        self.tree_dirty = true;
         self.select_key(key_name.clone());
         self.scan_keys();
         self.confirm_delete = Some(key_name);
@@ -2002,6 +2638,9 @@ impl RedisBrowserUi {
         self.selected_key = None;
         self.value_display = ValueDisplay::NotLoaded;
         self.value_filter.clear();
+        self.selected_keys.clear();
+        self.last_clicked_key = None;
+        self.tree_dirty = true;
         self.scan_keys();
     }
 
@@ -2013,6 +2652,9 @@ impl RedisBrowserUi {
         self.selected_key = None;
         self.value_display = ValueDisplay::NotLoaded;
         self.value_filter.clear();
+        self.selected_keys.clear();
+        self.last_clicked_key = None;
+        self.tree_dirty = true;
         self.scan_keys();
     }
 
@@ -2041,7 +2683,7 @@ impl RedisBrowserUi {
     fn scan_keys(&mut self) {
         self.is_loading = true;
         let tx = self.response_tx.clone();
-        let manager = self.metadata_service.clone();
+        let service = self.redis_service.clone();
         let connection_id = self.connection_id;
         let database = self.selected_database;
         let pattern = if self.pattern.is_empty() {
@@ -2051,38 +2693,20 @@ impl RedisBrowserUi {
         };
 
         self.runtime.spawn(async move {
-            match manager
-                .scan_redis_keys(
-                    connection_id,
-                    database,
-                    pattern.as_deref(),
-                    0,
-                    SCAN_PAGE_SIZE,
-                    None,
-                )
+            match service
+                .scan_keys(connection_id, database, pattern.as_deref(), 0, SCAN_PAGE_SIZE)
                 .await
             {
-                Ok((next_cursor, nodes)) => {
-                    let mut keys_with_size = Vec::new();
-                    for node in nodes {
-                        if let Some(name) = &node.path.object {
-                            let info = RedisKeyInfo {
-                                name: name.clone(),
-                                type_name: node
-                                    .detail
-                                    .as_ref()
-                                    .and_then(|d| parse_type_from_detail(d))
-                                    .unwrap_or_else(|| "string".to_string()),
-                                ttl_seconds: parse_ttl_from_detail(node.detail.as_deref()),
-                                size_hint: None,
-                            };
-                            keys_with_size.push((info, None));
-                        }
-                    }
+                Ok(scan) => {
+                    let keys_with_size = scan
+                        .keys
+                        .into_iter()
+                        .map(|info| (info, None))
+                        .collect::<Vec<_>>();
                     let _ = tx.send(BrowserResponse::KeysScanned {
-                        cursor: next_cursor,
+                        cursor: scan.next_cursor,
                         keys: keys_with_size,
-                        has_more: next_cursor != 0,
+                        has_more: scan.next_cursor != 0,
                     });
                 }
                 Err(e) => {
@@ -2102,7 +2726,7 @@ impl RedisBrowserUi {
 
         self.is_loading = true;
         let tx = self.response_tx.clone();
-        let manager = self.metadata_service.clone();
+        let service = self.redis_service.clone();
         let connection_id = self.connection_id;
         let database = self.selected_database;
         let pattern = if self.pattern.is_empty() {
@@ -2113,38 +2737,26 @@ impl RedisBrowserUi {
         let cursor = self.cursor;
 
         self.runtime.spawn(async move {
-            match manager
-                .scan_redis_keys(
+            match service
+                .scan_keys(
                     connection_id,
                     database,
                     pattern.as_deref(),
                     cursor,
                     SCAN_PAGE_SIZE,
-                    None,
                 )
                 .await
             {
-                Ok((next_cursor, nodes)) => {
-                    let mut keys_with_size = Vec::new();
-                    for node in nodes {
-                        if let Some(name) = &node.path.object {
-                            let info = RedisKeyInfo {
-                                name: name.clone(),
-                                type_name: node
-                                    .detail
-                                    .as_ref()
-                                    .and_then(|d| parse_type_from_detail(d))
-                                    .unwrap_or_else(|| "string".to_string()),
-                                ttl_seconds: parse_ttl_from_detail(node.detail.as_deref()),
-                                size_hint: None,
-                            };
-                            keys_with_size.push((info, None));
-                        }
-                    }
+                Ok(scan) => {
+                    let keys_with_size = scan
+                        .keys
+                        .into_iter()
+                        .map(|info| (info, None))
+                        .collect::<Vec<_>>();
                     let _ = tx.send(BrowserResponse::KeysScanned {
-                        cursor: next_cursor,
+                        cursor: scan.next_cursor,
                         keys: keys_with_size,
-                        has_more: next_cursor != 0,
+                        has_more: scan.next_cursor != 0,
                     });
                 }
                 Err(e) => {
@@ -2234,6 +2846,48 @@ impl RedisBrowserUi {
                 Err(e) => {
                     let _ = tx.send(BrowserResponse::Error(format!(
                         "Failed to delete key: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn rename_key(&mut self, from: String, to: String) {
+        let tx = self.response_tx.clone();
+        let service = self.redis_service.clone();
+        let connection_id = self.connection_id;
+        let database = self.selected_database;
+
+        self.runtime.spawn(async move {
+            match service.rename_key(connection_id, database, &from, &to).await {
+                Ok(()) => {
+                    let _ = tx.send(BrowserResponse::KeysRenamed { from, to });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to rename key: {}",
+                        e.message
+                    )));
+                }
+            }
+        });
+    }
+
+    fn delete_keys(&mut self, keys: Vec<String>) {
+        let tx = self.response_tx.clone();
+        let service = self.redis_service.clone();
+        let connection_id = self.connection_id;
+        let database = self.selected_database;
+
+        self.runtime.spawn(async move {
+            match service.delete_keys(connection_id, database, &keys).await {
+                Ok(_) => {
+                    let _ = tx.send(BrowserResponse::KeysDeleted { count: keys.len() });
+                }
+                Err(e) => {
+                    let _ = tx.send(BrowserResponse::Error(format!(
+                        "Failed to delete keys: {}",
                         e.message
                     )));
                 }

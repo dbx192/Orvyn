@@ -1,4 +1,4 @@
-//! Redis adapter crate.
+﻿//! Redis adapter crate.
 
 pub use redis;
 
@@ -37,7 +37,7 @@ impl ConnectionTester for RedisConnectionTester {
         profile.validate()?;
 
         let started_at = Instant::now();
-        let url = redis_url(profile, password)?;
+        let url = redis_url(profile, password, profile_database(profile)?)?;
         let client = redis::Client::open(url.as_str()).map_err(|error| {
             AppError::new(ErrorKind::Connection, "invalid Redis connection options")
                 .with_detail(redact_connection_url(&error.to_string()))
@@ -79,20 +79,32 @@ impl RedisMetadataReader for RedisMetadataReaderImpl {
         password: Option<&str>,
     ) -> Result<Vec<RedisDatabase>> {
         profile.validate()?;
-        let client = redis_client(profile, password)?;
+        let client = redis_client(profile, password, 0)?;
         let mut conn = client
             .get_multiplexed_async_connection()
             .await
             .map_err(redis_connection_error)?;
         let count = redis_database_count(&mut conn).await.unwrap_or(16);
-        let mut databases = Vec::new();
 
+        // A single pipeline keeps SELECT/DBSIZE ordering on one connection,
+        // so the whole database listing costs one round trip.
+        let mut pipe = redis::pipe();
         for index in 0..count {
-            let key_count = redis_db_key_count(&mut conn, index).await.ok();
-            databases.push(RedisDatabase { index, key_count });
+            pipe.cmd("SELECT").arg(index).ignore();
+            pipe.cmd("DBSIZE");
         }
+        let sizes: Vec<u64> = pipe
+            .query_async(&mut conn)
+            .await
+            .map_err(redis_query_error)?;
 
-        Ok(databases)
+        Ok((0..count)
+            .zip(sizes)
+            .map(|(index, key_count)| RedisDatabase {
+                index,
+                key_count: Some(key_count),
+            })
+            .collect())
     }
 
     async fn scan_keys(
@@ -105,66 +117,146 @@ impl RedisMetadataReader for RedisMetadataReaderImpl {
         limit: u32,
     ) -> Result<RedisKeyScan> {
         profile.validate()?;
-        let client = redis_client(profile, password)?;
+        let client = redis_client(profile, password, database)?;
         let mut conn = client
             .get_multiplexed_async_connection()
             .await
             .map_err(redis_connection_error)?;
-        select_database(&mut conn, database).await?;
-
-        let mut command = redis::cmd("SCAN");
-        command.arg(cursor).arg("COUNT").arg(limit.max(1));
-        if let Some(pattern) = pattern.filter(|value| !value.is_empty()) {
-            command.arg("MATCH").arg(pattern);
-        }
-
-        let (next_cursor, keys): (u64, Vec<String>) = command
-            .query_async(&mut conn)
-            .await
-            .map_err(redis_query_error)?;
-        let mut infos = Vec::with_capacity(keys.len());
-
-        for key in keys {
-            let type_name: String = redis::cmd("TYPE")
-                .arg(&key)
-                .query_async(&mut conn)
-                .await
-                .map_err(redis_query_error)?;
-            let ttl_seconds: i64 = redis::cmd("TTL")
-                .arg(&key)
-                .query_async(&mut conn)
-                .await
-                .map_err(redis_query_error)?;
-            infos.push(RedisKeyInfo {
-                name: key,
-                type_name,
-                ttl_seconds: (ttl_seconds >= 0).then_some(ttl_seconds),
-                size_hint: None,
-            });
-        }
+        let (next_cursor, keys) = pipeline_scan(&mut conn, pattern, cursor, limit).await?;
 
         Ok(RedisKeyScan {
             next_cursor,
-            keys: infos,
+            keys,
         })
     }
 }
 
-fn redis_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<String> {
-    let host = profile.required_host()?;
-    let port = profile.required_port()?;
-    let database = profile
+/// SCAN one page and resolve each key's TYPE/TTL in a single pipelined round
+/// trip instead of two blocking commands per key.
+pub async fn pipeline_scan(
+    conn: &mut redis::aio::MultiplexedConnection,
+    pattern: Option<&str>,
+    cursor: u64,
+    limit: u32,
+) -> Result<(u64, Vec<RedisKeyInfo>)> {
+    let mut command = redis::cmd("SCAN");
+    command.arg(cursor).arg("COUNT").arg(limit.max(1));
+    if let Some(pattern) = pattern.filter(|value| !value.is_empty()) {
+        command.arg("MATCH").arg(pattern);
+    }
+
+    let (next_cursor, keys): (u64, Vec<String>) = command
+        .query_async(conn)
+        .await
+        .map_err(redis_query_error)?;
+    if keys.is_empty() {
+        return Ok((next_cursor, Vec::new()));
+    }
+
+    let mut pipe = redis::pipe();
+    for key in &keys {
+        pipe.cmd("TYPE").arg(key);
+        pipe.cmd("TTL").arg(key);
+    }
+    let replies: Vec<redis::Value> = match pipe.query_async(conn).await {
+        Ok(replies) => replies,
+        Err(_) => {
+            let infos = scan_page_sequential(conn, &keys).await?;
+            return Ok((next_cursor, infos));
+        }
+    };
+
+    if replies.len() != keys.len() * 2 {
+        let infos = scan_page_sequential(conn, &keys).await?;
+        return Ok((next_cursor, infos));
+    }
+
+    let mut infos = Vec::with_capacity(keys.len());
+    for (key, pair) in keys.iter().zip(replies.chunks_exact(2)) {
+        let Some(type_name) = decode_type_reply(&pair[0]) else {
+            let infos = scan_page_sequential(conn, &keys).await?;
+            return Ok((next_cursor, infos));
+        };
+        let Some(ttl) = decode_int_reply(&pair[1]) else {
+            let infos = scan_page_sequential(conn, &keys).await?;
+            return Ok((next_cursor, infos));
+        };
+        infos.push(RedisKeyInfo {
+            name: key.clone(),
+            type_name,
+            ttl_seconds: (ttl >= 0).then_some(ttl),
+            size_hint: None,
+        });
+    }
+
+    Ok((next_cursor, infos))
+}
+
+fn decode_type_reply(value: &redis::Value) -> Option<String> {
+    match value {
+        redis::Value::Status(text) => Some(text.clone()),
+        redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok(),
+        _ => None,
+    }
+}
+
+fn decode_int_reply(value: &redis::Value) -> Option<i64> {
+    match value {
+        redis::Value::Int(number) => Some(*number),
+        redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok()?.parse().ok(),
+        _ => None,
+    }
+}
+
+async fn scan_page_sequential(
+    conn: &mut redis::aio::MultiplexedConnection,
+    keys: &[String],
+) -> Result<Vec<RedisKeyInfo>> {
+    let mut infos = Vec::with_capacity(keys.len());
+    for key in keys {
+        let type_name: String = redis::cmd("TYPE")
+            .arg(key)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        let ttl_seconds: i64 = redis::cmd("TTL")
+            .arg(key)
+            .query_async(conn)
+            .await
+            .map_err(redis_query_error)?;
+        infos.push(RedisKeyInfo {
+            name: key.clone(),
+            type_name,
+            ttl_seconds: (ttl_seconds >= 0).then_some(ttl_seconds),
+            size_hint: None,
+        });
+    }
+    Ok(infos)
+}
+
+fn profile_database(profile: &ConnectionProfile) -> Result<u8> {
+    profile
         .database
         .as_deref()
         .filter(|value| !value.is_empty())
-        .unwrap_or("0");
-    let database_index = database.parse::<u8>().map_err(|error| {
-        AppError::new(
-            ErrorKind::Validation,
-            "Redis database must be between 0 and 255",
-        )
-        .with_detail(error.to_string())
-    })?;
+        .unwrap_or("0")
+        .parse::<u8>()
+        .map_err(|error| {
+            AppError::new(
+                ErrorKind::Validation,
+                "Redis database must be between 0 and 255",
+            )
+            .with_detail(error.to_string())
+        })
+}
+
+fn redis_url(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+    database: u8,
+) -> Result<String> {
+    let host = profile.required_host()?;
+    let port = profile.required_port()?;
     let username = profile.username.as_deref().unwrap_or_default();
 
     let auth = match (
@@ -183,11 +275,15 @@ fn redis_url(profile: &ConnectionProfile, password: Option<&str>) -> Result<Stri
         (true, None) => String::new(),
     };
 
-    Ok(format!("redis://{auth}{host}:{port}/{database_index}"))
+    Ok(format!("redis://{auth}{host}:{port}/{database}"))
 }
 
-fn redis_client(profile: &ConnectionProfile, password: Option<&str>) -> Result<redis::Client> {
-    let url = redis_url(profile, password)?;
+fn redis_client(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+    database: u8,
+) -> Result<redis::Client> {
+    let url = redis_url(profile, password, database)?;
     redis::Client::open(url.as_str()).map_err(|error| {
         AppError::new(ErrorKind::Connection, "invalid Redis connection options")
             .with_detail(redact_connection_url(&error.to_string()))
@@ -200,8 +296,12 @@ fn redis_connection_error(error: redis::RedisError) -> AppError {
 }
 
 fn redis_query_error(error: redis::RedisError) -> AppError {
-    AppError::new(ErrorKind::Query, "failed to query Redis")
-        .with_detail(redact_connection_url(&error.to_string()))
+    let kind = if error.is_connection_dropped() || error.is_io_error() || error.is_timeout() {
+        ErrorKind::Connection
+    } else {
+        ErrorKind::Query
+    };
+    AppError::new(kind, "failed to query Redis").with_detail(redact_connection_url(&error.to_string()))
 }
 
 async fn redis_database_count(conn: &mut redis::aio::MultiplexedConnection) -> Result<u8> {
@@ -220,26 +320,6 @@ async fn redis_database_count(conn: &mut redis::aio::MultiplexedConnection) -> R
         AppError::new(ErrorKind::Query, "invalid Redis databases value")
             .with_detail(error.to_string())
     })
-}
-
-async fn redis_db_key_count(
-    conn: &mut redis::aio::MultiplexedConnection,
-    database: u8,
-) -> Result<u64> {
-    select_database(conn, database).await?;
-    redis::cmd("DBSIZE")
-        .query_async(conn)
-        .await
-        .map_err(redis_query_error)
-}
-
-async fn select_database(conn: &mut redis::aio::MultiplexedConnection, database: u8) -> Result<()> {
-    let _: String = redis::cmd("SELECT")
-        .arg(database)
-        .query_async(conn)
-        .await
-        .map_err(redis_query_error)?;
-    Ok(())
 }
 
 fn redis_cell(bytes: Vec<u8>) -> CellValue {
@@ -272,7 +352,7 @@ fn is_textual(value: &str) -> bool {
 impl RedisConnector for RedisConnectorImpl {
     async fn test_connection(&self, profile: &ConnectionProfile) -> Result<()> {
         profile.validate()?;
-        let url = redis_url(profile, None)?;
+        let url = redis_url(profile, None, profile_database(profile)?)?;
         let client = redis::Client::open(url.as_str()).map_err(|error| {
             AppError::new(ErrorKind::Connection, "invalid Redis connection options")
                 .with_detail(redact_connection_url(&error.to_string()))
@@ -352,9 +432,10 @@ impl RedisConnectorWithAuth {
     pub async fn connect(
         profile: &ConnectionProfile,
         password: Option<&str>,
+        database: u8,
     ) -> Result<redis::aio::MultiplexedConnection> {
         profile.validate()?;
-        let client = redis_client(profile, password)?;
+        let client = redis_client(profile, password, database)?;
         client
             .get_multiplexed_async_connection()
             .await
@@ -363,10 +444,8 @@ impl RedisConnectorWithAuth {
 
     pub async fn get_key_value(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
     ) -> Result<RedisValue> {
-        select_database(conn, database).await?;
         let type_name: String = redis::cmd("TYPE")
             .arg(key)
             .query_async(conn)
@@ -445,10 +524,8 @@ impl RedisConnectorWithAuth {
 
     pub async fn get_key_info(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
     ) -> Result<RedisKeyInfo> {
-        select_database(conn, database).await?;
         let type_name: String = redis::cmd("TYPE")
             .arg(key)
             .query_async(conn)
@@ -463,7 +540,7 @@ impl RedisConnectorWithAuth {
             .query_async(conn)
             .await
             .map_err(redis_query_error)?;
-        let size_hint = Some(Self::get_key_size(conn, database, key).await?);
+        let size_hint = Some(Self::get_key_size(conn, key).await?);
 
         Ok(RedisKeyInfo {
             name: key.to_string(),
@@ -475,10 +552,8 @@ impl RedisConnectorWithAuth {
 
     pub async fn delete_key(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
     ) -> Result<()> {
-        select_database(conn, database).await?;
         redis::cmd("DEL")
             .arg(key)
             .query_async::<_, i32>(conn)
@@ -487,13 +562,37 @@ impl RedisConnectorWithAuth {
         Ok(())
     }
 
+    pub async fn delete_keys(
+        conn: &mut redis::aio::MultiplexedConnection,
+        keys: &[String],
+    ) -> Result<u64> {
+        let mut cmd = redis::cmd("DEL");
+        for key in keys {
+            cmd.arg(key);
+        }
+        let deleted: u64 = cmd.query_async(conn).await.map_err(redis_query_error)?;
+        Ok(deleted)
+    }
+
+    pub async fn rename_key(
+        conn: &mut redis::aio::MultiplexedConnection,
+        from: &str,
+        to: &str,
+    ) -> Result<()> {
+        redis::cmd("RENAME")
+            .arg(from)
+            .arg(to)
+            .query_async::<_, ()>(conn)
+            .await
+            .map_err(redis_query_error)?;
+        Ok(())
+    }
+
     pub async fn update_ttl(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         ttl_seconds: Option<i64>,
     ) -> Result<()> {
-        select_database(conn, database).await?;
         match ttl_seconds {
             Some(ttl) if ttl > 0 => {
                 redis::cmd("EXPIRE")
@@ -516,10 +615,8 @@ impl RedisConnectorWithAuth {
 
     pub async fn get_key_size(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
     ) -> Result<u64> {
-        select_database(conn, database).await?;
         let type_name: String = redis::cmd("TYPE")
             .arg(key)
             .query_async(conn)
@@ -559,12 +656,10 @@ impl RedisConnectorWithAuth {
 
     pub async fn set_string_value(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         value: &str,
         ttl_seconds: Option<u64>,
     ) -> Result<()> {
-        select_database(conn, database).await?;
         let mut cmd = redis::cmd("SET");
         cmd.arg(key).arg(value);
         if let Some(ttl) = ttl_seconds {
@@ -580,12 +675,10 @@ impl RedisConnectorWithAuth {
 
     pub async fn hset_field(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         field: &str,
         value: &str,
     ) -> Result<u32> {
-        select_database(conn, database).await?;
         let result: u32 = redis::cmd("HSET")
             .arg(key)
             .arg(field)
@@ -598,11 +691,9 @@ impl RedisConnectorWithAuth {
 
     pub async fn hdel_field(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         field: &str,
     ) -> Result<u32> {
-        select_database(conn, database).await?;
         let result: u32 = redis::cmd("HDEL")
             .arg(key)
             .arg(field)
@@ -614,11 +705,9 @@ impl RedisConnectorWithAuth {
 
     pub async fn lpush(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         value: &str,
     ) -> Result<i64> {
-        select_database(conn, database).await?;
         let result: i64 = redis::cmd("LPUSH")
             .arg(key)
             .arg(value)
@@ -630,11 +719,9 @@ impl RedisConnectorWithAuth {
 
     pub async fn rpush(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         value: &str,
     ) -> Result<i64> {
-        select_database(conn, database).await?;
         let result: i64 = redis::cmd("RPUSH")
             .arg(key)
             .arg(value)
@@ -646,10 +733,8 @@ impl RedisConnectorWithAuth {
 
     pub async fn lpop(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
     ) -> Result<Option<String>> {
-        select_database(conn, database).await?;
         let result: Option<String> = redis::cmd("LPOP")
             .arg(key)
             .query_async(conn)
@@ -660,10 +745,8 @@ impl RedisConnectorWithAuth {
 
     pub async fn rpop(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
     ) -> Result<Option<String>> {
-        select_database(conn, database).await?;
         let result: Option<String> = redis::cmd("RPOP")
             .arg(key)
             .query_async(conn)
@@ -674,12 +757,10 @@ impl RedisConnectorWithAuth {
 
     pub async fn lset(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         index: i64,
         value: &str,
     ) -> Result<()> {
-        select_database(conn, database).await?;
         redis::cmd("LSET")
             .arg(key)
             .arg(index)
@@ -692,11 +773,9 @@ impl RedisConnectorWithAuth {
 
     pub async fn lrem(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         value: &str,
     ) -> Result<i64> {
-        select_database(conn, database).await?;
         let result: i64 = redis::cmd("LREM")
             .arg(key)
             .arg(1)
@@ -709,12 +788,10 @@ impl RedisConnectorWithAuth {
 
     pub async fn lrange(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         start: i64,
         stop: i64,
     ) -> Result<Vec<CellValue>> {
-        select_database(conn, database).await?;
         let items: Vec<String> = redis::cmd("LRANGE")
             .arg(key)
             .arg(start)
@@ -727,11 +804,9 @@ impl RedisConnectorWithAuth {
 
     pub async fn sadd(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         member: &str,
     ) -> Result<u32> {
-        select_database(conn, database).await?;
         let result: u32 = redis::cmd("SADD")
             .arg(key)
             .arg(member)
@@ -743,11 +818,9 @@ impl RedisConnectorWithAuth {
 
     pub async fn srem(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         member: &str,
     ) -> Result<u32> {
-        select_database(conn, database).await?;
         let result: u32 = redis::cmd("SREM")
             .arg(key)
             .arg(member)
@@ -759,12 +832,10 @@ impl RedisConnectorWithAuth {
 
     pub async fn zadd(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         member: &str,
         score: f64,
     ) -> Result<u32> {
-        select_database(conn, database).await?;
         let result: u32 = redis::cmd("ZADD")
             .arg(key)
             .arg(score)
@@ -777,11 +848,9 @@ impl RedisConnectorWithAuth {
 
     pub async fn zrem(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         member: &str,
     ) -> Result<u32> {
-        select_database(conn, database).await?;
         let result: u32 = redis::cmd("ZREM")
             .arg(key)
             .arg(member)
@@ -793,12 +862,10 @@ impl RedisConnectorWithAuth {
 
     pub async fn zrange(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         start: i64,
         stop: i64,
     ) -> Result<Vec<(CellValue, f64)>> {
-        select_database(conn, database).await?;
         let members: Vec<(String, f64)> = redis::cmd("ZRANGE")
             .arg(key)
             .arg(start)
@@ -815,11 +882,9 @@ impl RedisConnectorWithAuth {
 
     pub async fn zscore(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         member: &str,
     ) -> Result<Option<f64>> {
-        select_database(conn, database).await?;
         let result: Option<f64> = redis::cmd("ZSCORE")
             .arg(key)
             .arg(member)
@@ -831,13 +896,11 @@ impl RedisConnectorWithAuth {
 
     pub async fn create_key(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         key: &str,
         key_type: &str,
         initial_value: &str,
         ttl_seconds: Option<u64>,
     ) -> Result<()> {
-        select_database(conn, database).await?;
         match key_type {
             "string" => {
                 let mut cmd = redis::cmd("SET");
@@ -954,10 +1017,8 @@ impl RedisConnectorWithAuth {
 
     pub async fn execute_command(
         conn: &mut redis::aio::MultiplexedConnection,
-        database: u8,
         command: &str,
     ) -> Result<RedisValue> {
-        select_database(conn, database).await?;
         let tokens = normalize_cli_tokens(split_command(command)?);
         let Some((head, tail)) = tokens.split_first() else {
             return Err(AppError::validation("Redis command cannot be empty"));
