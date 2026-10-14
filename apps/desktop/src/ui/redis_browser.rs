@@ -699,6 +699,11 @@ impl RedisBrowserUi {
 
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) -> Option<RedisBrowserEvent> {
         self.drain_responses();
+        if self.is_loading {
+            // Keep the frame loop alive while async responses are in flight,
+            // otherwise results only appear on the next user interaction.
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
 
         let style = RedisBrowserStyle::from_ui(ui);
         Frame::none()

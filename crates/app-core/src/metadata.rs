@@ -653,7 +653,7 @@ impl MetadataService {
                             node = node.detail(format!("{document_count} docs"));
                         }
                         if let Some(health) = index.health {
-                            node = node.detail(format!("{health}"));
+                            node = node.detail(health.to_string());
                         }
                         node
                     })

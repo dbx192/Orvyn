@@ -405,7 +405,7 @@ impl DesktopApp {
                                 palette.danger
                             }),
                         );
-                        if self.state.errors.len() > 0
+                        if !self.state.errors.is_empty()
                             && ui
                                 .small_button(tr("View"))
                                 .on_hover_text(tr("Open error details"))

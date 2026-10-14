@@ -396,7 +396,7 @@ impl SearchConnector for ElasticsearchSearchConnector {
         let auth = elasticsearch_auth(profile, password);
         make_request(HttpRequest::new(
             Method::GET,
-            format!("{base}"),
+            base.to_string(),
             auth,
             "failed to reach Elasticsearch",
         ))
@@ -547,7 +547,7 @@ impl ConnectionTester for ElasticsearchConnectionTester {
         let auth = elasticsearch_auth(profile, password);
         let json = make_request(HttpRequest::new(
             Method::GET,
-            format!("{base}"),
+            base.to_string(),
             auth,
             "failed to reach Elasticsearch",
         ))

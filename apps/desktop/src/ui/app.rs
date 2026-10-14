@@ -29,8 +29,9 @@ use app_core::{
     connection::ConnectionManager, metadata::MetadataService, query::QueryService,
     redis_service::RedisService, search_service::SearchService, session::SessionManager,
 };
+use db_common::ConnectionId;
 use eframe::egui::{Context, Id, Key, Modifiers};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use tokio::runtime::Handle;
 
 pub struct DesktopApp {
@@ -44,7 +45,10 @@ pub struct DesktopApp {
     table_structures: HashMap<Id, TableStructureView>,
     active_structure: Option<Id>,
     import_wizard: Option<ImportWizard>,
-    redis_browser: Option<RedisBrowserUi>,
+    /// One Redis browser per open connection (multi-tab, like table editors).
+    redis_browsers: BTreeMap<ConnectionId, RedisBrowserUi>,
+    redis_tab_order: Vec<ConnectionId>,
+    active_redis_browser: Option<ConnectionId>,
     search_browser: Option<SearchBrowser>,
     error_window_open: bool,
     active_panel: ActivePanel,
@@ -88,6 +92,7 @@ enum ActivePanel {
 }
 
 impl DesktopApp {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         _app_name: String,
         connection_manager: ConnectionManager,
@@ -126,7 +131,9 @@ impl DesktopApp {
             table_structures: HashMap::new(),
             active_structure: None,
             import_wizard: None,
-            redis_browser: None,
+            redis_browsers: BTreeMap::new(),
+            redis_tab_order: Vec::new(),
+            active_redis_browser: None,
             error_window_open: false,
             active_panel: ActivePanel::QueryEditor,
             pending_table_load: None,

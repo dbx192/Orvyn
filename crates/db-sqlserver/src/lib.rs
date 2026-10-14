@@ -742,7 +742,7 @@ fn civil_from_days(z: i64) -> Option<(i32, u32, u32)> {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
     let y = (if m <= 2 { y + 1 } else { y }) as i32;
-    (m >= 1 && m <= 12 && d >= 1 && d <= 31).then_some((y, m, d))
+    ((1..=12).contains(&m) && (1..=31).contains(&d)).then_some((y, m, d))
 }
 
 trait CellValueHelper {

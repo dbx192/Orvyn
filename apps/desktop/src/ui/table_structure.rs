@@ -170,15 +170,15 @@ impl AlterTableRequest {
 }
 
 fn local_ddl_dir() -> PathBuf {
-    let base = env::var_os("ORVYN_CONFIG_DIR").map(PathBuf::from).or_else(|| {
+    
+    env::var_os("ORVYN_CONFIG_DIR").map(PathBuf::from).or_else(|| {
         #[cfg(windows)]
         { env::var_os("APPDATA").map(|path| PathBuf::from(path).join("Orvyn")) }
         #[cfg(not(windows))]
         { None }
     }).or_else(|| env::var_os("XDG_CONFIG_HOME").map(|path| PathBuf::from(path).join("orvyn")))
       .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-      .join("ddl");
-    base
+      .join("ddl")
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -2048,7 +2048,7 @@ impl TableStructureView {
                             .changed()
                         {
                             let value = default.trim();
-                            column.default_value = (!value.is_empty()).then(|| default);
+                            column.default_value = (!value.is_empty()).then_some(default);
                         }
                         ui.end_row();
                         ui.label(tr("Nullable"));

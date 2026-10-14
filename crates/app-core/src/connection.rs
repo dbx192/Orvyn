@@ -185,7 +185,7 @@ impl ConnectionManager {
             match result {
                 Ok(report) => return Ok(report),
                 Err(error)
-                    if attempt < CONNECTION_TEST_RETRIES
+                    if usize::from(attempt) < usize::from(CONNECTION_TEST_RETRIES)
                         && is_transient_connection_error(&error) =>
                 {
                     debug!(

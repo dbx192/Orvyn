@@ -347,7 +347,9 @@ impl DesktopApp {
                                     connection_id,
                                     database,
                                 } => {
-                                    if let Some(browser) = &mut self.redis_browser {
+                                    if let Some(browser) =
+                                        self.redis_browsers.get_mut(&connection_id)
+                                    {
                                         browser.refresh_database(connection_id, database);
                                     }
                                     self.state
@@ -1148,9 +1150,9 @@ impl DesktopApp {
     ) -> Option<(db_common::ConnectionId, Option<String>, Option<String>, String)> {
         self.active_structure
             .and_then(|id| self.table_structures.get(&id))
-            .and_then(|v| {
+            .map(|v| {
                 let (cid, db, sc, tbl) = v.load_target();
-                Some((cid, db, sc, tbl))
+                (cid, db, sc, tbl)
             })
     }
 }

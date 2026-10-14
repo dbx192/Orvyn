@@ -145,10 +145,7 @@ fn unwrap_wrapper(ty: &str) -> &str {
     if lower.starts_with("nullable(") || lower.starts_with("lowcardinality(") {
         if let Some(open) = ty.find('(') {
             if let Some(inner) = ty.get(open + 1..) {
-                if inner.ends_with(')') {
-                    return &inner[..inner.len() - 1];
-                }
-                return inner;
+                return inner.strip_suffix(')').unwrap_or(inner);
             }
         }
     }

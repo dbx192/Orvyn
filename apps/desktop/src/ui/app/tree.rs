@@ -190,7 +190,7 @@ impl DesktopApp {
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     self.ensure_redis_browser(connection_id);
-                    if let Some(redis_browser) = &mut self.redis_browser {
+                    if let Some(redis_browser) = self.redis_browsers.get_mut(&connection_id) {
                         redis_browser.load_key(connection_id, database_index, key.clone());
                     }
                     self.active_panel = ActivePanel::RedisBrowser;
@@ -353,7 +353,7 @@ impl DesktopApp {
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     self.ensure_redis_browser(connection_id);
-                    if let Some(redis_browser) = &mut self.redis_browser {
+                    if let Some(redis_browser) = self.redis_browsers.get_mut(&connection_id) {
                         redis_browser.prompt_delete_key(connection_id, database_index, key.clone());
                     }
                     self.active_panel = ActivePanel::RedisBrowser;
@@ -381,13 +381,14 @@ impl DesktopApp {
                     .set_status("Connection saved; object tree refreshed");
             }
             ConnectionChange::Deleted(id) => {
-                if self
-                    .redis_browser
-                    .as_ref()
-                    .is_some_and(|browser| browser.connection_id() == id)
-                {
-                    self.redis_browser = None;
-                    if matches!(self.active_panel, ActivePanel::RedisBrowser) {
+                if self.redis_browsers.remove(&id).is_some() {
+                    self.redis_tab_order.retain(|tab_id| *tab_id != id);
+                    if self.active_redis_browser == Some(id) {
+                        self.active_redis_browser = self.redis_tab_order.first().copied();
+                    }
+                    if self.active_redis_browser.is_none()
+                        && matches!(self.active_panel, ActivePanel::RedisBrowser)
+                    {
                         self.active_panel = ActivePanel::QueryEditor;
                     }
                 }
@@ -398,20 +399,17 @@ impl DesktopApp {
     }
 
     fn ensure_redis_browser(&mut self, connection_id: ConnectionId) {
-        let needs_new = self
-            .redis_browser
-            .as_ref()
-            .map(|browser| browser.connection_id() != connection_id)
-            .unwrap_or(true);
-
-        if needs_new {
-            self.redis_browser = Some(RedisBrowserUi::new(
+        if !self.redis_browsers.contains_key(&connection_id) {
+            let browser = RedisBrowserUi::new(
                 connection_id,
                 self.connection_manager.clone(),
                 self.metadata_service.clone(),
                 self.redis_service.clone(),
                 self.runtime.clone(),
-            ));
+            );
+            self.redis_tab_order.push(connection_id);
+            self.redis_browsers.insert(connection_id, browser);
         }
+        self.active_redis_browser = Some(connection_id);
     }
 }

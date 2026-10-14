@@ -3,6 +3,7 @@ use super::{
     ActivePanel, DesktopApp,
 };
 use crate::ui::i18n::{self, text as tr, Locale};
+use db_common::ConnectionId;
 use eframe::egui::{
     pos2, vec2, Align, Button, CentralPanel, Context, Frame, Layout, Margin, Rect, RichText,
     Sense, Spinner, Stroke, TopBottomPanel, Ui,
@@ -173,13 +174,39 @@ impl DesktopApp {
             if self.import_wizard.is_some() {
                 self.workspace_tab(ui, ActivePanel::ImportWizard, &tr("Import"));
             }
-            if matches!(self.active_panel, ActivePanel::RedisBrowser) {
-                let label = self
-                    .redis_browser
-                    .as_ref()
+            // Redis browser tabs: one per connection, like table editor tabs.
+            self.redis_tab_order
+                .retain(|id| self.redis_browsers.contains_key(id));
+            let mut close_redis_tab = None;
+            for id in self.redis_tab_order.iter().copied() {
+                let title = self
+                    .redis_browsers
+                    .get(&id)
                     .map(|browser| browser.tab_title())
                     .unwrap_or_else(|| "Key Browser".to_string());
-                self.workspace_tab(ui, ActivePanel::RedisBrowser, &label);
+                let selected = matches!(self.active_panel, ActivePanel::RedisBrowser)
+                    && self.active_redis_browser == Some(id);
+                let tab_response = ui.selectable_label(selected, title);
+                if tab_response.clicked() {
+                    self.active_panel = ActivePanel::RedisBrowser;
+                    self.active_redis_browser = Some(id);
+                }
+                if selected || tab_response.hovered() {
+                    if ui
+                        .add(Button::new("x"))
+                        .on_hover_text(tr("Close"))
+                        .clicked()
+                    {
+                        close_redis_tab = Some(id);
+                    }
+                } else {
+                    // Preserve the tab width while keeping inactive close
+                    // controls hidden until the pointer reaches the tab.
+                    ui.allocate_exact_size(vec2(18.0, 28.0), Sense::hover());
+                }
+            }
+            if let Some(id) = close_redis_tab {
+                self.close_redis_browser_tab(id);
             }
             if matches!(self.active_panel, ActivePanel::SearchBrowser) {
                 let label = self
@@ -223,6 +250,28 @@ impl DesktopApp {
             .is_some_and(|active| ids.contains(&active))
         {
             self.active_structure = self.active_table_editor;
+        }
+    }
+
+    fn close_redis_browser_tab(&mut self, id: ConnectionId) {
+        let fallback_index = self
+            .redis_tab_order
+            .iter()
+            .position(|tab_id| *tab_id == id)
+            .unwrap_or_default();
+        self.redis_browsers.remove(&id);
+        self.redis_tab_order.retain(|tab_id| *tab_id != id);
+
+        if self.active_redis_browser == Some(id) {
+            self.active_redis_browser = self
+                .redis_tab_order
+                .get(fallback_index.min(self.redis_tab_order.len().saturating_sub(1)))
+                .copied();
+        }
+        if self.active_redis_browser.is_none()
+            && matches!(self.active_panel, ActivePanel::RedisBrowser)
+        {
+            self.active_panel = ActivePanel::QueryEditor;
         }
     }
 
@@ -275,7 +324,7 @@ impl DesktopApp {
                 // Content gets a small left inset so nothing (tabs, toolbar,
                 // empty-state) is flush against the T-layout divider.
                 if matches!(self.active_panel, ActivePanel::RedisBrowser)
-                    && self.redis_browser.is_none()
+                    && self.active_redis_browser.is_none()
                 {
                     self.active_panel = ActivePanel::QueryEditor;
                 }
@@ -415,10 +464,21 @@ impl DesktopApp {
                         }
                     },
                     ActivePanel::RedisBrowser => {
-                        if let Some(redis_browser) = &mut self.redis_browser {
-                            redis_browser.ui(ctx, ui);
-                        } else {
-                            self.active_panel = ActivePanel::QueryEditor;
+                        match self
+                            .active_redis_browser
+                            .and_then(|id| self.redis_browsers.get_mut(&id))
+                        {
+                            Some(browser) => {
+                                // Namespaced per connection so multiple open
+                                // browsers never collide on inner id_sources.
+                                let connection_id = browser.connection_id();
+                                ui.push_id(connection_id, |ui| {
+                                    browser.ui(ctx, ui);
+                                });
+                            }
+                            None => {
+                                self.active_panel = ActivePanel::QueryEditor;
+                            }
                         }
                     }
                     ActivePanel::SearchBrowser => {

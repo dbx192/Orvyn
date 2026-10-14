@@ -22,6 +22,9 @@ use tokio::runtime::Handle;
 
 const SEARCH_LIMIT: u32 = 100;
 
+/// Shared async slot for streaming query output.
+type SharedQueryCell = Arc<Mutex<Option<Result<String, String>>>>;
+
 pub struct SearchBrowser {
     search_service: SearchService,
     runtime: Handle,
@@ -33,7 +36,7 @@ pub struct SearchBrowser {
     running: bool,
     result_text: String,
     error: Option<String>,
-    cell: Option<Arc<Mutex<Option<Result<String, String>>>>>,
+    cell: Option<SharedQueryCell>,
 }
 
 impl SearchBrowser {
