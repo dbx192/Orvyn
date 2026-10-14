@@ -126,6 +126,15 @@ impl DesktopApp {
     }
 
     pub(super) fn table_export_window(&mut self, ctx: &Context) {
+        // The async file dialog landed a save path: hand it to the export task.
+        let pending_path = self.pending_table_export_path.lock().unwrap().take();
+        if let Some(path) = pending_path {
+            if let Some(export_request) = self.export_request.take() {
+                self.spawn_table_export(export_request, path);
+            }
+            return;
+        }
+
         let Some(request) = self.export_request.as_mut() else {
             return;
         };
@@ -145,7 +154,8 @@ impl DesktopApp {
             &request.table,
         );
         let table_file_name = request.table.clone();
-        let mut submit_export = None;
+        let mut launch_file_dialog = false;
+        let mut export_format = request.format;
         let mut cancel_export = false;
 
         Window::new(tr("Export Table Data"))
@@ -182,37 +192,32 @@ impl DesktopApp {
                         cancel_export = true;
                     }
                     if ui.button(tr("Export")).clicked() {
-                        let format = request.format;
-                        let ext = match format {
-                            ExportFormat::Csv => "csv",
-                            ExportFormat::Json => "json",
-                            ExportFormat::ExcelCompatible => "tsv",
-                        };
-                        let path = rfd::FileDialog::new()
-                            .set_title("Export Table Data")
-                            .set_file_name(format!("{}.{}", table_file_name, ext))
-                            .add_filter(
-                                match format {
-                                    ExportFormat::Csv => "CSV",
-                                    ExportFormat::Json => "JSON",
-                                    ExportFormat::ExcelCompatible => "Excel",
-                                },
-                                &[ext],
-                            )
-                            .save_file();
-
-                        if let Some(path) = path {
-                            submit_export = Some(path);
-                        }
+                        export_format = request.format;
+                        launch_file_dialog = true;
                     }
                 });
             });
-
-        if let Some(path) = submit_export {
-            if let Some(export_request) = self.export_request.take() {
-                self.spawn_table_export(export_request, path);
+            // The native save dialog must not run synchronously inside the
+            // egui frame: on Windows the modal COM dialog can silently fail
+            // when opened from the winit event loop callback. Pick the path
+            // on a background thread instead.
+            if launch_file_dialog {
+                let (label, ext) = match export_format {
+                    ExportFormat::Csv => ("CSV", "csv"),
+                    ExportFormat::Json => ("JSON", "json"),
+                    ExportFormat::ExcelCompatible => ("Excel", "tsv"),
+                };
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Export Table Data")
+                    .set_file_name(format!("{}.{ext}", table_file_name))
+                    .add_filter(label, &[ext]);
+                let pending_path = self.pending_table_export_path.clone();
+                self.runtime.spawn(async move {
+                    if let Some(file) = dialog.save_file().await {
+                        *pending_path.lock().unwrap() = Some(file.path().to_path_buf());
+                    }
+                });
             }
-        }
 
         if cancel_export {
             self.export_request = None;

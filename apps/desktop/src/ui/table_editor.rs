@@ -141,6 +141,9 @@ pub struct TableEditor {
     page: usize,
     page_size: usize,
     column_filters: BTreeMap<usize, String>,
+    /// Filter state that produced the currently displayed page (server-side
+    /// pushdown); used to avoid refetching on no-op commits.
+    fetched_filters: BTreeMap<usize, String>,
     sort: Option<SortState>,
     scroll_x: f32,
     edits: BTreeMap<CellKey, String>,
@@ -189,6 +192,7 @@ impl TableEditor {
             page,
             page_size,
             column_filters: BTreeMap::new(),
+            fetched_filters: BTreeMap::new(),
             sort: None,
             scroll_x: 0.0,
             edits: BTreeMap::new(),
@@ -521,6 +525,7 @@ impl TableEditor {
                 .min(self.total_pages().saturating_sub(1));
         }
         self.column_filters.clear();
+        self.fetched_filters.clear();
         self.sort = None;
         self.scroll_x = 0.0;
         self.clear_changes();
@@ -1213,9 +1218,14 @@ impl TableEditor {
             *message = Some("Save current table changes before paging".to_string());
             return;
         }
-        if self.pending_page_load.is_some() || self.is_committing() {
+        // Replacing an in-flight page load is allowed: the newest request
+        // wins and the orphaned cell is simply dropped. Dropping new requests
+        // silently made filter commits issued while a slow page load was
+        // running disappear without any feedback.
+        if self.is_committing() {
             return;
         }
+        self.fetched_filters = self.column_filters.clone();
 
         let Some(query_service) = self.query_service.clone() else {
             self.page = next_page.min(self.total_pages().saturating_sub(1));
@@ -1486,10 +1496,14 @@ impl TableEditor {
                 }
                 self.page = 0;
             }
-            // Committing a filter with Enter re-fetches page 0 with the
-            // WHERE clause applied on the server.
+            // Committing a filter (Enter, or leaving the field after a
+            // change) re-fetches page 0 with the WHERE clause applied on the
+            // server.
             let enter_pressed = ui.input(|input| input.key_pressed(Key::Enter));
-            if enter_pressed && (response.has_focus() || response.lost_focus()) {
+            let changed_since_fetch = self.column_filters != self.fetched_filters;
+            let commit = (enter_pressed && (response.has_focus() || response.lost_focus()))
+                || (response.lost_focus() && changed_since_fetch);
+            if commit {
                 self.page = 0;
                 if self.remote_page().is_some() {
                     self.request_remote_page(0, self.page_size as u32, message);

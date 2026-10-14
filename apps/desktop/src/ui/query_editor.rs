@@ -18,7 +18,7 @@ use import_export::{export_query_result_to_file, ExportFormat};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::mpsc::{self, Receiver, Sender},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::runtime::Handle;
@@ -211,6 +211,8 @@ pub struct QueryEditor {
     side_panel_width: f32,
     favorite_name_input: String,
     status: String,
+    /// Completion messages for async exports; polled into `status`.
+    export_status: Arc<Mutex<Option<String>>>,
 }
 
 impl QueryEditor {
@@ -240,6 +242,7 @@ impl QueryEditor {
             side_panel_width: 360.0,
             favorite_name_input: String::new(),
             status: String::new(),
+            export_status: Arc::new(Mutex::new(None)),
         };
         editor.load_connections();
         editor.load_history();
@@ -249,6 +252,10 @@ impl QueryEditor {
 
     pub fn ui(&mut self, ctx: &eframe::egui::Context, ui: &mut Ui) -> Option<String> {
         self.drain_events();
+
+        if let Some(message) = self.export_status.lock().unwrap().take() {
+            self.status = message;
+        }
 
         if self.tabs.is_empty() {
             ui.centered_and_justified(|ui| {
@@ -2116,21 +2123,32 @@ impl QueryEditor {
             ExportFormat::ExcelCompatible => ("Excel", "tsv"),
         };
 
-        let Some(path) = rfd::FileDialog::new()
+        // The native save dialog must not run synchronously inside the egui
+        // frame: on Windows the modal COM dialog can silently fail when
+        // opened from the winit event loop callback. Pick the path on a
+        // background thread instead and export once it is known.
+        let dialog = rfd::AsyncFileDialog::new()
             .set_title(format!("Export {label}"))
-            .add_filter(label, &[ext])
-            .save_file()
-        else {
-            return;
-        };
-
-        let path_for_task = path.clone();
-        self.status = format!("{label} export started: {}", path.display());
+            .add_filter(label, &[ext]);
+        let status_cell = self.export_status.clone();
+        *status_cell.lock().unwrap() = Some(format!("{label} export: choose a save location..."));
         self.runtime.spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || {
+            let Some(file) = dialog.save_file().await else {
+                *status_cell.lock().unwrap() = Some(format!("{label} export cancelled"));
+                return;
+            };
+            let path = file.path().to_path_buf();
+            let path_for_task = path.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
                 export_query_result_to_file(&query_result, format, &path_for_task)
             })
             .await;
+            let message = match outcome {
+                Ok(Ok(())) => format!("{label} export finished: {}", path.display()),
+                Ok(Err(error)) => format!("{label} export failed: {}", error.diagnostic_message()),
+                Err(error) => format!("{label} export task failed: {error}"),
+            };
+            *status_cell.lock().unwrap() = Some(message);
         });
     }
 

@@ -32,6 +32,8 @@ use app_core::{
 use db_common::ConnectionId;
 use eframe::egui::{Context, Id, Key, Modifiers};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
 
 pub struct DesktopApp {
@@ -69,6 +71,8 @@ pub struct DesktopApp {
     pending_structure_ddl: Option<PendingTask<StructDdlPayload>>,
     ddl_queue: VecDeque<DdlOperation>,
     export_request: Option<TableExportRequest>,
+    /// Save path chosen by the async table-export file dialog.
+    pending_table_export_path: Arc<Mutex<Option<PathBuf>>>,
     import_table_request: Option<ImportTableRequest>,
     drop_table_request: Option<DropTableRequest>,
     clear_request: Option<ClearRequest>,
@@ -148,6 +152,7 @@ impl DesktopApp {
             pending_structure_ddl: None,
             ddl_queue: VecDeque::new(),
             export_request: None,
+            pending_table_export_path: Arc::new(Mutex::new(None)),
             import_table_request: None,
             drop_table_request: None,
             clear_request: None,
