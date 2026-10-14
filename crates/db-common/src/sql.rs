@@ -415,9 +415,23 @@ pub fn page_result_statement(sql: &str, limit: u32, offset: u64) -> Option<Strin
         return None;
     }
 
-    Some(format!(
-        "SELECT * FROM ({statement}) AS __query_page LIMIT {limit} OFFSET {offset}"
-    ))
+    // Set operations bind LIMIT/OFFSET to the last arm, so those keep the
+    // subquery wrapper. Plain selects take LIMIT/OFFSET directly, which lets
+    // engines like MySQL walk an index instead of materializing a derived
+    // table for deep offsets.
+    let has_set_operation = top_level_sql_words(statement).iter().any(|word| {
+        matches!(
+            word.value.as_str(),
+            "UNION" | "INTERSECT" | "EXCEPT" | "MINUS"
+        )
+    });
+    if has_set_operation {
+        return Some(format!(
+            "SELECT * FROM ({statement}) AS __query_page LIMIT {limit} OFFSET {offset}"
+        ));
+    }
+
+    Some(format!("{statement}\nLIMIT {limit} OFFSET {offset}"))
 }
 
 pub fn count_result_page_statement(sql: &str) -> Option<String> {
@@ -429,9 +443,72 @@ pub fn count_result_page_statement(sql: &str) -> Option<String> {
         return None;
     }
 
+    // ORDER BY does not change the row count; dropping it lets engines count
+    // straight from an index instead of materializing a sorted derived table.
+    let count_source = match top_level_order_by_start(statement) {
+        Some(index) => trim_sql(&statement[..index]),
+        None => statement,
+    };
+
     Some(format!(
-        "SELECT COUNT(*) AS total_rows FROM ({statement}) AS __query_count"
+        "SELECT COUNT(*) AS total_rows FROM ({count_source}) AS __query_count"
     ))
+}
+
+/// Returns the byte offset where the last top-level `ORDER BY` clause starts,
+/// if the statement has one.
+fn top_level_order_by_start(sql: &str) -> Option<usize> {
+    let mut chars = sql.char_indices().peekable();
+    let mut depth = 0usize;
+    let mut pending_order: Option<usize> = None;
+    let mut confirmed_order: Option<usize> = None;
+
+    while let Some((index, ch)) = chars.next() {
+        let next = chars.peek().map(|(_, ch)| *ch);
+
+        match (ch, next) {
+            ('-', Some('-')) => {
+                chars.next();
+                consume_until_line_end(sql, &mut chars);
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                consume_block_comment(sql, &mut chars);
+            }
+            ('\'', _) | ('"', _) | ('`', _) => {
+                consume_quoted(sql, &mut chars, ch);
+            }
+            ('[', _) => {
+                consume_bracket_identifier(sql, &mut chars);
+            }
+            ('$', _) if dollar_quote_delimiter(sql, index).is_some() => {
+                if let Some(delimiter) = dollar_quote_delimiter(sql, index) {
+                    consume_dollar_quoted_range(sql, &mut chars, &delimiter);
+                }
+            }
+            ('(', _) => {
+                depth = depth.saturating_add(1);
+            }
+            (')', _) => {
+                depth = depth.saturating_sub(1);
+            }
+            (ch, _) if depth == 0 && is_identifier_start(ch) => {
+                let end = consume_identifier(sql, &mut chars);
+                let value = &sql[index..end];
+                if value.eq_ignore_ascii_case("ORDER") {
+                    pending_order = Some(index);
+                } else if pending_order.is_some() && value.eq_ignore_ascii_case("BY") {
+                    confirmed_order = pending_order;
+                    pending_order = None;
+                } else {
+                    pending_order = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    confirmed_order
 }
 
 fn has_explicit_page_clause(statement: &str) -> bool {
@@ -1036,11 +1113,33 @@ mod tests {
     fn builds_page_and_count_wrappers_for_selects() {
         assert_eq!(
             page_result_statement("SELECT * FROM books;", 500, 1_000).as_deref(),
-            Some("SELECT * FROM (SELECT * FROM books) AS __query_page LIMIT 500 OFFSET 1000")
+            Some("SELECT * FROM books\nLIMIT 500 OFFSET 1000")
         );
         assert_eq!(
             count_result_page_statement("SELECT * FROM books;").as_deref(),
             Some("SELECT COUNT(*) AS total_rows FROM (SELECT * FROM books) AS __query_count")
+        );
+    }
+
+    #[test]
+    fn flattens_plain_selects_and_strips_order_by_for_count() {
+        assert_eq!(
+            page_result_statement("SELECT * FROM `askme`.`books` ORDER BY `id`", 100, 3_864_100)
+                .as_deref(),
+            Some("SELECT * FROM `askme`.`books` ORDER BY `id`\nLIMIT 100 OFFSET 3864100")
+        );
+        assert_eq!(
+            count_result_page_statement("SELECT * FROM `askme`.`books` ORDER BY `id`").as_deref(),
+            Some("SELECT COUNT(*) AS total_rows FROM (SELECT * FROM `askme`.`books`) AS __query_count")
+        );
+    }
+
+    #[test]
+    fn keeps_subquery_wrapper_for_set_operations() {
+        assert_eq!(
+            page_result_statement("SELECT * FROM books UNION SELECT * FROM magazines", 100, 0)
+                .as_deref(),
+            Some("SELECT * FROM (SELECT * FROM books UNION SELECT * FROM magazines) AS __query_page LIMIT 100 OFFSET 0")
         );
     }
 

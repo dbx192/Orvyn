@@ -1087,7 +1087,7 @@ mod tests {
             plan.execution_statements,
             vec![
                 "SELECT COUNT(*) AS total_rows FROM (select * from books) AS __query_count",
-                "SELECT * FROM (select * from books) AS __query_page LIMIT 500 OFFSET 1000"
+                "select * from books\nLIMIT 500 OFFSET 1000"
             ]
         );
     }

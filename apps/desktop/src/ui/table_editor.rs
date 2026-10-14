@@ -274,7 +274,7 @@ impl TableEditor {
             }
         }
 
-        self.toolbar(ui);
+        self.toolbar(ui, &mut message);
         self.handle_row_shortcuts(ui, &mut message);
 
         // Reserve space for the fixed header, per-column filter row, and the
@@ -351,7 +351,7 @@ impl TableEditor {
                 // Keep the fixed header above the virtualized body. Rows are
                 // painted first so a fractional top pixel cannot cover it.
                 self.header(ui, header_rect);
-                self.filter_row(ui, filter_rect);
+                self.filter_row(ui, filter_rect, &mut message);
             });
         let max_scroll = (content_width - viewport_width).max(0.0);
         if max_scroll > 0.0 {
@@ -562,7 +562,7 @@ impl TableEditor {
         )
     }
 
-    fn toolbar(&mut self, ui: &mut Ui) {
+    fn toolbar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(self.table_name()).strong());
             ui.separator();
@@ -576,6 +576,9 @@ impl TableEditor {
             {
                 self.column_filters.clear();
                 self.page = 0;
+                if self.remote_page().is_some() {
+                    self.request_remote_page(0, self.page_size as u32, message);
+                }
             }
 
             if self.is_committing() {
@@ -1242,23 +1245,31 @@ impl TableEditor {
         let keyset_page = (!direct_offset_paging)
             .then(|| self.keyset_page_query(next_page, page_size))
             .flatten();
-        let (sql, reverse_rows, uses_keyset) = match keyset_page {
-            Some((sql, reverse_rows)) => (sql, reverse_rows, true),
-            None if direct_offset_paging => (
-                format!(
-                    "{} LIMIT {page_size} OFFSET {offset}",
-                    self.ordered_table_query()
-                        .unwrap_or_else(|_| format!("SELECT * FROM {table_sql}"))
+        // Active column filters are pushed down to the server so they apply
+        // to the whole table instead of only the currently fetched page.
+        let (sql, reverse_rows, uses_keyset) = if let Some(filtered_sql) =
+            self.filtered_table_query()
+        {
+            (filtered_sql, false, false)
+        } else {
+            match keyset_page {
+                Some((sql, reverse_rows)) => (sql, reverse_rows, true),
+                None if direct_offset_paging => (
+                    format!(
+                        "{} LIMIT {page_size} OFFSET {offset}",
+                        self.ordered_table_query()
+                            .unwrap_or_else(|_| format!("SELECT * FROM {table_sql}"))
+                    ),
+                    false,
+                    true,
                 ),
-                false,
-                true,
-            ),
-            None => (
-                self.ordered_table_query()
-                    .unwrap_or_else(|_| format!("SELECT * FROM {table_sql}")),
-                false,
-                false,
-            ),
+                None => (
+                    self.ordered_table_query()
+                        .unwrap_or_else(|_| format!("SELECT * FROM {table_sql}")),
+                    false,
+                    false,
+                ),
+            }
         };
         let cell = Arc::new(Mutex::new(None::<Result<QueryResult>>));
         let cell_for_task = cell.clone();
@@ -1427,8 +1438,10 @@ impl TableEditor {
     }
 
     /// Per-column filter row rendered below the fixed header. Each column has
-    /// a small inline text edit; filters combine with AND semantics.
-    fn filter_row(&mut self, ui: &mut Ui, rect: Rect) {
+    /// a small inline text edit; filters combine with AND semantics. For
+    /// paged (remote) tables the filters are pushed down to the server when
+    /// committed with Enter or focus loss.
+    fn filter_row(&mut self, ui: &mut Ui, rect: Rect, message: &mut Option<String>) {
         ui.painter().rect_filled(rect, 0.0, header_fill(ui));
         let row_rect = Rect::from_min_size(
             pos2(rect.left() - self.scroll_x, rect.top()),
@@ -1472,6 +1485,15 @@ impl TableEditor {
                     self.column_filters.insert(column_index, filter_text);
                 }
                 self.page = 0;
+            }
+            // Committing a filter with Enter re-fetches page 0 with the
+            // WHERE clause applied on the server.
+            let enter_pressed = ui.input(|input| input.key_pressed(Key::Enter));
+            if enter_pressed && (response.has_focus() || response.lost_focus()) {
+                self.page = 0;
+                if self.remote_page().is_some() {
+                    self.request_remote_page(0, self.page_size as u32, message);
+                }
             }
         }
     }
@@ -2320,7 +2342,9 @@ impl TableEditor {
     }
 
     fn filtered_existing_rows(&self) -> Vec<usize> {
-        // Per-column substring filters combined with AND semantics.
+        // Per-column substring filters combined with AND semantics. For paged
+        // (remote) tables the filters are applied server-side, so the fetched
+        // rows are already filtered.
         let filters: Vec<(usize, String)> = self
             .column_filters
             .iter()
@@ -2332,7 +2356,7 @@ impl TableEditor {
                 if self.deleted_rows.contains_key(row_index) {
                     return false;
                 }
-                if filters.is_empty() {
+                if filters.is_empty() || self.remote_page().is_some() {
                     return true;
                 }
                 let Some(row) = self.result.rows.get(*row_index) else {
@@ -2589,6 +2613,15 @@ impl TableEditor {
     }
 
     fn ordered_table_query(&self) -> std::result::Result<String, String> {
+        self.table_select_sql(None)
+    }
+
+    /// Builds `SELECT * FROM <table> [WHERE ...] [ORDER BY ...]` for paged
+    /// table browsing.
+    fn table_select_sql(
+        &self,
+        where_clause: Option<&str>,
+    ) -> std::result::Result<String, String> {
         let table = self.qualified_table_name()?;
         let time_columns = self
             .columns
@@ -2620,14 +2653,52 @@ impl TableEditor {
             } else {
                 Vec::new()
             };
-        if order_columns.is_empty() {
-            Ok(format!("SELECT * FROM {table}"))
+        let order_by = if order_columns.is_empty() {
+            String::new()
         } else {
-            Ok(format!(
-                "SELECT * FROM {table} ORDER BY {}",
-                order_columns.join(", ")
-            ))
+            format!(" ORDER BY {}", order_columns.join(", "))
+        };
+        let where_by = match where_clause.filter(|clause| !clause.trim().is_empty()) {
+            Some(clause) => format!(" WHERE {clause}"),
+            None => String::new(),
+        };
+        Ok(format!("SELECT * FROM {table}{where_by}{order_by}"))
+    }
+
+    /// LIKE fragment for one filter value with quote escaping.
+    fn filter_like_clause(&self, column_index: usize, text: &str) -> Option<String> {
+        let needle = text.trim();
+        if needle.is_empty() {
+            return None;
         }
+        let column = self
+            .quote_identifier(&self.display_column_name(column_index))
+            .ok()?;
+        Some(format!(
+            "{column} LIKE '%{}%'",
+            needle.replace('\'', "''")
+        ))
+    }
+
+    /// The full WHERE clause for the active per-column filters, or None when
+    /// no filter is active.
+    fn filter_where_clause(&self) -> Option<String> {
+        let mut clauses = Vec::new();
+        for column_index in 0..self.display_column_count() {
+            if let Some(text) = self.column_filters.get(&column_index) {
+                if let Some(clause) = self.filter_like_clause(column_index, text) {
+                    clauses.push(clause);
+                }
+            }
+        }
+        (!clauses.is_empty()).then(|| clauses.join(" AND "))
+    }
+
+    /// Paged query with server-side filter pushdown, or None when no filter
+    /// is active or the clause cannot be built.
+    fn filtered_table_query(&self) -> Option<String> {
+        let where_clause = self.filter_where_clause()?;
+        self.table_select_sql(Some(&where_clause)).ok()
     }
 
     fn keyset_page_query(&self, next_page: usize, page_size: u32) -> Option<(String, bool)> {

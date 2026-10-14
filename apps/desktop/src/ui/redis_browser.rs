@@ -28,8 +28,9 @@ use db_common::{
     RedisDatabase, RedisKeyInfo, RedisValue,
 };
 use eframe::egui::{
-    vec2, Align, Align2, Button, Color32, ComboBox, Context, Frame, Grid, Label, Layout, Margin,
-    Rect, RichText, Rounding, ScrollArea, Sense, Spinner, Stroke, TextEdit, Ui, Vec2, Window,
+    pos2, vec2, Align, Align2, Button, Color32, ComboBox, Context, Frame, Grid, Label, Layout,
+    Margin, Rect, RichText, Rounding, ScrollArea, Sense, Spinner, Stroke, TextEdit, Ui, Vec2,
+    Window,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -949,13 +950,18 @@ impl RedisBrowserUi {
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
         let painter = ui.painter();
-        painter.text(
-            rect.left_center() + vec2(8.0, 0.0),
-            Align2::LEFT_CENTER,
-            "▾",
-            eframe::egui::FontId::proportional(12.0),
+        // Draw the expander triangle with shapes instead of font glyphs:
+        // U+25BE is missing from the bundled fonts and renders as tofu.
+        let arrow_center = rect.left_center() + vec2(10.0, 0.0);
+        painter.add(eframe::egui::epaint::Shape::convex_polygon(
+            vec![
+                pos2(arrow_center.x - 4.0, arrow_center.y - 2.0),
+                pos2(arrow_center.x + 4.0, arrow_center.y - 2.0),
+                pos2(arrow_center.x, arrow_center.y + 3.0),
+            ],
             style.muted,
-        );
+            Stroke::NONE,
+        ));
         let label = format!("{} ({count})", redis_type_group_label(type_name));
         painter.text(
             rect.left_center() + vec2(28.0, 0.0),
@@ -1284,14 +1290,27 @@ impl RedisBrowserUi {
                 }
 
                 let indent = 6.0 + *depth as f32 * 14.0;
-                let arrow = if *expanded { "\u{25be}" } else { "\u{25b8}" };
-                painter.text(
-                    rect.left_center() + vec2(indent, 0.0),
-                    Align2::LEFT_CENTER,
-                    arrow,
-                    eframe::egui::FontId::proportional(11.0),
+                // Painter-drawn expander triangle: the U+25B8/U+25BE glyphs
+                // are missing from the bundled fonts and render as tofu.
+                let arrow_center = rect.left_center() + vec2(indent + 4.0, 0.0);
+                let points = if *expanded {
+                    vec![
+                        pos2(arrow_center.x - 4.0, arrow_center.y - 2.0),
+                        pos2(arrow_center.x + 4.0, arrow_center.y - 2.0),
+                        pos2(arrow_center.x, arrow_center.y + 3.0),
+                    ]
+                } else {
+                    vec![
+                        pos2(arrow_center.x - 2.0, arrow_center.y - 4.0),
+                        pos2(arrow_center.x - 2.0, arrow_center.y + 4.0),
+                        pos2(arrow_center.x + 3.0, arrow_center.y),
+                    ]
+                };
+                painter.add(eframe::egui::epaint::Shape::convex_polygon(
+                    points,
                     style.accent,
-                );
+                    Stroke::NONE,
+                ));
                 let label = format!("{segment} ({count})");
                 painter.text(
                     rect.left_center() + vec2(indent + 16.0, 0.0),
