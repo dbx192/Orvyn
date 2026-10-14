@@ -290,7 +290,11 @@ fn elasticsearch_base_url(profile: &ConnectionProfile) -> Result<String> {
     match profile.extra_param("http_path") {
         Some(path) if !path.trim().is_empty() => {
             let prefix = path.trim_matches('/');
-            Ok(format!("{origin}/{prefix}/"))
+            if prefix.is_empty() {
+                Ok(format!("{origin}/"))
+            } else {
+                Ok(format!("{origin}/{prefix}/"))
+            }
         }
         _ => Ok(format!("{origin}/")),
     }
@@ -328,6 +332,22 @@ mod tests {
         assert_eq!(
             elasticsearch_base_url(&profile).expect("valid URL"),
             "http://localhost:9200/"
+        );
+    }
+
+    #[test]
+    fn elasticsearch_url_collapses_root_http_path() {
+        let profile = ConnectionProfile::builder(DataSourceKind::Elasticsearch, "es")
+            .host("10.0.0.1")
+            .port(9200)
+            .ssl_mode(SslMode::Disable)
+            .extra_param("http_path", "/")
+            .build()
+            .expect("valid Elasticsearch profile");
+
+        assert_eq!(
+            elasticsearch_base_url(&profile).expect("valid URL"),
+            "http://10.0.0.1:9200/"
         );
     }
 
