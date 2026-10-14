@@ -1163,16 +1163,30 @@ impl QueryEditor {
                 }
                 ui.separator();
                 if ui.button(tr("Export CSV")).clicked() {
-                    export_request = Some((
-                        result.grid.as_ref().map(|grid| grid.result().clone()),
-                        ExportFormat::Csv,
-                    ));
+                    let query_result = result
+                        .grid
+                        .as_ref()
+                        .map(|grid| grid.result().clone())
+                        .or_else(|| {
+                            result
+                                .table_editor
+                                .as_ref()
+                                .map(|editor| editor.result().clone())
+                        });
+                    export_request = Some((query_result, ExportFormat::Csv));
                 }
                 if ui.button(tr("Export JSON")).clicked() {
-                    export_request = Some((
-                        result.grid.as_ref().map(|grid| grid.result().clone()),
-                        ExportFormat::Json,
-                    ));
+                    let query_result = result
+                        .grid
+                        .as_ref()
+                        .map(|grid| grid.result().clone())
+                        .or_else(|| {
+                            result
+                                .table_editor
+                                .as_ref()
+                                .map(|editor| editor.result().clone())
+                        });
+                    export_request = Some((query_result, ExportFormat::Json));
                 }
             });
 

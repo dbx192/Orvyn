@@ -220,6 +220,10 @@ impl TableEditor {
         }
     }
 
+    pub fn result(&self) -> &QueryResult {
+        &self.result
+    }
+
     pub fn with_services(
         schema: Option<String>,
         table: impl Into<String>,
