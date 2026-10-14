@@ -2,18 +2,50 @@
 
 [中文](README.md)
 
-Orvyn is a Rust cross-platform desktop database client for connecting to, querying, browsing, and lightly maintaining relational, document, key-value, and search services. Its native egui/eframe UI has no ODBC, JDBC, or sidecar dependency.
+**Orvyn is a high-performance cross-platform database client written in pure Rust.** One native binary with a GPU-accelerated UI — no ODBC, no JDBC, no Electron, no sidecar. Fast startup, small footprint, low memory. One client for 20+ data sources: relational, document, key-value, and search, all over native protocols.
+
+## Why Orvyn
+
+- **Pure Rust, native speed**: egui/eframe GPU rendering with no VM and no browser engine. The result grid paints only visible rows.
+- **Smooth at millions of rows**: server-side paging (25–1,000 rows/page), deep-pagination flattening, and filter pushdown executed by the database — paging, sorting, and filtering stay responsive on large tables.
+- **20+ data sources, one UI**: native drivers instead of ODBC/JDBC bridges; a capability matrix automatically disables actions a backend does not support.
+- **Secure by default**: optional password storage encrypted locally with ChaCha20-Poly1305; TLS up to Verify Full with no silent plaintext fallback; one-click read-only connections.
+- **Localization out of the box**: bundled Source Han Sans CJK font chain with Simplified Chinese, English, Español, Français, and हिन्दी UIs.
 
 ## Features
 
-- Create, edit, test, group, delete, import, and export connections. Password saving is opt-in and encrypted locally with ChaCha20-Poly1305.
-- Connection timeouts and one retry for transient network failures.
-- PostgreSQL, MySQL, and SQL Server TLS modes: Disable, Prefer, Require, Verify CA, and Verify Full, with an optional CA certificate path. Strict modes do not silently fall back to plaintext.
-- SQL tabs, execute all/current/selection, cancellation, syntax highlighting, keyword and schema table/column completion, history, and favorites.
-- Server-side result paging, sorting, copy, and CSV/JSON/Excel-compatible TSV export. Only visible grid rows are painted; pages range from 25 to 1,000 rows.
-- Browse metadata and maintain table data. Views live in a localized Views folder; views and saved queries have context-menu deletion.
-- Redis browser and data operations; MongoDB browsing, document queries, and basic CRUD.
-- Elasticsearch, Easysearch, Meilisearch, Manticore Search index/JSON queries, plus Cloudflare D1 HTTP SQL.
+**SQL Editor**
+
+- Multi-tab editor: execute all / current / selection, cancel long-running queries at any time.
+- Syntax highlighting, keyword plus schema table/column completion, query history, and favorites.
+
+**Data Grid (Navicat style)**
+
+- Server-side paging, sorting, and multi-column combined filters.
+- Inline editing, insertion, and deletion when a primary key is detected; keyless tables stay read-only.
+- CSV / JSON / Excel-compatible TSV export; rows from editable result sets (TableEditor) export too.
+
+**Schema Design and Maintenance**
+
+- Visual management of columns, indexes, foreign keys, triggers, and functions with batched structure changes and a batch DDL execution queue.
+- Table data import wizard, database structure/data export, and local DDL saving.
+- One right-click away in the object tree: copy name/full path, new query, CSV import, clear/drop table, and database deletion behind a confirmation dialog.
+
+**Redis (Tiny RDM style)**
+
+- Multi-connection tabs, tree-shaped key browsing, paged SCAN with glob pattern filtering.
+- View and edit common data structures, update TTL, delete keys, and FLUSHDB behind confirmation.
+
+**MongoDB / Search Engines / HTTP SQL**
+
+- MongoDB collection browsing, document queries, and basic CRUD.
+- Elasticsearch, Easysearch, Meilisearch, and Manticore Search index/JSON DSL queries, plus Cloudflare D1 HTTP SQL.
+
+**Connection Management and Security**
+
+- Create, edit, test, group, delete, import, and export connections; timeouts on connect and test, with automatic retry for transient network failures.
+- PostgreSQL, MySQL, and SQL Server support Disable / Prefer / Require / Verify CA / Verify Full TLS modes with an optional CA certificate path; strict modes never silently fall back to plaintext.
+- Read-only connection switch; light/dark theme toggle (Ctrl+T).
 
 ## Supported Sources
 

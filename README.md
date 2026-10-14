@@ -2,19 +2,50 @@
 
 [English](README.en.md)
 
-Orvyn 是一个 Rust 跨平台桌面数据库客户端，用于连接、查询、浏览和轻量维护关系型、文档型、键值和搜索服务。原生 egui/eframe 界面不依赖 ODBC、JDBC 或外部 sidecar。
+**Orvyn 是一个用纯 Rust 打造的高性能跨平台数据库客户端。** 单个原生二进制，GPU 加速界面，不依赖 ODBC、JDBC、Electron 或任何 sidecar——启动快、体积小、内存占用低。一套客户端管住 20+ 数据源：关系型、文档型、键值、搜索引擎，全部原生协议直连。
 
-## 功能
+## 为什么是 Orvyn
 
-- 连接的新建、编辑、测试、分组、删除、导入和导出；密码默认不保存，保存时采用 ChaCha20-Poly1305 本地加密。
-- 连接和测试均有超时控制；瞬时网络错误自动重试一次。
-- PostgreSQL、MySQL、SQL Server 支持 Disable、Prefer、Require、Verify CA、Verify Full TLS 策略和可选 CA 文件路径；严格模式不会静默退回明文。
-- 多标签 SQL 编辑器：执行全部/当前/选中 SQL、取消执行、语法高亮、关键字及 schema 表/列补全、历史和收藏。
-- 结果集服务端分页、排序、复制、CSV/JSON/Excel 兼容 TSV 导出。网格只绘制可见行，每页为 25 到 1000 行。
-- 元数据与表维护：浏览数据库、schema、表、视图、列、索引、外键、触发器和函数（按适配器能力）；表数据浏览、筛选、排序、插入、编辑、删除。无主键表默认只读。
-- 左侧对象树：视图归入本地化的“视图”目录；视图和查询均可从右键菜单删除。
-- Redis：逻辑库、分页 SCAN、键检查及常见数据结构操作；MongoDB：集合浏览、文档查询和基础 CRUD。
-- Elasticsearch、Easysearch、Meilisearch、Manticore Search 的索引与 JSON/DSL 查询；Cloudflare D1 HTTP SQL。
+- **纯 Rust 原生性能**：egui/eframe GPU 渲染，无虚拟机、无浏览器内核。结果网格虚拟化绘制，只渲染可见行。
+- **百万行不卡**：服务端分页（25–1000 行/页）、深分页扁平化、筛选条件下推到数据库执行，大表翻页、排序、筛选依旧顺滑。
+- **20+ 数据源，一个界面**：原生驱动直连而非 ODBC/JDBC 桥接；按能力矩阵自动禁用后端不支持的操作。
+- **安全默认**：密码可选保存并用 ChaCha20-Poly1305 本地加密；TLS 策略完整支持到 Verify Full 且不静默回退明文；一键只读连接。
+- **开箱即用的本地化**：内置思源黑体 CJK 字体链，支持简体中文、English、Español、Français、हिन्दी 五种界面语言。
+
+## 核心功能
+
+**SQL 编辑器**
+
+- 多标签编辑器：执行全部 / 当前 / 选中 SQL，长查询随时取消。
+- 语法高亮、关键字与 schema 表/列智能补全、查询历史与收藏。
+
+**数据网格（Navicat 风格）**
+
+- 服务端分页、排序与多列组合筛选。
+- 检测到主键即可行内编辑、插入、删除；无主键表默认只读。
+- CSV / JSON / Excel 兼容 TSV 导出；可编辑结果集（TableEditor）中的数据同样可导出。
+
+**表结构设计与维护**
+
+- 可视化管理列、索引、外键、触发器、函数，结构变更批量应用；批量 DDL 执行队列。
+- 表数据导入向导、数据库结构/数据导出、DDL 本地保存。
+- 对象树右键即达：复制名称/完整路径、新建查询、导入 CSV、清空/删除表，删除数据库带二次确认弹窗。
+
+**Redis（Tiny RDM 风格）**
+
+- 多连接标签页、树形键浏览、SCAN 分页与 glob 模式过滤。
+- 常见数据结构查看与编辑、TTL 修改、键删除、FLUSHDB 二次确认。
+
+**MongoDB / 搜索引擎 / HTTP SQL**
+
+- MongoDB 集合浏览、文档查询与基础 CRUD。
+- Elasticsearch、Easysearch、Meilisearch、Manticore Search 索引与 JSON/DSL 查询；Cloudflare D1 HTTP SQL。
+
+**连接管理与安全**
+
+- 连接新建、编辑、测试、分组、删除、导入和导出；连接与测试均有超时控制，瞬时网络错误自动重试。
+- PostgreSQL、MySQL、SQL Server 支持 Disable / Prefer / Require / Verify CA / Verify Full 五档 TLS 与可选 CA 文件路径，严格模式绝不静默退回明文。
+- 只读连接开关；亮 / 暗主题一键切换（Ctrl+T）。
 
 ## 数据源
 
