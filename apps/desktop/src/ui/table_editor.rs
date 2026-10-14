@@ -19,8 +19,8 @@ use db_common::{
 };
 use eframe::egui::{
     pos2, vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Grid, Id, Key, Layout,
-    Margin, Modifiers, Pos2, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit, Ui,
-    Window,
+    Margin, Modifiers, Pos2, Rect, Response, RichText, ScrollArea, Sense, Stroke, TextEdit,
+    TextStyle, Ui, Window,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,6 +35,9 @@ const MIN_COLUMN_WIDTH: f32 = 56.0;
 const MAX_COLUMN_WIDTH: f32 = 640.0;
 const INITIAL_MAX_COLUMN_WIDTH: f32 = 360.0;
 const HORIZONTAL_SCROLL_CONTROL_HEIGHT: f32 = 22.0;
+const TABLE_FILTER_ROW_HEIGHT: f32 = 24.0;
+const TABLE_FOOTER_HEIGHT: f32 = 26.0;
+const PAGE_SIZE_OPTIONS: [usize; 6] = [25, 50, 100, 250, 500, 1000];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -137,8 +140,7 @@ pub struct TableEditor {
     column_widths: Vec<f32>,
     page: usize,
     page_size: usize,
-    filter_column: usize,
-    filter_text: String,
+    column_filters: BTreeMap<usize, String>,
     sort: Option<SortState>,
     scroll_x: f32,
     edits: BTreeMap<CellKey, String>,
@@ -186,8 +188,7 @@ impl TableEditor {
             column_widths,
             page,
             page_size,
-            filter_column: 0,
-            filter_text: String::new(),
+            column_filters: BTreeMap::new(),
             sort: None,
             scroll_x: 0.0,
             edits: BTreeMap::new(),
@@ -273,14 +274,16 @@ impl TableEditor {
             }
         }
 
-        self.toolbar(ui, &mut message);
+        self.toolbar(ui);
         self.handle_row_shortcuts(ui, &mut message);
 
-        // Reserve space for the fixed header and horizontal scroll control so
-        // both stay inside the visible table frame.
+        // Reserve space for the fixed header, per-column filter row, and the
+        // horizontal scroll control so both stay inside the visible table frame.
         let grid_height = (ui.available_height()
             - TABLE_HEADER_HEIGHT
-            - HORIZONTAL_SCROLL_CONTROL_HEIGHT)
+            - TABLE_FILTER_ROW_HEIGHT
+            - HORIZONTAL_SCROLL_CONTROL_HEIGHT
+            - TABLE_FOOTER_HEIGHT)
             .max(0.0);
         let visible_rows = self.visible_rows();
         let content_width = self.content_width();
@@ -299,6 +302,10 @@ impl TableEditor {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 let (header_rect, _) = ui.allocate_exact_size(
                     vec2(ui.available_width(), TABLE_HEADER_HEIGHT),
+                    Sense::hover(),
+                );
+                let (filter_rect, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), TABLE_FILTER_ROW_HEIGHT),
                     Sense::hover(),
                 );
                 let (body_rect, _) = ui.allocate_exact_size(
@@ -344,6 +351,7 @@ impl TableEditor {
                 // Keep the fixed header above the virtualized body. Rows are
                 // painted first so a fractional top pixel cannot cover it.
                 self.header(ui, header_rect);
+                self.filter_row(ui, filter_rect);
             });
         let max_scroll = (content_width - viewport_width).max(0.0);
         if max_scroll > 0.0 {
@@ -352,6 +360,7 @@ impl TableEditor {
                 ui.ctx().request_repaint();
             }
         }
+        self.pagination_footer(ui, &mut message);
         if let Some(rect) = previous_focus_rect {
             let clicked_away = ui.ctx().input(|input| {
                 pointer_clicked_outside(
@@ -511,7 +520,7 @@ impl TableEditor {
                 .unwrap_or(0)
                 .min(self.total_pages().saturating_sub(1));
         }
-        self.filter_text.clear();
+        self.column_filters.clear();
         self.sort = None;
         self.scroll_x = 0.0;
         self.clear_changes();
@@ -553,82 +562,19 @@ impl TableEditor {
         )
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+    fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(self.table_name()).strong());
-            if let Some(total_rows) = self.remote_total_rows() {
-                ui.label(
-                    RichText::new(format!("{} / {} rows", self.result.rows.len(), total_rows))
-                        .small()
-                        .color(Color32::GRAY),
-                );
-            } else {
-                ui.label(
-                    RichText::new(format!("{} rows", self.filtered_existing_rows().len()))
-                        .small()
-                        .color(Color32::GRAY),
-                );
-            }
             ui.separator();
-            if ui.add_enabled(self.page > 0, Button::new(tr("Prev"))).clicked() {
-                self.change_page(self.page.saturating_sub(1), message);
-            }
-            ui.label(format!("{} / {}", self.page + 1, self.total_pages().max(1)));
+            let has_filters = self
+                .column_filters
+                .values()
+                .any(|text| !text.trim().is_empty());
             if ui
-                .add_enabled(self.page + 1 < self.total_pages(), Button::new(tr("Next")))
+                .add_enabled(has_filters, Button::new(tr("Clear Filters")))
                 .clicked()
             {
-                self.change_page(self.page + 1, message);
-            }
-
-            let old_page_size = self.page_size;
-            ui.add(
-                DragValue::new(&mut self.page_size)
-                    .speed(10)
-                    .clamp_range(25..=1000),
-            );
-            if old_page_size != self.page_size {
-                self.page_size = self.page_size.clamp(25, 1000);
-                if self.remote_page().is_some() {
-                    self.request_remote_page(0, self.page_size as u32, message);
-                } else {
-                    self.page = self.page.min(self.total_pages().saturating_sub(1));
-                }
-            }
-
-            ui.separator();
-            ui.label("Filter");
-            let filter_options = (0..self.display_column_count())
-                .map(|index| self.display_column_name(index))
-                .collect::<Vec<_>>();
-            if !filter_options.is_empty() {
-                self.filter_column = self.filter_column.min(filter_options.len() - 1);
-                let selected = filter_options
-                    .get(self.filter_column)
-                    .cloned()
-                    .unwrap_or_default();
-                eframe::egui::ComboBox::from_id_source("table_filter_column")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for (index, label) in filter_options.iter().enumerate() {
-                            ui.selectable_value(&mut self.filter_column, index, label);
-                        }
-                    });
-            }
-            let response = ui.add(
-                TextEdit::singleline(&mut self.filter_text)
-                    .desired_width(180.0)
-                    .min_size(vec2(0.0, ui.spacing().interact_size.y))
-                    .hint_text("contains"),
-            );
-            if response.changed() {
-                self.page = 0;
-            }
-            if ui
-                .add_enabled(!self.filter_text.is_empty(), Button::new(tr("Clear")))
-                .clicked()
-            {
-                self.filter_text.clear();
+                self.column_filters.clear();
                 self.page = 0;
             }
 
@@ -1480,6 +1426,141 @@ impl TableEditor {
         });
     }
 
+    /// Per-column filter row rendered below the fixed header. Each column has
+    /// a small inline text edit; filters combine with AND semantics.
+    fn filter_row(&mut self, ui: &mut Ui, rect: Rect) {
+        ui.painter().rect_filled(rect, 0.0, header_fill(ui));
+        let row_rect = Rect::from_min_size(
+            pos2(rect.left() - self.scroll_x, rect.top()),
+            vec2(self.content_width(), TABLE_FILTER_ROW_HEIGHT),
+        );
+        let mut row_ui = ui.child_ui(row_rect, Layout::left_to_right(Align::Center));
+        row_ui.set_clip_rect(rect);
+        row_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+
+        for column_index in 0..self.display_column_count() {
+            let width = self.column_widths[column_index];
+            let mut filter_text = self
+                .column_filters
+                .get(&column_index)
+                .cloned()
+                .unwrap_or_default();
+            if !filter_text.trim().is_empty() {
+                let column_left = row_rect.left()
+                    + self.column_widths.iter().take(column_index).sum::<f32>();
+                ui.painter().rect_filled(
+                    Rect::from_min_size(
+                        pos2(column_left, rect.top()),
+                        vec2(width, TABLE_FILTER_ROW_HEIGHT),
+                    ),
+                    0.0,
+                    Color32::from_rgba_unmultiplied(255, 205, 80, 36),
+                );
+            }
+            let response = row_ui.add_sized(
+                [width, TABLE_FILTER_ROW_HEIGHT],
+                TextEdit::singleline(&mut filter_text)
+                    .id(Id::new(("table_col_filter", column_index)))
+                    .font(TextStyle::Small)
+                    .hint_text(tr("Filter"))
+                    .frame(false),
+            );
+            if response.changed() {
+                if filter_text.trim().is_empty() {
+                    self.column_filters.remove(&column_index);
+                } else {
+                    self.column_filters.insert(column_index, filter_text);
+                }
+                self.page = 0;
+            }
+        }
+    }
+
+    /// Navicat-style pagination footer: row counts, First/Prev/jump/Next/Last,
+    /// and the page-size selector. Replaces the pagination controls that used
+    /// to live in the toolbar.
+    fn pagination_footer(&mut self, ui: &mut Ui, message: &mut Option<String>) {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let filtered_count = self.filtered_existing_rows().len();
+            let rows_label = if let Some(total_rows) = self.remote_total_rows() {
+                format!("{filtered_count} / {total_rows} {}", tr("Rows"))
+            } else {
+                format!("{filtered_count} {}", tr("Rows"))
+            };
+            ui.label(RichText::new(rows_label).small().color(Color32::GRAY));
+
+            ui.separator();
+            let total_pages = self.total_pages().max(1);
+            if ui
+                .add_enabled(self.page > 0, Button::new(tr("First")).small())
+                .clicked()
+            {
+                self.change_page(0, message);
+            }
+            if ui
+                .add_enabled(self.page > 0, Button::new(tr("Prev")).small())
+                .clicked()
+            {
+                self.change_page(self.page.saturating_sub(1), message);
+            }
+
+            let mut jump = self.page + 1;
+            let jump_response = ui
+                .add_sized(
+                    [64.0, ui.spacing().interact_size.y],
+                    DragValue::new(&mut jump).clamp_range(1..=total_pages),
+                )
+                .on_hover_text(tr("Go to page"));
+            ui.label(
+                RichText::new(format!("/ {total_pages}"))
+                    .small()
+                    .color(Color32::GRAY),
+            );
+            if jump_response.changed() {
+                self.change_page(jump.saturating_sub(1), message);
+            }
+
+            if ui
+                .add_enabled(
+                    self.page + 1 < total_pages,
+                    Button::new(tr("Next")).small(),
+                )
+                .clicked()
+            {
+                self.change_page(self.page + 1, message);
+            }
+            if ui
+                .add_enabled(
+                    self.page + 1 < total_pages,
+                    Button::new(tr("Last")).small(),
+                )
+                .clicked()
+            {
+                self.change_page(total_pages - 1, message);
+            }
+
+            ui.separator();
+            ui.label(RichText::new(tr("Page size")).small().color(Color32::GRAY));
+            let previous_page_size = self.page_size;
+            eframe::egui::ComboBox::from_id_source("table_page_size")
+                .selected_text(format!("{}", self.page_size))
+                .width(64.0)
+                .show_ui(ui, |ui| {
+                    for size in PAGE_SIZE_OPTIONS {
+                        ui.selectable_value(&mut self.page_size, size, format!("{size}"));
+                    }
+                });
+            if previous_page_size != self.page_size {
+                self.page_size = self.page_size.clamp(25, 1000);
+                self.page = 0;
+                if self.remote_page().is_some() {
+                    self.request_remote_page(0, self.page_size as u32, message);
+                }
+            }
+        });
+    }
+
     fn content_width(&self) -> f32 {
         self.column_widths.iter().sum()
     }
@@ -1851,10 +1932,19 @@ impl TableEditor {
                     self.edits.insert(key, value);
                 }
             }
+            // Escape reverts the focused cell back to its original value.
+            if cell.response.has_focus() && ui.input(|input| input.key_pressed(Key::Escape)) {
+                self.edits.remove(&key);
+            }
             if cell.response.has_focus() {
                 self.inline_focus_rect = Some(cell.rect);
             }
             if self.edits.contains_key(&key) {
+                ui.painter().circle_filled(
+                    pos2(cell.rect.right() - 5.0, cell.rect.top() + 5.0),
+                    2.5,
+                    Color32::from_rgb(235, 175, 40),
+                );
                 paint_cell_outline(ui, cell.rect, Stroke::new(1.0, Color32::YELLOW));
             }
             cell
@@ -2230,23 +2320,32 @@ impl TableEditor {
     }
 
     fn filtered_existing_rows(&self) -> Vec<usize> {
-        let filter = self.filter_text.trim().to_ascii_lowercase();
+        // Per-column substring filters combined with AND semantics.
+        let filters: Vec<(usize, String)> = self
+            .column_filters
+            .iter()
+            .filter(|(_, text)| !text.trim().is_empty())
+            .map(|(column, text)| (*column, text.trim().to_ascii_lowercase()))
+            .collect();
         (0..self.result.rows.len())
             .filter(|row_index| {
                 if self.deleted_rows.contains_key(row_index) {
                     return false;
                 }
-                if filter.is_empty() {
+                if filters.is_empty() {
                     return true;
                 }
-                self.result
-                    .rows
-                    .get(*row_index)
-                    .and_then(|row| row.values.get(self.filter_column))
-                    .map(copy_cell_value)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .contains(&filter)
+                let Some(row) = self.result.rows.get(*row_index) else {
+                    return false;
+                };
+                filters.iter().all(|(column, needle)| {
+                    row.values
+                        .get(*column)
+                        .map(copy_cell_value)
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(needle)
+                })
             })
             .collect()
     }
