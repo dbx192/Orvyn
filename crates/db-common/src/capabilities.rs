@@ -81,6 +81,27 @@ impl ConnectorCapabilities {
         }
     }
 
+    /// Vendor-driver brands reached through the ODBC bridge: full relational
+    /// surface, but only when the matching vendor ODBC driver is installed,
+    /// hence `Restricted` rather than `Full`.
+    const fn odbc_bridge(notes: &'static str, transactions: bool) -> Self {
+        Self {
+            support: SupportLevel::Restricted,
+            protocol_family: ProtocolFamily::Odbc,
+            connection_test: true,
+            sql_query: true,
+            metadata: true,
+            crud: true,
+            transactions,
+            http_json: false,
+            document_kv: false,
+            search: false,
+            ddl: true,
+            read_only_default: false,
+            notes: Some(notes),
+        }
+    }
+
     const fn mysql_compatible(notes: &'static str) -> Self {
         Self {
             support: SupportLevel::Compatible,
@@ -211,23 +232,6 @@ impl ConnectorCapabilities {
         }
     }
 
-    const fn unsupported(family: ProtocolFamily, notes: &'static str) -> Self {
-        Self {
-            support: SupportLevel::Unsupported,
-            protocol_family: family,
-            connection_test: false,
-            sql_query: false,
-            metadata: false,
-            crud: false,
-            transactions: false,
-            http_json: false,
-            document_kv: false,
-            search: false,
-            ddl: false,
-            read_only_default: false,
-            notes: Some(notes),
-        }
-    }
 }
 
 impl DataSourceKind {
@@ -334,21 +338,21 @@ impl DataSourceKind {
                 "Cloudflare D1 in-browser SQL via HTTP API",
             ),
 
-            Self::Access => ConnectorCapabilities::unsupported(
-                ProtocolFamily::Restricted,
-                "no pure-Rust Access driver; config only",
+            Self::Access => ConnectorCapabilities::odbc_bridge(
+                "via ODBC; requires the 64-bit Microsoft Access Driver (*.mdb, *.accdb)",
+                false,
             ),
-            Self::Oracle => ConnectorCapabilities::unsupported(
-                ProtocolFamily::Restricted,
-                "no pure-Rust Oracle driver; config only",
+            Self::Oracle => ConnectorCapabilities::odbc_bridge(
+                "via ODBC; requires an Oracle Instant Client ODBC driver",
+                true,
             ),
-            Self::Dm => ConnectorCapabilities::unsupported(
-                ProtocolFamily::Restricted,
-                "no pure-Rust DM driver; config only",
+            Self::Dm => ConnectorCapabilities::odbc_bridge(
+                "via ODBC; requires the DM ODBC DRIVER",
+                true,
             ),
-            Self::XuguDb => ConnectorCapabilities::unsupported(
-                ProtocolFamily::Restricted,
-                "no pure-Rust XuguDB driver; config only",
+            Self::XuguDb => ConnectorCapabilities::odbc_bridge(
+                "via ODBC; requires the Xugu ODBC driver",
+                true,
             ),
         }
     }
@@ -491,13 +495,68 @@ impl DataSourceKind {
                     placeholder: None,
                 },
             ],
-            Self::Oracle | Self::Dm | Self::XuguDb => vec![ExtraParamField {
-                key: "service_name",
-                label: "Service name",
-                kind: ExtraParamKind::Text,
-                required: false,
-                placeholder: None,
-            }],
+            Self::Oracle => vec![
+                ExtraParamField {
+                    key: "service_name",
+                    label: "Service name",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: Some("orcl"),
+                },
+                ExtraParamField {
+                    key: "oracle_sid",
+                    label: "SID (alternative to service name)",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: None,
+                },
+                ExtraParamField {
+                    key: "odbc_driver",
+                    label: "ODBC driver name",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: Some("Oracle in instantclient_21_13"),
+                },
+                ExtraParamField {
+                    key: "odbc_connection_string",
+                    label: "Raw ODBC connection string (overrides all)",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: None,
+                },
+            ],
+            Self::Dm | Self::XuguDb => vec![
+                ExtraParamField {
+                    key: "odbc_driver",
+                    label: "ODBC driver name",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: None,
+                },
+                ExtraParamField {
+                    key: "odbc_connection_string",
+                    label: "Raw ODBC connection string (overrides all)",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: None,
+                },
+            ],
+            Self::Access => vec![
+                ExtraParamField {
+                    key: "odbc_driver",
+                    label: "ODBC driver name",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: Some("Microsoft Access Driver (*.mdb, *.accdb)"),
+                },
+                ExtraParamField {
+                    key: "odbc_connection_string",
+                    label: "Raw ODBC connection string (overrides all)",
+                    kind: ExtraParamKind::Text,
+                    required: false,
+                    placeholder: None,
+                },
+            ],
             _ => Vec::new(),
         }
     }
@@ -526,15 +585,18 @@ mod tests {
     }
 
     #[test]
-    fn restricted_kinds_save_config_but_cannot_query() {
+    fn odbc_kinds_are_restricted_but_queryable() {
         for kind in [
             DataSourceKind::Oracle,
             DataSourceKind::Dm,
             DataSourceKind::XuguDb,
+            DataSourceKind::Access,
         ] {
             let caps = kind.capabilities();
-            assert_eq!(caps.support, SupportLevel::Unsupported);
-            assert!(!caps.sql_query);
+            assert_eq!(caps.support, SupportLevel::Restricted, "{kind:?}");
+            assert_eq!(caps.protocol_family, ProtocolFamily::Odbc);
+            assert!(caps.sql_query && caps.metadata && caps.connection_test);
+            assert!(caps.notes.is_some(), "{kind:?} should name its driver");
         }
     }
 }

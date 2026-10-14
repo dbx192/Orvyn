@@ -6,6 +6,7 @@ members = [
     "crates/db-duckdb",
     "crates/db-mysql",
     "crates/db-mongodb",
+    "crates/db-odbc",
     "crates/db-sqlserver",
     "crates/db-clickhouse",
     "crates/db-postgres",
@@ -45,6 +46,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["mysql", "runtime-tokio", "tls-rustls-ring-native-roots"] }
 sqlx-mysql = { version = "0.8", default-features = false, features = ["chrono", "rust_decimal"] }
 mongodb = { version = "3.2", default-features = false, features = ["rustls-tls"] }
+odbc-api = "29.0"
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
 clickhouse = { version = "0.13", default-features = false, features = ["lz4", "rustls-tls"] }
 thiserror = "1.0"

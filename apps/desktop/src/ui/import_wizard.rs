@@ -4,7 +4,7 @@
 
 use crate::ui::i18n::text as tr;
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
-use db_common::dialect::{BacktickDialect, DoubleQuoteDialect};
+use db_common::dialect::{BacktickDialect, BracketDialect, DoubleQuoteDialect};
 use db_common::{
     ConnectionId, DataSourceKind, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest,
     QueryId, Result, TableColumn,
@@ -855,6 +855,7 @@ impl ImportWizard {
 fn import_dialect(kind: DataSourceKind) -> Box<dyn Dialect> {
     match kind {
         DataSourceKind::MySql => Box::new(BacktickDialect),
+        DataSourceKind::Access => Box::new(BracketDialect),
         _ => Box::new(DoubleQuoteDialect),
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::ui::i18n::{format as trf, text as tr};
 use db_common::{
-    dialect::{BacktickDialect, Dialect, DoubleQuoteDialect, Identifier},
+    dialect::{BacktickDialect, BracketDialect, Dialect, DoubleQuoteDialect, Identifier},
     AppError, ConnectionId, DataSourceKind, DatabaseFunction, ProtocolFamily, TableColumn,
     TableForeignKey, TableIndex, TableTrigger,
 };
@@ -571,6 +571,7 @@ fn qualified_table_sql(
 fn dialect_for_kind(kind: DataSourceKind) -> Box<dyn Dialect> {
     match kind.protocol_family() {
         ProtocolFamily::MySql => Box::new(BacktickDialect),
+        ProtocolFamily::Odbc if kind == DataSourceKind::Access => Box::new(BracketDialect),
         _ => Box::new(DoubleQuoteDialect),
     }
 }

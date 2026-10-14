@@ -61,3 +61,17 @@ impl Dialect for BacktickDialect {
         "?".to_string()
     }
 }
+
+/// MS Access / Jet SQL: bracketed identifiers and `?` placeholders.
+#[derive(Debug, Clone, Copy)]
+pub struct BracketDialect;
+
+impl Dialect for BracketDialect {
+    fn quote_identifier(&self, identifier: &Identifier) -> String {
+        format!("[{}]", identifier.as_str().replace(']', "]]"))
+    }
+
+    fn placeholder(&self, _index: usize) -> String {
+        "?".to_string()
+    }
+}

@@ -2,7 +2,7 @@ use super::payloads::DatabaseExportPayload;
 use crate::ui::{object_tree::DatabaseExportMode, table_structure::CreateIndexRequest};
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::{
-    dialect::{BacktickDialect, DoubleQuoteDialect},
+    dialect::{BacktickDialect, BracketDialect, DoubleQuoteDialect},
     AppError, CellValue, ConnectionId, DataSourceKind, Dialect, Identifier, QueryExecutionMode,
     QueryExecutionRequest, QueryId, QueryResult,
 };
@@ -316,6 +316,7 @@ pub(super) fn build_create_index_sql(
 pub(super) fn dialect_for_kind(kind: DataSourceKind) -> Box<dyn Dialect> {
     match kind {
         DataSourceKind::MySql | DataSourceKind::Doris => Box::new(BacktickDialect),
+        DataSourceKind::Access => Box::new(BracketDialect),
         _ => Box::new(DoubleQuoteDialect),
     }
 }

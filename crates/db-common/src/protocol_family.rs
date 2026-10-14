@@ -24,6 +24,9 @@ pub enum ProtocolFamily {
     Elasticsearch,
     /// HTTP-based SQL services (Cloudflare D1).
     HttpSql,
+    /// Vendor drivers reached through the platform ODBC driver manager
+    /// (Oracle, DM, XuguDB, MS Access). One generic bridge serves them all.
+    Odbc,
     /// No reliable pure-Rust driver; config-only with restricted capabilities.
     Restricted,
 }
@@ -42,6 +45,7 @@ impl ProtocolFamily {
             Self::Redis => "Redis (RESP)",
             Self::Elasticsearch => "Elasticsearch HTTP",
             Self::HttpSql => "HTTP SQL",
+            Self::Odbc => "ODBC (vendor driver)",
             Self::Restricted => "Restricted",
         }
     }
@@ -59,6 +63,7 @@ impl ProtocolFamily {
             Self::Redis => "Redis",
             Self::Elasticsearch => "Search (Elasticsearch)",
             Self::HttpSql => "HTTP SQL",
+            Self::Odbc => "ODBC",
             Self::Restricted => "Restricted",
         }
     }
@@ -87,6 +92,7 @@ impl ProtocolFamily {
         Self::Redis,
         Self::Elasticsearch,
         Self::HttpSql,
+        Self::Odbc,
         Self::Restricted,
     ];
 }
@@ -124,7 +130,7 @@ impl DataSourceKind {
                 ProtocolFamily::Elasticsearch
             }
             Self::CloudflareD1 => ProtocolFamily::HttpSql,
-            Self::Access | Self::Oracle | Self::Dm | Self::XuguDb => ProtocolFamily::Restricted,
+            Self::Access | Self::Oracle | Self::Dm | Self::XuguDb => ProtocolFamily::Odbc,
         }
     }
 }

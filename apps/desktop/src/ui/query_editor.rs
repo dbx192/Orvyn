@@ -3,7 +3,7 @@ use crate::ui::result_grid::{ResultSetGrid, ResultSetGridAction};
 use crate::ui::table_editor::TableEditor;
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::{
-    dialect::{BacktickDialect, DoubleQuoteDialect},
+    dialect::{BacktickDialect, BracketDialect, DoubleQuoteDialect},
     looks_like_unqualified_mutation, split_statements, statement_at_offset, AppError, ConnectionId,
     ConnectionProfile, DataSourceKind, DatabaseObject, Dialect, ErrorKind, FavoriteQuery,
     QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
@@ -2490,6 +2490,7 @@ fn result_tab_summary(index: usize, result: &db_common::QueryResult) -> String {
 fn query_dialect(kind: DataSourceKind) -> Box<dyn Dialect> {
     match kind {
         DataSourceKind::MySql | DataSourceKind::Doris => Box::new(BacktickDialect),
+        DataSourceKind::Access => Box::new(BracketDialect),
         _ => Box::new(DoubleQuoteDialect),
     }
 }

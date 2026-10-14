@@ -39,7 +39,7 @@ pub enum DataSourceKind {
     Meilisearch,
     ManticoreSearch,
     CloudflareD1,
-    // Restricted (no reliable pure-Rust driver)
+    // Vendor ODBC drivers (no pure-Rust wire-protocol driver)
     Access,
     Oracle,
     Dm,
@@ -85,7 +85,7 @@ impl DataSourceKind {
         Self::Meilisearch,
         Self::ManticoreSearch,
         Self::CloudflareD1,
-        // Restricted
+        // Vendor ODBC drivers (no pure-Rust wire-protocol driver)
         Self::Access,
         Self::Oracle,
         Self::Dm,
@@ -152,18 +152,12 @@ impl DataSourceKind {
         matches!(self, Self::CloudflareD1)
     }
 
-    pub const fn is_restricted(self) -> bool {
-        matches!(self, Self::Access | Self::Oracle | Self::Dm | Self::XuguDb)
-    }
-
     /// Relational SQL databases with a query editor. Excludes document,
-    /// key-value, search, HTTP-SQL and restricted types.
+    /// key-value, search and HTTP-SQL types. Vendor-driver-only brands
+    /// (Oracle, DM, XuguDB, Access) are relational too — they run through
+    /// the ODBC bridge.
     pub const fn is_relational(self) -> bool {
-        !(self.is_document()
-            || self.is_kv()
-            || self.is_search()
-            || self.is_http_sql()
-            || self.is_restricted())
+        !(self.is_document() || self.is_kv() || self.is_search() || self.is_http_sql())
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -660,6 +654,16 @@ mod tests {
         assert_eq!(DataSourceKind::TimescaleDb.default_port(), Some(5432));
         assert!(!DataSourceKind::MongoDb.is_relational());
         assert!(DataSourceKind::TiDb.is_relational());
+    }
+
+    #[test]
+    fn odbc_kinds_are_relational() {
+        assert!(DataSourceKind::Oracle.is_relational());
+        assert!(DataSourceKind::Dm.is_relational());
+        assert!(DataSourceKind::XuguDb.is_relational());
+        // Access stays file-based but is queryable through the ODBC bridge.
+        assert!(DataSourceKind::Access.is_relational());
+        assert!(DataSourceKind::Access.is_file_based());
     }
 
     #[test]

@@ -249,14 +249,25 @@ impl DriverRegistry {
             Arc::new(db_http::CloudflareD1HttpConnector),
         );
 
-        // ---- Restricted / unsupported (config-only) ----
+        // ---- Vendor ODBC bridge (Oracle, DM, XuguDB, Access) ----
+        // One tester/metadata/executor instance per kind: the ODBC bridge
+        // carries its kind identity for reports, and each executor owns a
+        // separate pool map.
         for kind in [
-            DataSourceKind::Access,
             DataSourceKind::Oracle,
             DataSourceKind::Dm,
             DataSourceKind::XuguDb,
+            DataSourceKind::Access,
         ] {
-            testers.insert(kind, Arc::new(RestrictedConnectionTester::new(kind)));
+            testers.insert(kind, Arc::new(db_odbc::OdbcConnectionTester::new(kind)));
+            relational_metadata.insert(
+                kind,
+                Arc::new(db_odbc::OdbcMetadataReader::new(kind)),
+            );
+            relational_query.insert(
+                kind,
+                Arc::new(db_odbc::OdbcQueryExecutor::new(kind)),
+            );
         }
 
         Self {
@@ -531,7 +542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restricted_kinds_return_unsupported() {
+    async fn odbc_kinds_route_to_odbc_driver() {
         let registry = DriverRegistry::default();
         for kind in [
             DataSourceKind::Oracle,
@@ -540,8 +551,9 @@ mod tests {
             DataSourceKind::Access,
         ] {
             let tester = registry.tester(kind).expect("tester");
+            assert_eq!(tester.kind(), kind);
             // Access is file-based so it needs a file_path to pass validation;
-            // the other restricted kinds just need a host.
+            // the other ODBC kinds just need a host.
             let mut builder = db_common::ConnectionProfile::builder(kind, "x");
             if kind.is_file_based() {
                 builder = builder.file_path("/tmp/fake");
@@ -549,14 +561,30 @@ mod tests {
                 builder = builder.host("localhost").username("u");
             }
             let profile = builder.build().expect("profile");
+            // No vendor ODBC driver is installed in CI, so a connection
+            // attempt must fail — but with a Connection/Query error carrying
+            // the driver-manager diagnostics, not an Unsupported rejection.
             let result = tester.test_connection(&profile, None).await;
-            assert!(result.is_err(), "{kind:?} should be unsupported");
-            let err = result.unwrap_err();
-            assert_eq!(
+            let err = match result {
+                Ok(_) => continue, // a driver happened to be present
+                Err(err) => err,
+            };
+            assert_ne!(
                 err.kind,
                 ErrorKind::Unsupported,
-                "{kind:?} wrong error kind"
+                "{kind:?} must not be rejected as unsupported anymore"
             );
+            assert!(
+                matches!(err.kind, ErrorKind::Connection | ErrorKind::Query),
+                "{kind:?} unexpected error kind: {:?} ({})",
+                err.kind,
+                err.message
+            );
+
+            let metadata = registry.relational_metadata(kind).expect("metadata");
+            assert_eq!(metadata.kind(), kind);
+            let query = registry.relational_query(kind).expect("query executor");
+            assert_eq!(query.kind(), kind);
         }
     }
 }

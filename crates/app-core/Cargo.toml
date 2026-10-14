@@ -13,6 +13,7 @@ db-duckdb = { path = "../db-duckdb" }
 db-http = { path = "../db-http" }
 db-mysql = { path = "../db-mysql" }
 db-mongodb = { path = "../db-mongodb" }
+db-odbc = { path = "../db-odbc" }
 db-sqlserver = { path = "../db-sqlserver" }
 db-clickhouse = { path = "../db-clickhouse" }
 db-postgres = { path = "../db-postgres" }
