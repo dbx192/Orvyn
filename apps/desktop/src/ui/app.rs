@@ -4,7 +4,7 @@ mod dialogs;
 mod export_sql;
 mod payloads;
 mod shell;
-mod style;
+pub mod style;
 mod tasks;
 mod tree;
 

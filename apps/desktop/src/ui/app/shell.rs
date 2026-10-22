@@ -151,21 +151,19 @@ impl DesktopApp {
                     );
                 });
                 if selected || tab_response.hovered() {
-                    if ui
-                        .add_enabled(!dirty, Button::new("x"))
-                        .on_hover_text(if dirty {
-                            tr("Save or rollback changes before closing")
-                        } else {
-                            tr("Close table")
-                        })
-                        .clicked()
-                    {
+                    let close = super::style::close_icon_button(ui, 18.0, dirty);
+                    let close = if dirty {
+                        close.on_hover_text(tr("Save or rollback changes before closing"))
+                    } else {
+                        close.on_hover_text(tr("Close table"))
+                    };
+                    if close.clicked() && !dirty {
                         close_tabs = Some(vec![id]);
                     }
                 } else {
                     // Preserve the tab width while keeping inactive close
                     // controls hidden until the pointer reaches the tab.
-                    ui.allocate_exact_size(vec2(18.0, 28.0), Sense::hover());
+                    ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
                 }
             }
             if let Some(ids) = close_tabs {
@@ -192,8 +190,7 @@ impl DesktopApp {
                     self.active_redis_browser = Some(id);
                 }
                 if selected || tab_response.hovered() {
-                    if ui
-                        .add(Button::new("x"))
+                    if super::style::close_icon_button(ui, 18.0, false)
                         .on_hover_text(tr("Close"))
                         .clicked()
                     {
@@ -202,7 +199,7 @@ impl DesktopApp {
                 } else {
                     // Preserve the tab width while keeping inactive close
                     // controls hidden until the pointer reaches the tab.
-                    ui.allocate_exact_size(vec2(18.0, 28.0), Sense::hover());
+                    ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
                 }
             }
             if let Some(id) = close_redis_tab {

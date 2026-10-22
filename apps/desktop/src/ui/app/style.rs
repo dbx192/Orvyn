@@ -1,6 +1,7 @@
 use crate::ui::state::AppTheme;
 use eframe::egui::{
-    vec2, Color32, Context, FontFamily, FontId, Margin, Rounding, Stroke, TextStyle, Visuals,
+    pos2, vec2, Color32, Context, FontFamily, FontId, Margin, Response, Rounding, Sense, Stroke,
+    TextStyle, Ui, Visuals,
 };
 
 /// dbx-inspired semantic palette. Kept here so the shell, tree and grids can
@@ -157,4 +158,40 @@ pub fn current_palette(ctx: &Context) -> Palette {
     } else {
         AppTheme::Light
     })
+}
+
+/// VSCode-style compact "×" control (tab close buttons, filter reset): a small
+/// borderless glyph with a quiet hover background instead of a full-size
+/// framed `Button`. `dirty` renders the modified-state dot (like VSCode) and
+/// the dot only becomes an "×" while hovered; gating the click on `!dirty`
+/// stays at the call site.
+pub fn close_icon_button(ui: &mut Ui, size: f32, dirty: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let painter = ui.painter();
+    let hovered = response.hovered() || response.clicked();
+    if hovered {
+        painter.rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let fg = if hovered {
+        ui.visuals().text_color()
+    } else {
+        current_palette(ui.ctx()).fg_muted
+    };
+    let center = rect.center();
+    if dirty && !hovered {
+        // Unsaved-changes dot, matching VSCode's modified-tab indicator.
+        painter.circle_filled(center, size * 0.14, fg);
+    } else {
+        let r = size * 0.22;
+        let stroke = Stroke::new(1.3, fg);
+        painter.line_segment(
+            [pos2(center.x - r, center.y - r), pos2(center.x + r, center.y + r)],
+            stroke,
+        );
+        painter.line_segment(
+            [pos2(center.x - r, center.y + r), pos2(center.x + r, center.y - r)],
+            stroke,
+        );
+    }
+    response
 }

@@ -555,19 +555,19 @@ impl QueryEditor {
                     }
                 });
                 if selected || response.hovered() {
-                    if ui
-                        .add_enabled(!dirty, Button::new("x"))
-                        .on_hover_text(if dirty {
-                            tr("Save or rollback changes before closing")
-                        } else {
-                            tr("Close query")
-                        })
-                        .clicked()
-                    {
+                    // Dirty state is already carried by the "* " title prefix,
+                    // so the dot variant would be redundant here.
+                    let close = crate::ui::app::style::close_icon_button(ui, 18.0, false);
+                    let close = if dirty {
+                        close.on_hover_text(tr("Save or rollback changes before closing"))
+                    } else {
+                        close.on_hover_text(tr("Close query"))
+                    };
+                    if close.clicked() && !dirty {
                         close_tab = Some(id);
                     }
                 } else {
-                    ui.allocate_exact_size(vec2(18.0, 28.0), eframe::egui::Sense::hover());
+                    ui.allocate_exact_size(vec2(18.0, 18.0), eframe::egui::Sense::hover());
                 }
             }
         });

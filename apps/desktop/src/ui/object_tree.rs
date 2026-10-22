@@ -383,17 +383,20 @@ impl ObjectTree {
 
     fn search_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            let clear_width = 26.0;
+            // Input and reset control share one exact height so the row looks
+            // like a single aligned field instead of mismatched widgets.
+            let row_height = 22.0;
+            let clear_width = 22.0;
             let edit_width = (ui.available_width() - clear_width).max(80.0);
             let response = ui.add_sized(
-                [edit_width, 22.0],
+                [edit_width, row_height],
                 TextEdit::singleline(&mut self.search_query).hint_text(tr(
                     "Search databases, tables, queries (at least 2 characters)",
                 )),
             );
             let _ = response.changed();
-            if ui
-                .add_sized([clear_width - 2.0, 22.0], Button::new("x"))
+            if crate::ui::app::style::close_icon_button(ui, row_height, false)
+                .on_hover_text(tr("Clear"))
                 .clicked()
             {
                 self.search_query.clear();
