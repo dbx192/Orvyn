@@ -12,16 +12,17 @@ pub fn install_global_fonts(ctx: &Context) {
         FontData::from_static(include_bytes!("../../fonts/Inter-Regular.ttf")),
     );
     // Noto Sans CJK joins two families whose primaries have different line
-    // metrics, so a dedicated instance is tuned per anchor font.
+    // metrics, so a dedicated instance is tuned per anchor font (hhea
+    // ascender / descender / units-per-em from each primary's tables).
     fonts.font_data.insert(
         "orvyn-cjk".to_string(),
         FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf"))
-            .tweak(cjk_tweak(1.209_961, 0.968_750)),
+            .tweak(cjk_tweak(latin_ascent_per_size(1984.0, -494.0, 2048.0))),
     );
     fonts.font_data.insert(
         "orvyn-cjk-mono".to_string(),
         FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf"))
-            .tweak(cjk_tweak(1.320_000, 1.020_000)),
+            .tweak(cjk_tweak(latin_ascent_per_size(1020.0, -300.0, 1000.0))),
     );
     fonts.font_data.insert(
         "orvyn-mono".to_string(),
@@ -99,33 +100,40 @@ fn fallback_families() -> [FontFamily; 4] {
     ]
 }
 
-/// egui 0.27 pre-scales every font by its hhea line box (its fix for
-/// emilk/egui#2068) but takes the row height from the family's *first* font
-/// while placing glyphs on a baseline derived from their own font's inflated
-/// ascent. Noto Sans CJK's hhea line box is 1.448em versus Inter's 1.210em /
-/// JetBrains Mono's 1.320em, so CJK glyphs drew ~20% larger and their baseline
-/// landed near the bottom edge of every widget (the "text sits too low" bug).
+/// Why a tweak is needed: egui 0.27 lays every glyph of a row on one shared
+/// baseline equal to the *largest* per-font `ascent` field among the glyphs
+/// in that row, where a font's `ascent` field is its own hhea metric
+/// normalized to the requested size plus `FontTweak::baseline_offset_factor`
+/// (`FontTweak::default()` applies -0.0333 — egui's Ubuntu correction — to
+/// every font without an explicit tweak). Noto Sans CJK's hhea line box is
+/// 1.448em (asc 1.16 / desc -0.288) versus Inter's 1.210em (asc 0.96875) and
+/// JetBrains Mono's 1.320em (asc 1.02), so an untweaked CJK font's ascent
+/// field lands ~3.9px above Inter's @14pt: pure-CJK rows ("运行当前的语句")
+/// drew visibly higher than mixed rows ("格式化 SQL").
 ///
-/// The returned tweak renormalizes the CJK font against the primary Latin
-/// font of the family it joins. `latin_line` / `latin_asc` are the primary's
-/// hhea line height and ascender in em (Inter 2478/2048 = 1.20996, 0.96875;
-/// JetBrains Mono 1320/1000 = 1.32, 1.02; CJK 1448/1000, 1.16):
-///   scale                  = latin_line / cjk_line  (equal em boxes)
-///   baseline_offset_factor = (latin_line * latin_asc - cjk_line * cjk_asc)
-///                            / latin_line           (equal baselines)
-///   y_offset_factor        = (1 - scale) * 0.5 * (cjk_asc + cjk_desc) / scale
-///                            (cancels egui's built-in scale recentering)
-fn cjk_tweak(latin_line: f32, latin_asc: f32) -> FontTweak {
+/// The tweak shifts the CJK ascent field onto the anchor Latin font's
+/// baseline while keeping scale at 1.0 (egui's emilk/egui#2068 fix already
+/// normalizes all em boxes, so shrinking would make CJK glyphs ~20% smaller):
+///   ascent_field = size * cjk_line * (cjk_asc_frac + f)  (cjk_asc_frac = 1160/1448)
+///   f            = latin_ascent_per_size / cjk_line - cjk_asc_frac
+fn cjk_tweak(latin_ascent_per_size: f32) -> FontTweak {
     const CJK_LINE: f32 = 1.448; // (1160 - -288) / upem(1000)
-    const CJK_ASC: f32 = 1.160; // 1160 / 1000
-    const CJK_ASC_DESC: f32 = 0.872; // (1160 - 288) / 1000
-    let scale = latin_line / CJK_LINE;
+    const CJK_ASC_FRAC: f32 = 1160.0 / 1448.0; // hhea ascender / line box
     FontTweak {
-        scale,
-        baseline_offset_factor: (latin_line * latin_asc - CJK_LINE * CJK_ASC) / latin_line,
-        y_offset_factor: (1.0 - scale) * 0.5 * CJK_ASC_DESC / scale,
+        scale: 1.0,
+        baseline_offset_factor: latin_ascent_per_size / CJK_LINE - CJK_ASC_FRAC,
+        y_offset_factor: 0.0,
         y_offset: 0.0,
     }
+}
+
+/// Baseline distance (the `ascent` field epaint stores in `FontImpl`) per
+/// point of requested size for an *untweaked* font, replicating epaint
+/// 0.27's `FontImpl::new` math:
+///   ascent = (hhea_asc + hhea_line * default_baseline_offset_factor) / upem
+fn latin_ascent_per_size(hhea_asc: f32, hhea_desc: f32, upem: f32) -> f32 {
+    let line = hhea_asc - hhea_desc;
+    (hhea_asc + line * FontTweak::default().baseline_offset_factor) / upem
 }
 
 fn global_font_candidates() -> Vec<PathBuf> {
@@ -181,5 +189,67 @@ mod tests {
         let families = fallback_families();
         assert!(families.contains(&FontFamily::Name("orvyn-inter".into())));
         assert!(families.contains(&FontFamily::Name("orvyn-mono".into())));
+    }
+
+    /// Pure-CJK rows must sit on the same baseline as Latin rows: egui 0.27
+    /// lays a row's glyphs on the largest per-font ascent field in the row,
+    /// so the tweak has to equalize Noto Sans CJK's ascent field with the
+    /// anchor font's. Run with: cargo test -p orvyn cjk_rows -- --nocapture
+    #[test]
+    fn cjk_rows_share_the_latin_baseline() {
+        use eframe::egui::text::LayoutJob;
+        use eframe::epaint::text::Fonts;
+
+        let mut defs = FontDefinitions::default();
+        defs.font_data.insert(
+            "orvyn-inter".to_string(),
+            FontData::from_static(include_bytes!("../../fonts/Inter-Regular.ttf")),
+        );
+        defs.font_data.insert(
+            "orvyn-cjk".to_string(),
+            FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf"))
+                .tweak(cjk_tweak(latin_ascent_per_size(1984.0, -494.0, 2048.0))),
+        );
+        defs.font_data.insert(
+            "orvyn-mono".to_string(),
+            FontData::from_static(include_bytes!("../../fonts/JetBrainsMono-Regular.ttf")),
+        );
+        defs.font_data.insert(
+            "orvyn-cjk-mono".to_string(),
+            FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf"))
+                .tweak(cjk_tweak(latin_ascent_per_size(1020.0, -300.0, 1000.0))),
+        );
+        defs.families.insert(
+            FontFamily::Name("orvyn-inter".into()),
+            vec!["orvyn-inter".into(), "orvyn-cjk".into()],
+        );
+        defs.families.insert(
+            FontFamily::Name("orvyn-mono".into()),
+            vec!["orvyn-mono".into(), "orvyn-cjk-mono".into()],
+        );
+
+        let fonts = Fonts::new(1.0, 4096, defs);
+        let baseline = |family: &str, text: &str| {
+            let job = LayoutJob::simple(
+                text.to_string(),
+                eframe::egui::FontId::new(14.0, FontFamily::Name(family.into())),
+                eframe::egui::Color32::WHITE,
+                f32::INFINITY,
+            );
+            fonts.layout_job(job).rows[0].glyphs[0].ascent
+        };
+
+        for (family, latin_text, cjk_text) in [
+            ("orvyn-inter", "BEGIN", "运行当前的语句"),
+            ("orvyn-mono", "SELECT 1;", "运行当前的语句"),
+        ] {
+            let latin_ascent = baseline(family, latin_text);
+            let cjk_ascent = baseline(family, cjk_text);
+            println!("{family}: latin={latin_ascent:.4} cjk={cjk_ascent:.4}");
+            assert!(
+                (cjk_ascent - latin_ascent).abs() < 0.05,
+                "CJK baseline {cjk_ascent} diverges from Latin {latin_ascent}"
+            );
+        }
     }
 }
