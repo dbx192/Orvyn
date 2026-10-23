@@ -46,6 +46,7 @@ enum QueryEditorEvent {
     HistoryLoaded(Vec<QueryHistoryEntry>),
     FavoritesLoaded(Vec<FavoriteQuery>),
     FavoriteSaved(Result<FavoriteQuery, AppError>),
+    FavoriteUpdated(Result<FavoriteQuery, AppError>),
     FavoriteRemoved(Result<QueryId, AppError>),
     TransactionCompleted(QueryId, TransactionAction, Result<(), AppError>),
     MetadataLoadFailed(QueryId, String),
@@ -60,7 +61,6 @@ const LARGE_SQL_HIGHLIGHT_THRESHOLD: usize = 20_000;
 const SQL_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(140);
 const MAX_COMPLETION_ITEMS: usize = 24;
 const SQL_EDITOR_VIEWPORT_HEIGHT: f32 = 240.0;
-const SQL_EDITOR_PANEL_HEIGHT: f32 = SQL_EDITOR_VIEWPORT_HEIGHT + 52.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionAction {
@@ -210,6 +210,12 @@ pub struct QueryEditor {
     side_panel_open: bool,
     side_panel_width: f32,
     favorite_name_input: String,
+    /// Filter text for the history side panel.
+    history_search: String,
+    /// Filter text for the favorites side panel.
+    favorite_search: String,
+    /// Favorite currently being edited (updated in place on save).
+    editing_favorite: Option<QueryId>,
     status: String,
     /// Completion messages for async exports; polled into `status`.
     export_status: Arc<Mutex<Option<String>>>,
@@ -241,6 +247,9 @@ impl QueryEditor {
             side_panel_open: false,
             side_panel_width: 360.0,
             favorite_name_input: String::new(),
+            history_search: String::new(),
+            favorite_search: String::new(),
+            editing_favorite: None,
             status: String::new(),
             export_status: Arc::new(Mutex::new(None)),
         };
@@ -855,6 +864,10 @@ impl QueryEditor {
             } else {
                 ui.available_width()
             };
+            // Pin the row to the full remaining height (down to the status
+            // bar) so the results area and the history/favorites side panel
+            // both stretch to the bottom.
+            ui.set_min_height(ui.available_height());
 
             ui.vertical(|ui| {
                 ui.set_width(main_width);
@@ -1029,11 +1042,16 @@ impl QueryEditor {
                                 }
                             });
                     });
+
+                ui.separator();
+                self.results_panel(ui, tab_id);
             });
 
             if self.side_panel_open {
+                // Stretch the divider and the side panel down to the status
+                // bar; the row is pinned to full height via set_min_height.
                 let (divider_rect, divider_response) = ui.allocate_exact_size(
-                    vec2(8.0, SQL_EDITOR_PANEL_HEIGHT),
+                    vec2(8.0, ui.available_height()),
                     eframe::egui::Sense::drag(),
                 );
                 if divider_response.dragged() {
@@ -1048,13 +1066,11 @@ impl QueryEditor {
                 );
                 ui.vertical(|ui| {
                     ui.set_width(side_width);
+                    ui.set_min_height(ui.available_height());
                     self.history_panel(ui, tab_id);
                 });
             }
         });
-
-        ui.separator();
-        self.results_panel(ui, tab_id);
 
         for table in column_loads {
             self.load_columns_for_tab(tab_id, table);
@@ -1066,12 +1082,12 @@ impl QueryEditor {
             ui.selectable_value(&mut self.side_tab, QuerySideTab::History, tr("History"));
             ui.selectable_value(&mut self.side_tab, QuerySideTab::Favorites, tr("Favorites"));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("x").clicked() {
+                if crate::ui::app::style::close_icon_button(ui, 18.0, false).clicked() {
                     self.side_panel_open = false;
                 }
             });
         });
-        ui.add_space(4.0);
+        ui.add_space(2.0);
 
         match self.side_tab {
             QuerySideTab::History => self.history_list(ui, tab_id),
@@ -1920,6 +1936,17 @@ impl QueryEditor {
                         self.status = format!("Save favorite failed: {}", error.message);
                     }
                 },
+                QueryEditorEvent::FavoriteUpdated(result) => match result {
+                    Ok(favorite) => {
+                        upsert_favorite(&mut self.favorite_entries, favorite);
+                        self.editing_favorite = None;
+                        self.favorite_name_input.clear();
+                        self.status = "Favorite updated".to_string();
+                    }
+                    Err(error) => {
+                        self.status = format!("Update favorite failed: {}", error.message);
+                    }
+                },
                 QueryEditorEvent::FavoriteRemoved(result) => match result {
                     Ok(id) => {
                         self.favorite_entries.retain(|entry| entry.id != id);
@@ -2175,9 +2202,10 @@ impl QueryEditor {
                     .color(Color32::GRAY),
             );
         });
+        side_search_box(ui, &mut self.history_search);
+        ui.add_space(2.0);
         ScrollArea::vertical()
             .id_source("query_history_panel")
-            .max_height(SQL_EDITOR_VIEWPORT_HEIGHT)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.history_entries.is_empty() {
@@ -2189,8 +2217,31 @@ impl QueryEditor {
                     return;
                 }
 
+                let query = self.history_search.trim().to_lowercase();
+                let entries: Vec<QueryHistoryEntry> = self
+                    .history_entries
+                    .iter()
+                    .filter(|entry| {
+                        query.is_empty()
+                            || entry.summary.to_lowercase().contains(&query)
+                            || entry.sql.to_lowercase().contains(&query)
+                    })
+                    .take(100)
+                    .cloned()
+                    .collect();
+                if entries.is_empty() {
+                    ui.label(
+                        RichText::new("No matching history")
+                            .italics()
+                            .color(Color32::GRAY),
+                    );
+                    return;
+                }
+
+                // Compact one-line rows instead of grouped cards.
+                ui.style_mut().spacing.item_spacing.y = 1.0;
                 let mut picked_sql = None;
-                for entry in self.history_entries.iter().take(100) {
+                for entry in &entries {
                     let conn_name = self
                         .connections
                         .iter()
@@ -2202,42 +2253,38 @@ impl QueryEditor {
                     } else {
                         Color32::from_rgb(200, 80, 80)
                     };
-
-                    eframe::egui::Frame::group(ui.style()).show(ui, |ui| {
-                        if ui
-                            .selectable_label(false, &entry.summary)
-                            .on_hover_text(&entry.sql)
-                            .clicked()
-                        {
-                            picked_sql = Some(entry.sql.clone());
-                        }
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(conn_name).small().color(Color32::GRAY));
-                            ui.label(
-                                RichText::new(
-                                    entry.executed_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                                )
+                    let response = ui.add_sized(
+                        [ui.available_width(), 20.0],
+                        eframe::egui::SelectableLabel::new(
+                            false,
+                            RichText::new(&entry.summary).small().monospace(),
+                        ),
+                    );
+                    if response.clicked() {
+                        picked_sql = Some(entry.sql.clone());
+                    }
+                    response.on_hover_text(format!(
+                        "{}\n{}\n{} · {} ms · {} rows",
+                        entry.summary,
+                        entry.sql,
+                        conn_name,
+                        entry.elapsed_ms,
+                        entry.affected_rows
+                    ));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(conn_name).small().color(Color32::GRAY));
+                        ui.label(
+                            RichText::new(entry.executed_at.format("%Y-%m-%d %H:%M:%S").to_string())
                                 .small()
                                 .color(Color32::GRAY),
-                            );
-                            ui.label(
-                                RichText::new(format!("{} ms", entry.elapsed_ms))
-                                    .small()
-                                    .color(Color32::GRAY),
-                            );
-                            ui.label(
-                                RichText::new(format!("{} rows", entry.affected_rows))
-                                    .small()
-                                    .color(Color32::GRAY),
-                            );
-                            ui.label(
-                                RichText::new(if entry.success { "OK" } else { "ERR" })
-                                    .small()
-                                    .color(success_color),
-                            );
-                        });
+                        );
+                        ui.label(
+                            RichText::new(if entry.success { "OK" } else { "ERR" })
+                                .small()
+                                .color(success_color),
+                        );
                     });
-                    ui.add_space(4.0);
+                    ui.separator();
                 }
 
                 if let Some(sql) = picked_sql {
@@ -2260,20 +2307,27 @@ impl QueryEditor {
                     .color(Color32::GRAY),
             );
         });
+        side_search_box(ui, &mut self.favorite_search);
+        ui.add_space(2.0);
         ui.horizontal(|ui| {
-            ui.add(
+            let editing = self.editing_favorite.is_some();
+            let cancel_width = if editing { 52.0 } else { 0.0 };
+            ui.add_sized(
+                [ui.available_width() - cancel_width, 22.0],
                 TextEdit::singleline(&mut self.favorite_name_input)
-                    .hint_text(tr("Favorite name"))
-                    .desired_width(180.0),
+                    .hint_text(tr("Favorite name")),
             );
-            if ui.button(tr("Save Current")).clicked() {
+            if ui.button(if editing { tr("Update") } else { tr("Save Current") }).clicked() {
                 self.save_current_as_favorite(tab_id);
             }
+            if editing && ui.button(tr("Cancel")).clicked() {
+                self.editing_favorite = None;
+                self.favorite_name_input.clear();
+            }
         });
-        ui.add_space(4.0);
+        ui.add_space(2.0);
         ScrollArea::vertical()
             .id_source("query_favorites_panel")
-            .max_height(SQL_EDITOR_VIEWPORT_HEIGHT)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.favorite_entries.is_empty() {
@@ -2285,27 +2339,120 @@ impl QueryEditor {
                     return;
                 }
 
-                let mut picked_sql = None;
-                let mut remove_id = None;
-                for entry in &self.favorite_entries {
-                    eframe::egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui.selectable_label(false, &entry.title).clicked() {
-                                picked_sql = Some(entry.sql.clone());
-                            }
-                            if ui.small_button(tr("Delete")).clicked() {
-                                remove_id = Some(entry.id);
-                            }
-                        });
-                        ui.label(
-                            RichText::new(entry.updated_at.format("%Y-%m-%d %H:%M:%S").to_string())
-                                .small()
-                                .color(Color32::GRAY),
-                        );
-                    });
-                    ui.add_space(4.0);
+                let query = self.favorite_search.trim().to_lowercase();
+                let entries: Vec<FavoriteQuery> = self
+                    .favorite_entries
+                    .iter()
+                    .filter(|entry| {
+                        query.is_empty()
+                            || entry.title.to_lowercase().contains(&query)
+                            || entry.sql.to_lowercase().contains(&query)
+                    })
+                    .cloned()
+                    .collect();
+                if entries.is_empty() {
+                    ui.label(
+                        RichText::new("No matching favorites")
+                            .italics()
+                            .color(Color32::GRAY),
+                    );
+                    return;
                 }
 
+                // Compact four-column list: name | time | edit | delete.
+                ui.style_mut().spacing.item_spacing.y = 1.0;
+                ui.style_mut().spacing.item_spacing.x = 4.0;
+                ui.style_mut().spacing.button_padding = vec2(4.0, 2.0);
+                let time_width = 96.0;
+                let action_width = 34.0;
+                let name_width = (ui.available_width()
+                    - time_width
+                    - action_width * 2.0
+                    - 12.0)
+                .max(60.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [name_width, 16.0],
+                        eframe::egui::Label::new(
+                            RichText::new(tr("Name")).small().strong().color(Color32::GRAY),
+                        ),
+                    );
+                    ui.add_sized(
+                        [time_width, 16.0],
+                        eframe::egui::Label::new(
+                            RichText::new(tr("Time")).small().strong().color(Color32::GRAY),
+                        ),
+                    );
+                    ui.add_sized(
+                        [action_width, 16.0],
+                        eframe::egui::Label::new(
+                            RichText::new(tr("Edit")).small().strong().color(Color32::GRAY),
+                        ),
+                    );
+                    ui.add_sized(
+                        [action_width, 16.0],
+                        eframe::egui::Label::new(
+                            RichText::new(tr("Delete")).small().strong().color(Color32::GRAY),
+                        ),
+                    );
+                });
+                ui.separator();
+
+                let mut picked_sql = None;
+                let mut edit_target = None;
+                let mut remove_id = None;
+                for entry in &entries {
+                    ui.horizontal(|ui| {
+                        let name = ui.add_sized(
+                            [name_width, 20.0],
+                            eframe::egui::SelectableLabel::new(
+                                false,
+                                RichText::new(&entry.title).small(),
+                            ),
+                        );
+                        if name.clicked() {
+                            picked_sql = Some(entry.sql.clone());
+                        }
+                        name.on_hover_text(&entry.sql);
+                        ui.add_sized(
+                            [time_width, 20.0],
+                            eframe::egui::Label::new(
+                                RichText::new(entry.updated_at.format("%Y-%m-%d %H:%M").to_string())
+                                    .small()
+                                    .color(Color32::GRAY),
+                            ),
+                        );
+                        if ui
+                            .add_sized(
+                                [action_width, 20.0],
+                                eframe::egui::Button::new(RichText::new(tr("Edit")).small()),
+                            )
+                            .clicked()
+                        {
+                            edit_target = Some(entry.clone());
+                        }
+                        if ui
+                            .add_sized(
+                                [action_width, 20.0],
+                                eframe::egui::Button::new(RichText::new(tr("Delete")).small()),
+                            )
+                            .clicked()
+                        {
+                            remove_id = Some(entry.id);
+                        }
+                    });
+                }
+
+                if let Some(entry) = edit_target {
+                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                        tab.sql = entry.sql.clone();
+                        tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+                        tab.dirty = true;
+                    }
+                    self.editing_favorite = Some(entry.id);
+                    self.favorite_name_input = entry.title;
+                    self.status = "Loaded SQL from favorites".to_string();
+                }
                 if let Some(sql) = picked_sql {
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
                         tab.sql = sql;
@@ -2339,12 +2486,21 @@ impl QueryEditor {
         let connection_id = Some(tab.connection_id);
         let database = tab.database.clone();
         let schema = tab.schema.clone();
-        self.runtime.spawn(async move {
-            let result = service
-                .add_favorite(connection_id, database, schema, title, sql)
-                .await;
-            let _ = tx.send(QueryEditorEvent::FavoriteSaved(result));
-        });
+        if let Some(id) = self.editing_favorite {
+            self.runtime.spawn(async move {
+                let result = service
+                    .update_favorite(id, connection_id, database, schema, title, sql)
+                    .await;
+                let _ = tx.send(QueryEditorEvent::FavoriteUpdated(result));
+            });
+        } else {
+            self.runtime.spawn(async move {
+                let result = service
+                    .add_favorite(connection_id, database, schema, title, sql)
+                    .await;
+                let _ = tx.send(QueryEditorEvent::FavoriteSaved(result));
+            });
+        }
     }
 
     fn remove_favorite(&mut self, id: QueryId) {
@@ -2359,6 +2515,14 @@ impl QueryEditor {
 
 fn connection_label(profile: &ConnectionProfile) -> String {
     format!("{} ({})", profile.name, profile.kind.as_str())
+}
+
+/// Full-width compact filter input shared by the history/favorites panels.
+fn side_search_box(ui: &mut Ui, text: &mut String) {
+    ui.add_sized(
+        [ui.available_width(), 22.0],
+        TextEdit::singleline(text).hint_text(tr("Search")),
+    );
 }
 
 fn next_tab_title(_connection_name: &str) -> String {

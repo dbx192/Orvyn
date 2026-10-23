@@ -1,4 +1,6 @@
-use eframe::egui::{Context, FontData, FontDefinitions, FontFamily};
+use eframe::egui::{
+    Context, FontData, FontDefinitions, FontFamily, FontTweak,
+};
 use std::path::{Path, PathBuf};
 
 pub fn install_global_fonts(ctx: &Context) {
@@ -9,9 +11,17 @@ pub fn install_global_fonts(ctx: &Context) {
         "orvyn-inter".to_string(),
         FontData::from_static(include_bytes!("../../fonts/Inter-Regular.ttf")),
     );
+    // Noto Sans CJK joins two families whose primaries have different line
+    // metrics, so a dedicated instance is tuned per anchor font.
     fonts.font_data.insert(
         "orvyn-cjk".to_string(),
-        FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf")),
+        FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf"))
+            .tweak(cjk_tweak(1.209_961, 0.968_750)),
+    );
+    fonts.font_data.insert(
+        "orvyn-cjk-mono".to_string(),
+        FontData::from_static(include_bytes!("../../fonts/NotoSansCJKsc-Regular.otf"))
+            .tweak(cjk_tweak(1.320_000, 1.020_000)),
     );
     fonts.font_data.insert(
         "orvyn-mono".to_string(),
@@ -38,7 +48,7 @@ pub fn install_global_fonts(ctx: &Context) {
     );
     fonts.families.insert(
         FontFamily::Name("orvyn-mono".into()),
-        ["orvyn-mono", "orvyn-cjk"]
+        ["orvyn-mono", "orvyn-cjk-mono"]
             .into_iter()
             .map(str::to_string)
             .chain(monospace_fallbacks)
@@ -87,6 +97,35 @@ fn fallback_families() -> [FontFamily; 4] {
         FontFamily::Name("orvyn-inter".into()),
         FontFamily::Name("orvyn-mono".into()),
     ]
+}
+
+/// egui 0.27 pre-scales every font by its hhea line box (its fix for
+/// emilk/egui#2068) but takes the row height from the family's *first* font
+/// while placing glyphs on a baseline derived from their own font's inflated
+/// ascent. Noto Sans CJK's hhea line box is 1.448em versus Inter's 1.210em /
+/// JetBrains Mono's 1.320em, so CJK glyphs drew ~20% larger and their baseline
+/// landed near the bottom edge of every widget (the "text sits too low" bug).
+///
+/// The returned tweak renormalizes the CJK font against the primary Latin
+/// font of the family it joins. `latin_line` / `latin_asc` are the primary's
+/// hhea line height and ascender in em (Inter 2478/2048 = 1.20996, 0.96875;
+/// JetBrains Mono 1320/1000 = 1.32, 1.02; CJK 1448/1000, 1.16):
+///   scale                  = latin_line / cjk_line  (equal em boxes)
+///   baseline_offset_factor = (latin_line * latin_asc - cjk_line * cjk_asc)
+///                            / latin_line           (equal baselines)
+///   y_offset_factor        = (1 - scale) * 0.5 * (cjk_asc + cjk_desc) / scale
+///                            (cancels egui's built-in scale recentering)
+fn cjk_tweak(latin_line: f32, latin_asc: f32) -> FontTweak {
+    const CJK_LINE: f32 = 1.448; // (1160 - -288) / upem(1000)
+    const CJK_ASC: f32 = 1.160; // 1160 / 1000
+    const CJK_ASC_DESC: f32 = 0.872; // (1160 - 288) / 1000
+    let scale = latin_line / CJK_LINE;
+    FontTweak {
+        scale,
+        baseline_offset_factor: (latin_line * latin_asc - CJK_LINE * CJK_ASC) / latin_line,
+        y_offset_factor: (1.0 - scale) * 0.5 * CJK_ASC_DESC / scale,
+        y_offset: 0.0,
+    }
 }
 
 fn global_font_candidates() -> Vec<PathBuf> {
