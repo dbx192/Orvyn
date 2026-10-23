@@ -103,6 +103,9 @@ pub fn text_edit_cell(
         TextEdit::singleline(value)
             .id(id)
             .desired_width(inner_rect.width())
+            // egui's TextEdit defaults to LEFT_TOP; center the text like the
+            // label cells so edited rows do not sit at the top edge.
+            .vertical_align(Align::Center)
             .frame(false),
     );
     if edit_response.has_focus() {

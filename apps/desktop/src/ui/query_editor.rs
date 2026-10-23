@@ -2201,8 +2201,8 @@ impl QueryEditor {
                     .small()
                     .color(Color32::GRAY),
             );
+            side_search_box(ui, &mut self.history_search);
         });
-        side_search_box(ui, &mut self.history_search);
         ui.add_space(2.0);
         ScrollArea::vertical()
             .id_source("query_history_panel")
@@ -2264,8 +2264,7 @@ impl QueryEditor {
                         picked_sql = Some(entry.sql.clone());
                     }
                     response.on_hover_text(format!(
-                        "{}\n{}\n{} · {} ms · {} rows",
-                        entry.summary,
+                        "{}\n{} · {} ms · {} rows",
                         entry.sql,
                         conn_name,
                         entry.elapsed_ms,
@@ -2306,8 +2305,8 @@ impl QueryEditor {
                     .small()
                     .color(Color32::GRAY),
             );
+            side_search_box(ui, &mut self.favorite_search);
         });
-        side_search_box(ui, &mut self.favorite_search);
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let editing = self.editing_favorite.is_some();
@@ -2517,10 +2516,10 @@ fn connection_label(profile: &ConnectionProfile) -> String {
     format!("{} ({})", profile.name, profile.kind.as_str())
 }
 
-/// Full-width compact filter input shared by the history/favorites panels.
+/// Compact inline filter input shared by the history/favorites panel headers.
 fn side_search_box(ui: &mut Ui, text: &mut String) {
     ui.add_sized(
-        [ui.available_width(), 22.0],
+        [ui.available_width(), 20.0],
         TextEdit::singleline(text).hint_text(tr("Search")),
     );
 }

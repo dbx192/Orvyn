@@ -2106,6 +2106,7 @@ impl TableEditor {
             TextEdit::singleline(value)
                 .id(Id::new(("temporal_edit", row, column_index)))
                 .desired_width(edit_rect.width())
+                .vertical_align(Align::Center)
                 .frame(false),
         );
 
