@@ -209,7 +209,6 @@ pub struct QueryEditor {
     side_tab: QuerySideTab,
     side_panel_open: bool,
     side_panel_width: f32,
-    favorite_name_input: String,
     /// Filter text for the history side panel.
     history_search: String,
     /// Filter text for the favorites side panel.
@@ -246,7 +245,6 @@ impl QueryEditor {
             side_tab: QuerySideTab::History,
             side_panel_open: false,
             side_panel_width: 360.0,
-            favorite_name_input: String::new(),
             history_search: String::new(),
             favorite_search: String::new(),
             editing_favorite: None,
@@ -622,7 +620,11 @@ impl QueryEditor {
                     .unwrap_or((false, false, false, false, false));
 
             if !is_running {
-                if ui.button(tr("Run Current")).clicked() {
+                if ui
+                    .button(tr("Run Current"))
+                    .on_hover_text("Ctrl+R")
+                    .clicked()
+                {
                     self.execute_current_statement();
                 }
                 if ui
@@ -631,10 +633,18 @@ impl QueryEditor {
                 {
                     self.execute_selection();
                 }
-                if ui.button(tr("Run All")).clicked() {
+                if ui
+                    .button(tr("Run All"))
+                    .on_hover_text("Ctrl+Shift+R")
+                    .clicked()
+                {
                     self.show_execute_all = true;
                 }
-                if ui.button(tr("Format SQL")).clicked() {
+                if ui
+                    .button(tr("Format SQL"))
+                    .on_hover_text("Ctrl+Shift+F")
+                    .clicked()
+                {
                     if self.format_current_sql().is_some() {
                         self.status = "SQL formatted".to_string();
                     } else {
@@ -858,6 +868,11 @@ impl QueryEditor {
         let side_width = self.side_panel_width;
         let connections_snapshot = self.connections.clone();
         let mut column_loads = Vec::new();
+        // Navicat-style shortcuts detected inside the SQL editor; dispatched
+        // here because the tab borrow spans the whole editor block.
+        let mut shortcut_run_current = false;
+        let mut shortcut_run_all = false;
+        let mut shortcut_format = false;
         ui.horizontal(|ui| {
             let main_width = if self.side_panel_open {
                 (ui.available_width() - side_width - 12.0).max(360.0)
@@ -961,6 +976,32 @@ impl QueryEditor {
                                     tab.dirty = true;
                                     schedule_sql_highlight(tab);
                                     refresh_completion = true;
+                                }
+
+                                // Navicat-style shortcuts while the editor
+                                // holds focus. Shift variants are consumed
+                                // first so Ctrl+Shift+R cannot leak into the
+                                // Ctrl+R check.
+                                if output.response.has_focus() {
+                                    let ctrl = eframe::egui::Modifiers::CTRL;
+                                    let ctrl_shift =
+                                        eframe::egui::Modifiers::CTRL
+                                            | eframe::egui::Modifiers::SHIFT;
+                                    if ui.input_mut(|input| {
+                                        input.consume_key(ctrl_shift, Key::R)
+                                    }) {
+                                        shortcut_run_all = true;
+                                    }
+                                    if ui.input_mut(|input| {
+                                        input.consume_key(ctrl_shift, Key::F)
+                                    }) {
+                                        shortcut_format = true;
+                                    }
+                                    if ui
+                                        .input_mut(|input| input.consume_key(ctrl, Key::R))
+                                    {
+                                        shortcut_run_current = true;
+                                    }
                                 }
 
                                 let previous_cursor_offset = tab.cursor_offset;
@@ -1074,6 +1115,20 @@ impl QueryEditor {
 
         for table in column_loads {
             self.load_columns_for_tab(tab_id, table);
+        }
+
+        if shortcut_run_current {
+            self.execute_current_statement();
+        }
+        if shortcut_run_all {
+            self.show_execute_all = true;
+        }
+        if shortcut_format {
+            if self.format_current_sql().is_some() {
+                self.status = "SQL formatted".to_string();
+            } else {
+                self.status = "SQL already formatted".to_string();
+            }
         }
     }
 
@@ -1929,7 +1984,6 @@ impl QueryEditor {
                 QueryEditorEvent::FavoriteSaved(result) => match result {
                     Ok(favorite) => {
                         upsert_favorite(&mut self.favorite_entries, favorite);
-                        self.favorite_name_input.clear();
                         self.status = "Favorite saved".to_string();
                     }
                     Err(error) => {
@@ -1940,7 +1994,6 @@ impl QueryEditor {
                     Ok(favorite) => {
                         upsert_favorite(&mut self.favorite_entries, favorite);
                         self.editing_favorite = None;
-                        self.favorite_name_input.clear();
                         self.status = "Favorite updated".to_string();
                     }
                     Err(error) => {
@@ -2306,22 +2359,15 @@ impl QueryEditor {
                     .color(Color32::GRAY),
             );
             side_search_box(ui, &mut self.favorite_search);
-        });
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
             let editing = self.editing_favorite.is_some();
-            let cancel_width = if editing { 52.0 } else { 0.0 };
-            ui.add_sized(
-                [ui.available_width() - cancel_width, 22.0],
-                TextEdit::singleline(&mut self.favorite_name_input)
-                    .hint_text(tr("Favorite name")),
-            );
-            if ui.button(if editing { tr("Update") } else { tr("Save Current") }).clicked() {
+            if ui
+                .button(if editing { tr("Update") } else { tr("Save Current") })
+                .clicked()
+            {
                 self.save_current_as_favorite(tab_id);
             }
             if editing && ui.button(tr("Cancel")).clicked() {
                 self.editing_favorite = None;
-                self.favorite_name_input.clear();
             }
         });
         ui.add_space(2.0);
@@ -2449,7 +2495,6 @@ impl QueryEditor {
                         tab.dirty = true;
                     }
                     self.editing_favorite = Some(entry.id);
-                    self.favorite_name_input = entry.title;
                     self.status = "Loaded SQL from favorites".to_string();
                 }
                 if let Some(sql) = picked_sql {
@@ -2474,10 +2519,16 @@ impl QueryEditor {
             self.status = "No SQL to save".to_string();
             return;
         }
-        let title = if self.favorite_name_input.trim().is_empty() {
-            statement_title(&tab.sql)
-        } else {
-            self.favorite_name_input.trim().to_string()
+        // No dedicated name field: new favorites are titled from their first
+        // statement, updates keep the existing title.
+        let title = match self.editing_favorite {
+            Some(id) => self
+                .favorite_entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.title.clone())
+                .unwrap_or_else(|| statement_title(&tab.sql)),
+            None => statement_title(&tab.sql),
         };
         let service = self.query_service.clone();
         let tx = self.tx.clone();
