@@ -92,7 +92,7 @@ struct TimePickerState {
 struct RemotePage {
     limit: usize,
     offset: u64,
-    total_rows: u64,
+    total_rows: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1264,7 +1264,18 @@ impl TableEditor {
         let (sql, reverse_rows, uses_keyset) = if let Some(filtered_sql) =
             self.filtered_table_query()
         {
-            (filtered_sql, false, false)
+            if direct_offset_paging {
+                // Keep filtered Doris reads bounded and avoid QueryService's
+                // automatic COUNT(*) plan. The page metadata is maintained
+                // locally below, just like the unfiltered direct-paging path.
+                (
+                    format!("{filtered_sql} LIMIT {page_size} OFFSET {offset}"),
+                    false,
+                    true,
+                )
+            } else {
+                (filtered_sql, false, false)
+            }
         } else {
             match keyset_page {
                 Some((sql, reverse_rows)) => (sql, reverse_rows, true),
@@ -1531,7 +1542,14 @@ impl TableEditor {
             ui.label(RichText::new(rows_label).small().color(Color32::GRAY));
 
             ui.separator();
-            let total_pages = self.total_pages().max(1);
+            let remote_total_pages = self
+                .remote_page()
+                .and_then(|page| page.total_rows)
+                .map(|total| total.div_ceil(self.page_size.max(1) as u64) as usize);
+            let total_pages = remote_total_pages.unwrap_or_else(|| self.total_pages()).max(1);
+            let has_more = remote_total_pages
+                .map(|pages| self.page + 1 < pages)
+                .unwrap_or_else(|| self.result.rows.len() >= self.page_size);
             if ui
                 .add_enabled(self.page > 0, Button::new(tr("First")).small())
                 .clicked()
@@ -1553,9 +1571,12 @@ impl TableEditor {
                 )
                 .on_hover_text(tr("Go to page"));
             ui.label(
-                RichText::new(format!("/ {total_pages}"))
-                    .small()
-                    .color(Color32::GRAY),
+                RichText::new(remote_total_pages.map_or_else(
+                    || "/ ?".to_string(),
+                    |pages| format!("/ {pages}"),
+                ))
+                .small()
+                .color(Color32::GRAY),
             );
             if jump_response.changed() {
                 self.change_page(jump.saturating_sub(1), message);
@@ -1563,21 +1584,20 @@ impl TableEditor {
 
             if ui
                 .add_enabled(
-                    self.page + 1 < total_pages,
+                    self.page + 1 < total_pages && has_more,
                     Button::new(tr("Next")).small(),
                 )
                 .clicked()
             {
                 self.change_page(self.page + 1, message);
             }
-            if ui
-                .add_enabled(
-                    self.page + 1 < total_pages,
-                    Button::new(tr("Last")).small(),
-                )
-                .clicked()
-            {
-                self.change_page(total_pages - 1, message);
+            if let Some(total_pages) = remote_total_pages {
+                if ui
+                    .add_enabled(self.page + 1 < total_pages, Button::new(tr("Last")).small())
+                    .clicked()
+                {
+                    self.change_page(total_pages - 1, message);
+                }
             }
 
             ui.separator();
@@ -2397,7 +2417,8 @@ impl TableEditor {
         if let Some(remote_page) = self.remote_page() {
             remote_page
                 .total_rows
-                .div_ceil(self.page_size.max(1) as u64) as usize
+                .map(|total| total.div_ceil(self.page_size.max(1) as u64) as usize)
+                .unwrap_or(self.page + 2)
         } else {
             self.filtered_existing_rows()
                 .len()
@@ -2794,9 +2815,8 @@ impl TableEditor {
         let total_rows = self
             .result
             .metadata
-            .get(QUERY_RESULT_METADATA_TOTAL_ROWS)?
-            .parse::<u64>()
-            .ok()?;
+            .get(QUERY_RESULT_METADATA_TOTAL_ROWS)
+            .and_then(|value| value.parse::<u64>().ok());
         Some(RemotePage {
             limit,
             offset,
@@ -2805,7 +2825,7 @@ impl TableEditor {
     }
 
     fn remote_total_rows(&self) -> Option<u64> {
-        self.remote_page().map(|page| page.total_rows)
+        self.remote_page().and_then(|page| page.total_rows)
     }
 
     fn quote_identifier(&self, value: &str) -> std::result::Result<String, String> {

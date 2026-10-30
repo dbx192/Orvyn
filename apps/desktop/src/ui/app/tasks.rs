@@ -21,7 +21,6 @@ use crate::ui::{
 use db_common::{
     AppError, DataSourceKind, Dialect, QueryExecutionMode, QueryExecutionRequest, QueryId,
     QueryResult, QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
-    QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use import_export::{ExportFormat, QueryResultFileWriter};
 use std::{
@@ -481,12 +480,20 @@ impl DesktopApp {
                 let columns = metadata_service
                     .table_columns(connection_id, db.as_deref(), sch.as_deref(), &tbl, None)
                     .await?;
-                let base_sql = ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
                 let uses_direct_paging = matches!(kind, DataSourceKind::DuckDb | DataSourceKind::Doris);
-                let sql = if uses_direct_paging {
-                    format!("{base_sql} LIMIT 100 OFFSET 0")
+                let sql = if kind == DataSourceKind::Doris {
+                    // An ORDER BY on a Doris table can trigger a distributed
+                    // sort over the full table. The initial tab only needs a
+                    // small sample; ordered reads are used for later pages.
+                    format!("SELECT * FROM {qualified} LIMIT 100")
                 } else {
-                    base_sql
+                    let base_sql =
+                        ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
+                    if uses_direct_paging {
+                        format!("{base_sql} LIMIT 100 OFFSET 0")
+                    } else {
+                        base_sql
+                    }
                 };
                 let report = query_service
                     .execute(
@@ -521,41 +528,11 @@ impl DesktopApp {
                         metadata: Default::default(),
                     });
                 // DuckDB and Doris use explicit paging instead of the
-                // generic SELECT wrapper. This guarantees consistent metadata
-                // for the UI and avoids planner-dependent wrapper behavior.
+                // generic SELECT wrapper. Do not run an exact COUNT(*) here:
+                // on large OLAP tables it scans billions of rows before the
+                // first page can be shown. The grid supports an unknown total
+                // and keeps paging with bounded LIMIT/OFFSET queries.
                 if uses_direct_paging {
-                    let count_report = query_service
-                        .execute(
-                            QueryExecutionRequest {
-                                tab_id: QueryId::new(),
-                                connection_id,
-                                database: db.clone(),
-                                schema: sch.clone(),
-                                sql: format!("SELECT COUNT(*) AS total_rows FROM {qualified}"),
-                                mode: QueryExecutionMode::All,
-                                cursor_offset: 0,
-                                selection: None,
-                                timeout_ms: 30_000,
-                                result_limit: None,
-                                result_offset: 0,
-                                result_total_rows: None,
-                            },
-                            None,
-                        )
-                        .await?;
-                    let total_rows = count_report
-                        .results
-                        .first()
-                        .and_then(|result| result.rows.first())
-                        .and_then(|row| row.values.first())
-                        .and_then(|value| match value {
-                            db_common::CellValue::Int(value) if *value >= 0 => Some(*value as u64),
-                            db_common::CellValue::UInt(value) => Some(*value),
-                            db_common::CellValue::Text(value)
-                            | db_common::CellValue::Decimal(value) => value.parse().ok(),
-                            _ => None,
-                        })
-                        .ok_or_else(|| AppError::internal("table row count was invalid"))?;
                     data.metadata.insert(
                         QUERY_RESULT_METADATA_PAGE_LIMIT.to_string(),
                         "100".to_string(),
@@ -563,10 +540,6 @@ impl DesktopApp {
                     data.metadata.insert(
                         QUERY_RESULT_METADATA_PAGE_OFFSET.to_string(),
                         "0".to_string(),
-                    );
-                    data.metadata.insert(
-                        QUERY_RESULT_METADATA_TOTAL_ROWS.to_string(),
-                        total_rows.to_string(),
                     );
                 }
                 Ok(TableDataPayload {
