@@ -1050,16 +1050,30 @@ impl RedisBrowserUi {
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let response = ui.add(
+                let row_height = 22.0;
+                let clear_width = 22.0;
+                let response = ui.add_sized(
+                    [
+                        (ui.available_width() - clear_width).max(80.0),
+                        row_height,
+                    ],
                     TextEdit::singleline(&mut self.search_pattern)
-                        .hint_text(tr("Filter key pattern"))
-                        .desired_width((ui.available_width() - 62.0).max(120.0)),
+                        .hint_text(tr("Search keys (at least 2 characters)")),
                 );
-                if response.lost_focus() && self.search_pattern != self.pattern {
+                if (response.lost_focus()
+                    || ui.input(|input| input.key_pressed(eframe::egui::Key::Enter)))
+                    && self.search_pattern != self.pattern
+                {
                     self.apply_pattern();
                 }
-                if ui.add_sized([56.0, 24.0], Button::new(tr("Match"))).clicked() {
-                    self.apply_pattern();
+                if crate::ui::app::style::close_icon_button(ui, row_height, false)
+                    .on_hover_text(tr("Clear"))
+                    .clicked()
+                {
+                    self.search_pattern.clear();
+                    if !self.pattern.is_empty() {
+                        self.apply_pattern();
+                    }
                 }
             });
 

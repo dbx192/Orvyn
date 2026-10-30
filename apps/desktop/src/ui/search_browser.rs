@@ -11,9 +11,9 @@
 //! call is dispatched on a `tokio` handle and polled each frame.
 
 use crate::ui::i18n::text as tr;
-use app_core::search_service::SearchService;
-use db_common::{ConnectionId, DataSourceKind};
-use eframe::egui::{Color32, Context, RichText, ScrollArea, Spinner, TextEdit, Ui};
+use app_core::{query::QueryService, search_service::SearchService};
+use db_common::{ConnectionId, DataSourceKind, FavoriteQuery};
+use eframe::egui::{Button, Color32, Context, Key, RichText, ScrollArea, Spinner, TextEdit, Ui};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -27,6 +27,7 @@ type SharedQueryCell = Arc<Mutex<Option<Result<String, String>>>>;
 
 pub struct SearchBrowser {
     search_service: SearchService,
+    query_service: QueryService,
     runtime: Handle,
     connection_id: ConnectionId,
     kind: DataSourceKind,
@@ -36,12 +37,19 @@ pub struct SearchBrowser {
     running: bool,
     result_text: String,
     error: Option<String>,
+    notice: Option<String>,
     cell: Option<SharedQueryCell>,
+    save_cell: Option<Arc<Mutex<Option<Result<FavoriteQuery, String>>>>>,
+    completion_visible: bool,
+    completion_cursor: usize,
+    saved_queries: Vec<FavoriteQuery>,
+    show_saved: bool,
 }
 
 impl SearchBrowser {
     pub fn new(
         search_service: SearchService,
+        query_service: QueryService,
         runtime: Handle,
         connection_id: ConnectionId,
         kind: DataSourceKind,
@@ -50,6 +58,7 @@ impl SearchBrowser {
     ) -> Self {
         Self {
             search_service,
+            query_service,
             runtime,
             connection_id,
             kind,
@@ -59,7 +68,13 @@ impl SearchBrowser {
             running: false,
             result_text: String::new(),
             error: None,
+            notice: None,
             cell: None,
+            save_cell: None,
+            completion_visible: false,
+            completion_cursor: 0,
+            saved_queries: Vec::new(),
+            show_saved: false,
         }
     }
 
@@ -106,6 +121,33 @@ impl SearchBrowser {
         });
     }
 
+    fn format_query(&mut self) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&self.query_text) {
+            if let Ok(formatted) = serde_json::to_string_pretty(&value) {
+                self.query_text = formatted;
+            }
+        }
+    }
+
+    fn save_query(&mut self) {
+        if self.query_text.trim().is_empty() || self.save_cell.is_some() {
+            return;
+        }
+        let service = self.query_service.clone();
+        let sql = self.query_text.clone();
+        let title = format!("{} [{}]", self.object, self.kind.as_str());
+        let connection_id = self.connection_id;
+        let cell = Arc::new(Mutex::new(None));
+        self.save_cell = Some(cell.clone());
+        self.runtime.spawn(async move {
+            let result = service
+                .add_favorite(Some(connection_id), None, None, title, sql)
+                .await
+                .map_err(|error| error.diagnostic_message());
+            *cell.lock().unwrap() = Some(result);
+        });
+    }
+
     fn poll(&mut self) -> Option<String> {
         let cell = self.cell.take()?;
         let is_done = cell.lock().map(|guard| guard.is_some()).unwrap_or(false);
@@ -132,8 +174,22 @@ impl SearchBrowser {
     }
 
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) -> Option<String> {
-        let status = self.poll();
-        if self.running {
+        let status = self.poll().or_else(|| self.notice.take());
+        if let Some(cell) = self.save_cell.take() {
+            let result = { cell.lock().unwrap().take() };
+            if let Some(result) = result {
+                match result {
+                    Ok(favorite) => {
+                        self.saved_queries.insert(0, favorite);
+                        self.notice = Some(tr("Query saved"));
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            } else {
+                self.save_cell = Some(cell);
+            }
+        }
+        if self.running || self.save_cell.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
@@ -149,15 +205,69 @@ impl SearchBrowser {
                 ui.add(Spinner::new().size(16.0));
                 ui.label(tr("Running..."));
             }
+            if ui.add_enabled(!self.running, Button::new(tr("Format"))).clicked() {
+                self.format_query();
+            }
+            if ui.add_enabled(self.save_cell.is_none(), Button::new(tr("Save"))).clicked() {
+                self.save_query();
+            }
+            if self.kind.is_search()
+                && ui.selectable_label(self.show_saved, tr("Saved")).clicked()
+            {
+                self.show_saved = !self.show_saved;
+            }
         });
         ui.add_space(6.0);
 
         ui.label(RichText::new(tr("Query (JSON DSL or SQL)")).strong());
-        TextEdit::multiline(&mut self.query_text)
+        let query_output = TextEdit::multiline(&mut self.query_text)
             .code_editor()
             .desired_rows(8)
             .desired_width(f32::INFINITY)
             .show(ui);
+        let query_response = &query_output.response;
+        if let Some(range) = query_output.cursor_range {
+            self.completion_cursor = char_to_byte_offset(
+                &self.query_text,
+                range.primary.ccursor.index,
+            );
+        }
+        self.completion_visible = query_response.has_focus()
+            && (query_response.changed()
+                || ui.input(|input| input.key_pressed(Key::Space) && input.modifiers.ctrl));
+        if self.completion_visible && self.kind.is_search() {
+            ui.horizontal_wrapped(|ui| {
+                for (label, snippet) in [
+                    ("match_all", "\"match_all\": {}"),
+                    ("match", "\"match\": { \"field\": \"value\" }"),
+                    ("term", "\"term\": { \"field\": \"value\" }"),
+                    ("bool", "\"bool\": { \"must\": [], \"filter\": [] }"),
+                ] {
+                    if ui.small_button(label).clicked() {
+                        self.query_text = insert_completion(
+                            &self.query_text,
+                            self.completion_cursor,
+                            snippet,
+                        );
+                        self.completion_visible = false;
+                    }
+                }
+            });
+        }
+        if self.show_saved && self.kind.is_search() {
+            ui.horizontal_wrapped(|ui| {
+                let prefix = format!("{} [", self.object);
+                for favorite in self
+                    .saved_queries
+                    .iter()
+                    .filter(|favorite| favorite.title.starts_with(&prefix))
+                {
+                    if ui.small_button(&favorite.title).clicked() {
+                        self.query_text = favorite.sql.clone();
+                    }
+                }
+            });
+        }
         ui.add_space(6.0);
         ui.separator();
         ui.add_space(6.0);
@@ -173,10 +283,9 @@ impl SearchBrowser {
                 if let Some(error) = &self.error {
                     ui.label(RichText::new(error).color(Color32::RED));
                 } else if !self.result_text.is_empty() {
-                    let mut text = self.result_text.clone();
-                    TextEdit::multiline(&mut text)
+                    TextEdit::multiline(&mut self.result_text)
                         .code_editor()
-                        .interactive(false)
+                        .interactive(true)
                         .desired_width(f32::INFINITY)
                         .show(ui);
                 } else if !self.running {
@@ -186,6 +295,18 @@ impl SearchBrowser {
 
         status
     }
+}
+
+fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
+    text.char_indices()
+        .nth(char_offset)
+        .map(|(offset, _)| offset)
+        .unwrap_or(text.len())
+}
+
+fn insert_completion(text: &str, cursor: usize, snippet: &str) -> String {
+    let cursor = cursor.min(text.len());
+    format!("{}{}{}", &text[..cursor], snippet, &text[cursor..])
 }
 
 async fn run_query(

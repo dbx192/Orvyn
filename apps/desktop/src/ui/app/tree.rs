@@ -156,6 +156,7 @@ impl DesktopApp {
                 } => {
                     self.search_browser = Some(SearchBrowser::new(
                         self.search_service.clone(),
+                        self.query_service.clone(),
                         self.runtime.clone(),
                         connection_id,
                         kind,
