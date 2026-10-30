@@ -622,6 +622,36 @@ impl QueryService {
         self.state.lock().await.history.iter().cloned().collect()
     }
 
+    pub async fn record_external_history(
+        &self,
+        connection_id: ConnectionId,
+        database: Option<String>,
+        object: String,
+        sql: String,
+        elapsed_ms: u128,
+        error_message: Option<String>,
+    ) -> Result<QueryHistoryEntry> {
+        let entry = QueryHistoryEntry {
+            id: QueryId::new(),
+            connection_id,
+            summary: statement_summary(&sql, 120),
+            sql,
+            executed_at: db_common::now_utc(),
+            elapsed_ms,
+            affected_rows: 0,
+            success: error_message.is_none(),
+            error_message,
+            database,
+            schema: None,
+            object: Some(object),
+        };
+        push_history(&mut self.state.lock().await.history, entry.clone());
+        if let Some(store) = &self.history_store {
+            store.add(entry.clone()).await?;
+        }
+        Ok(entry)
+    }
+
     pub async fn clear_history(&self) -> Result<()> {
         self.state.lock().await.history.clear();
         if let Some(store) = &self.history_store {
@@ -747,6 +777,9 @@ impl QueryService {
             affected_rows: report.affected_rows,
             success: error_message.is_none(),
             error_message,
+            database: request.database.clone(),
+            schema: request.schema.clone(),
+            object: None,
         };
         push_history(&mut self.state.lock().await.history, entry.clone());
 
@@ -775,6 +808,9 @@ impl QueryService {
             affected_rows: 0,
             success: false,
             error_message: Some(error.message.clone()),
+            database: request.database.clone(),
+            schema: request.schema.clone(),
+            object: None,
         };
         push_history(&mut self.state.lock().await.history, entry.clone());
 

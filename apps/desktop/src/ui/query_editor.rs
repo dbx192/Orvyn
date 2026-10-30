@@ -2569,10 +2569,20 @@ fn connection_label(profile: &ConnectionProfile) -> String {
 
 /// Compact inline filter input shared by the history/favorites panel headers.
 fn side_search_box(ui: &mut Ui, text: &mut String) {
-    ui.add_sized(
-        [ui.available_width(), 20.0],
-        TextEdit::singleline(text).hint_text(tr("Search")),
-    );
+    ui.horizontal(|ui| {
+        let row_height = 22.0;
+        let clear_width = 22.0;
+        ui.add_sized(
+            [(ui.available_width() - clear_width).max(80.0), row_height],
+            TextEdit::singleline(text).hint_text(tr("Search")),
+        );
+        if crate::ui::app::style::close_icon_button(ui, row_height, false)
+            .on_hover_text(tr("Clear"))
+            .clicked()
+        {
+            text.clear();
+        }
+    });
 }
 
 fn next_tab_title(_connection_name: &str) -> String {

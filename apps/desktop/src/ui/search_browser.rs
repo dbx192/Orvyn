@@ -12,7 +12,7 @@
 
 use crate::ui::i18n::text as tr;
 use app_core::{query::QueryService, search_service::SearchService};
-use db_common::{ConnectionId, DataSourceKind, FavoriteQuery};
+use db_common::{ConnectionId, DataSourceKind, FavoriteQuery, QueryHistoryEntry};
 use eframe::egui::{Button, Color32, Context, Key, RichText, ScrollArea, Spinner, TextEdit, Ui};
 use std::{
     sync::{Arc, Mutex},
@@ -40,9 +40,14 @@ pub struct SearchBrowser {
     notice: Option<String>,
     cell: Option<SharedQueryCell>,
     save_cell: Option<Arc<Mutex<Option<Result<FavoriteQuery, String>>>>>,
+    history_cell: Option<Arc<Mutex<Option<Result<(), String>>>>>,
     completion_visible: bool,
     completion_cursor: usize,
     saved_queries: Vec<FavoriteQuery>,
+    history_entries: Vec<QueryHistoryEntry>,
+    load_cell: Option<Arc<Mutex<Option<(Vec<QueryHistoryEntry>, Vec<FavoriteQuery>)>>>>,
+    history_search: String,
+    saved_search: String,
     show_saved: bool,
 }
 
@@ -56,6 +61,20 @@ impl SearchBrowser {
         database: Option<String>,
         object: String,
     ) -> Self {
+        let load_cell = Arc::new(Mutex::new(None));
+        let load_cell_for_task = load_cell.clone();
+        let load_service = query_service.clone();
+        let load_connection = connection_id;
+        runtime.spawn(async move {
+            let history = load_service.history().await;
+            let favorites = load_service
+                .favorites()
+                .await
+                .into_iter()
+                .filter(|entry| entry.connection_id == Some(load_connection))
+                .collect();
+            *load_cell_for_task.lock().unwrap() = Some((history, favorites));
+        });
         Self {
             search_service,
             query_service,
@@ -71,9 +90,14 @@ impl SearchBrowser {
             notice: None,
             cell: None,
             save_cell: None,
+            history_cell: None,
             completion_visible: false,
             completion_cursor: 0,
             saved_queries: Vec::new(),
+            history_entries: Vec::new(),
+            load_cell: Some(load_cell),
+            history_search: String::new(),
+            saved_search: String::new(),
             show_saved: false,
         }
     }
@@ -101,10 +125,14 @@ impl SearchBrowser {
         let database = self.database.clone();
         let object = self.object.clone();
         let query_text = self.query_text.clone();
+        let history = self.query_service.clone();
         let limit = SEARCH_LIMIT;
+        let started_at = std::time::Instant::now();
 
         let cell: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
         self.cell = Some(cell.clone());
+        let history_cell = Arc::new(Mutex::new(None));
+        self.history_cell = Some(history_cell.clone());
 
         runtime.spawn(async move {
             let result = run_query(
@@ -117,6 +145,19 @@ impl SearchBrowser {
                 limit,
             )
             .await;
+            let history_result = history
+                .record_external_history(
+                    connection_id,
+                    database,
+                    object,
+                    query_text,
+                    started_at.elapsed().as_millis(),
+                    result.as_ref().err().cloned(),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.diagnostic_message());
+            *history_cell.lock().unwrap() = Some(history_result);
             *cell.lock().unwrap() = Some(result);
         });
     }
@@ -137,15 +178,81 @@ impl SearchBrowser {
         let sql = self.query_text.clone();
         let title = format!("{} [{}]", self.object, self.kind.as_str());
         let connection_id = self.connection_id;
+        let database = Some(self.object.clone());
         let cell = Arc::new(Mutex::new(None));
         self.save_cell = Some(cell.clone());
         self.runtime.spawn(async move {
             let result = service
-                .add_favorite(Some(connection_id), None, None, title, sql)
+                .add_favorite(Some(connection_id), database, None, title, sql)
                 .await
                 .map_err(|error| error.diagnostic_message());
             *cell.lock().unwrap() = Some(result);
         });
+    }
+
+    fn saved_query_panel(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new(tr("Saved queries")).strong());
+        search_filter(ui, &mut self.saved_search);
+        let query = self.saved_search.to_lowercase();
+        let mut selected = None;
+        ScrollArea::vertical()
+            .id_source("es_saved_query_list")
+            .max_height(120.0)
+            .show(ui, |ui| {
+                for favorite in self.saved_queries.iter().filter(|favorite| {
+                    favorite.database.is_some()
+                        && (query.is_empty()
+                            || favorite.title.to_lowercase().contains(&query)
+                            || favorite.database.as_deref().unwrap_or_default().to_lowercase().contains(&query)
+                            || favorite.sql.to_lowercase().contains(&query))
+                }) {
+                    if ui
+                        .selectable_label(false, &favorite.title)
+                        .on_hover_text(&favorite.sql)
+                        .clicked()
+                    {
+                        selected = Some(favorite.clone());
+                    }
+                }
+            });
+        if let Some(favorite) = selected {
+            self.object = favorite.database.clone().unwrap_or_default();
+            self.query_text = favorite.sql;
+        }
+    }
+
+    fn history_panel(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new(tr("History")).strong());
+        search_filter(ui, &mut self.history_search);
+        let query = self.history_search.to_lowercase();
+        let mut selected = None;
+        ScrollArea::vertical()
+            .id_source("es_query_history_list")
+            .max_height(140.0)
+            .show(ui, |ui| {
+                for entry in self.history_entries.iter().filter(|entry| {
+                    entry.object.is_some()
+                        && (query.is_empty()
+                            || entry.summary.to_lowercase().contains(&query)
+                            || entry.object.as_deref().unwrap_or_default().to_lowercase().contains(&query)
+                            || entry.sql.to_lowercase().contains(&query))
+                }) {
+                    if ui
+                        .selectable_label(false, &entry.summary)
+                        .on_hover_text(format!("{}\n{}", entry.sql, entry.executed_at))
+                        .clicked()
+                    {
+                        selected = Some(entry.clone());
+                    }
+                }
+            });
+        if let Some(entry) = selected {
+            if let Some(object) = entry.object {
+                self.object = object;
+            }
+            self.database = entry.database;
+            self.query_text = entry.sql;
+        }
     }
 
     fn poll(&mut self) -> Option<String> {
@@ -175,6 +282,15 @@ impl SearchBrowser {
 
     pub fn ui(&mut self, ctx: &Context, ui: &mut Ui) -> Option<String> {
         let status = self.poll().or_else(|| self.notice.take());
+        if let Some(cell) = self.load_cell.take() {
+            let loaded = { cell.lock().unwrap().take() };
+            if let Some((history, favorites)) = loaded {
+                self.history_entries = history;
+                self.saved_queries = favorites;
+            } else {
+                self.load_cell = Some(cell);
+            }
+        }
         if let Some(cell) = self.save_cell.take() {
             let result = { cell.lock().unwrap().take() };
             if let Some(result) = result {
@@ -189,8 +305,22 @@ impl SearchBrowser {
                 self.save_cell = Some(cell);
             }
         }
-        if self.running || self.save_cell.is_some() {
+        if self.running
+            || self.save_cell.is_some()
+            || self.history_cell.is_some()
+            || self.load_cell.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if let Some(cell) = self.history_cell.take() {
+            let result = { cell.lock().unwrap().take() };
+            if let Some(result) = result {
+                if let Err(error) = result {
+                    self.notice = Some(error);
+                }
+            } else {
+                self.history_cell = Some(cell);
+            }
         }
 
         ui.add_space(4.0);
@@ -211,14 +341,21 @@ impl SearchBrowser {
             if ui.add_enabled(self.save_cell.is_none(), Button::new(tr("Save"))).clicked() {
                 self.save_query();
             }
-            if self.kind.is_search()
-                && ui.selectable_label(self.show_saved, tr("Saved")).clicked()
-            {
-                self.show_saved = !self.show_saved;
+            if self.kind.is_search() {
+                ui.selectable_value(&mut self.show_saved, false, tr("History"));
+                ui.selectable_value(&mut self.show_saved, true, tr("Favorites"));
+            }
+            if self.kind.is_search() {
             }
         });
         ui.add_space(6.0);
 
+        if self.kind.is_search() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tr("Index")).strong());
+                ui.label(RichText::new(&self.object).monospace());
+            });
+        }
         ui.label(RichText::new(tr("Query (JSON DSL or SQL)")).strong());
         let query_output = TextEdit::multiline(&mut self.query_text)
             .code_editor()
@@ -254,19 +391,12 @@ impl SearchBrowser {
                 }
             });
         }
-        if self.show_saved && self.kind.is_search() {
-            ui.horizontal_wrapped(|ui| {
-                let prefix = format!("{} [", self.object);
-                for favorite in self
-                    .saved_queries
-                    .iter()
-                    .filter(|favorite| favorite.title.starts_with(&prefix))
-                {
-                    if ui.small_button(&favorite.title).clicked() {
-                        self.query_text = favorite.sql.clone();
-                    }
-                }
-            });
+        if self.kind.is_search() {
+            if self.show_saved {
+                self.saved_query_panel(ui);
+            } else {
+                self.history_panel(ui);
+            }
         }
         ui.add_space(6.0);
         ui.separator();
@@ -307,6 +437,23 @@ fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
 fn insert_completion(text: &str, cursor: usize, snippet: &str) -> String {
     let cursor = cursor.min(text.len());
     format!("{}{}{}", &text[..cursor], snippet, &text[cursor..])
+}
+
+fn search_filter(ui: &mut Ui, text: &mut String) {
+    ui.horizontal(|ui| {
+        let row_height = 22.0;
+        let clear_width = 22.0;
+        ui.add_sized(
+            [(ui.available_width() - clear_width).max(80.0), row_height],
+            TextEdit::singleline(text).hint_text(tr("Search")),
+        );
+        if crate::ui::app::style::close_icon_button(ui, row_height, false)
+            .on_hover_text(tr("Clear"))
+            .clicked()
+        {
+            text.clear();
+        }
+    });
 }
 
 async fn run_query(

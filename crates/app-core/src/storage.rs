@@ -473,6 +473,9 @@ mod tests {
             affected_rows: 1,
             success: true,
             error_message: None,
+            database: None,
+            schema: None,
+            object: None,
         };
 
         store.add(entry).await.expect("add");

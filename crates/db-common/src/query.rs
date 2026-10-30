@@ -167,6 +167,12 @@ pub struct QueryHistoryEntry {
     pub affected_rows: u64,
     pub success: bool,
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub database: Option<String>,
+    #[serde(default)]
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub object: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
