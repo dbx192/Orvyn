@@ -1254,7 +1254,13 @@ impl TableEditor {
         let total_rows = self.remote_total_rows();
         let direct_offset_paging = matches!(
             self.data_source_kind,
-            Some(DataSourceKind::DuckDb | DataSourceKind::Doris)
+            Some(
+                DataSourceKind::DuckDb
+                    | DataSourceKind::Doris
+                    | DataSourceKind::MySql
+                    | DataSourceKind::MariaDb
+                    | DataSourceKind::PostgreSql
+            )
         );
         let keyset_page = (!direct_offset_paging)
             .then(|| self.keyset_page_query(next_page, page_size))
@@ -1564,12 +1570,15 @@ impl TableEditor {
             }
 
             let mut jump = self.page + 1;
-            let jump_response = ui
-                .add_sized(
+            let jump_response = if remote_total_pages.is_some() {
+                ui.add_sized(
                     [64.0, ui.spacing().interact_size.y],
                     DragValue::new(&mut jump).clamp_range(1..=total_pages),
                 )
-                .on_hover_text(tr("Go to page"));
+                .on_hover_text(tr("Go to page"))
+            } else {
+                ui.label(format!("{}", self.page + 1))
+            };
             ui.label(
                 RichText::new(remote_total_pages.map_or_else(
                     || "/ ?".to_string(),

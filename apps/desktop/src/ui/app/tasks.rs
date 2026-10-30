@@ -480,17 +480,24 @@ impl DesktopApp {
                 let columns = metadata_service
                     .table_columns(connection_id, db.as_deref(), sch.as_deref(), &tbl, None)
                     .await?;
-                let uses_direct_paging = matches!(kind, DataSourceKind::DuckDb | DataSourceKind::Doris);
-                let sql = if kind == DataSourceKind::Doris {
-                    // An ORDER BY on a Doris table can trigger a distributed
-                    // sort over the full table. The initial tab only needs a
-                    // small sample; ordered reads are used for later pages.
+                let uses_direct_paging = matches!(
+                    kind,
+                    DataSourceKind::DuckDb
+                        | DataSourceKind::Doris
+                        | DataSourceKind::MySql
+                        | DataSourceKind::MariaDb
+                        | DataSourceKind::PostgreSql
+                );
+                let sql = if uses_direct_paging {
+                    // The initial tab only needs a small sample. Avoiding
+                    // ORDER BY here prevents a full sort on large tables;
+                    // ordered reads are used for later pages.
                     format!("SELECT * FROM {qualified} LIMIT 100")
                 } else {
                     let base_sql =
                         ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
                     if uses_direct_paging {
-                        format!("{base_sql} LIMIT 100 OFFSET 0")
+                        format!("{base_sql} LIMIT 100")
                     } else {
                         base_sql
                     }
@@ -507,6 +514,9 @@ impl DesktopApp {
                             cursor_offset: 0,
                             selection: None,
                             timeout_ms: 30_000,
+                            // The SQL is explicitly bounded above. Leaving
+                            // result_limit unset prevents QueryService from
+                            // adding an expensive automatic COUNT(*) query.
                             result_limit: (!uses_direct_paging).then_some(100),
                             result_offset: 0,
                             result_total_rows: None,
