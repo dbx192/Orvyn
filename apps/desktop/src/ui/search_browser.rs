@@ -178,12 +178,17 @@ impl SearchBrowser {
         let sql = self.query_text.clone();
         let title = format!("{} [{}]", self.object, self.kind.as_str());
         let connection_id = self.connection_id;
-        let database = Some(self.object.clone());
+        let database = if self.kind.is_search() {
+            None
+        } else {
+            Some(self.object.clone())
+        };
+        let schema = self.kind.is_search().then(|| self.object.clone());
         let cell = Arc::new(Mutex::new(None));
         self.save_cell = Some(cell.clone());
         self.runtime.spawn(async move {
             let result = service
-                .add_favorite(Some(connection_id), database, None, title, sql)
+                .add_favorite(Some(connection_id), database, schema, title, sql)
                 .await
                 .map_err(|error| error.diagnostic_message());
             *cell.lock().unwrap() = Some(result);
@@ -200,9 +205,11 @@ impl SearchBrowser {
             .max_height(120.0)
             .show(ui, |ui| {
                 for favorite in self.saved_queries.iter().filter(|favorite| {
-                    favorite.database.is_some()
+                    favorite.connection_id == Some(self.connection_id)
+                        && (favorite.database.is_some() || favorite.schema.is_some())
                         && (query.is_empty()
                             || favorite.title.to_lowercase().contains(&query)
+                            || favorite.schema.as_deref().unwrap_or_default().to_lowercase().contains(&query)
                             || favorite.database.as_deref().unwrap_or_default().to_lowercase().contains(&query)
                             || favorite.sql.to_lowercase().contains(&query))
                 }) {
@@ -216,7 +223,7 @@ impl SearchBrowser {
                 }
             });
         if let Some(favorite) = selected {
-            self.object = favorite.database.clone().unwrap_or_default();
+            self.object = favorite.schema.clone().or(favorite.database.clone()).unwrap_or_default();
             self.query_text = favorite.sql;
         }
     }
@@ -231,7 +238,8 @@ impl SearchBrowser {
             .max_height(140.0)
             .show(ui, |ui| {
                 for entry in self.history_entries.iter().filter(|entry| {
-                    entry.object.is_some()
+                    entry.connection_id == self.connection_id
+                        && entry.object.is_some()
                         && (query.is_empty()
                             || entry.summary.to_lowercase().contains(&query)
                             || entry.object.as_deref().unwrap_or_default().to_lowercase().contains(&query)
@@ -440,11 +448,11 @@ fn insert_completion(text: &str, cursor: usize, snippet: &str) -> String {
 }
 
 fn search_filter(ui: &mut Ui, text: &mut String) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let row_height = 22.0;
         let clear_width = 22.0;
         ui.add_sized(
-            [(ui.available_width() - clear_width).max(80.0), row_height],
+            [(ui.available_width() - clear_width).max(40.0), row_height],
             TextEdit::singleline(text).hint_text(tr("Search")),
         );
         if crate::ui::app::style::close_icon_button(ui, row_height, false)

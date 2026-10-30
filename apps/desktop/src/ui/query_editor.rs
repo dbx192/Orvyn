@@ -873,7 +873,7 @@ impl QueryEditor {
         let mut shortcut_run_current = false;
         let mut shortcut_run_all = false;
         let mut shortcut_format = false;
-        ui.horizontal(|ui| {
+        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
             let main_width = if self.side_panel_open {
                 (ui.available_width() - side_width - 12.0).max(360.0)
             } else {
@@ -881,8 +881,12 @@ impl QueryEditor {
             };
             // Pin the row to the full remaining height (down to the status
             // bar) so the results area and the history/favorites side panel
-            // both stretch to the bottom.
-            ui.set_min_height(ui.available_height());
+            // both stretch to the bottom. `Ui::horizontal` cannot be used
+            // here: it only allocates `interact_size.y` of height, so every
+            // `available_height()` below collapses to zero once the content
+            // overflows and the result grid renders an empty body.
+            let row_height = ui.available_height();
+            ui.set_min_height(row_height);
 
             ui.vertical(|ui| {
                 ui.set_width(main_width);
@@ -1092,7 +1096,7 @@ impl QueryEditor {
                 // Stretch the divider and the side panel down to the status
                 // bar; the row is pinned to full height via set_min_height.
                 let (divider_rect, divider_response) = ui.allocate_exact_size(
-                    vec2(8.0, ui.available_height()),
+                    vec2(8.0, row_height),
                     eframe::egui::Sense::drag(),
                 );
                 if divider_response.dragged() {
@@ -1107,7 +1111,7 @@ impl QueryEditor {
                 );
                 ui.vertical(|ui| {
                     ui.set_width(side_width);
-                    ui.set_min_height(ui.available_height());
+                    ui.set_min_height(row_height);
                     self.history_panel(ui, tab_id);
                 });
             }
@@ -1261,10 +1265,6 @@ impl QueryEditor {
                 }
             });
 
-            for notice in &result.notices {
-                ui.label(RichText::new(notice).small().color(Color32::LIGHT_BLUE));
-            }
-
             if let Some(editor) = &mut result.table_editor {
                 if let Some(message) = editor.ui(ui) {
                     self.status = message;
@@ -1285,6 +1285,12 @@ impl QueryEditor {
                         ui.label(tr("Statement executed without a tabular result."));
                     }
                 }
+            }
+
+            // Keep result notices below the data grid so the table and its
+            // pager remain the primary content of the result area.
+            for notice in &result.notices {
+                ui.label(RichText::new(notice).small().color(Color32::LIGHT_BLUE));
             }
         }
 
@@ -2254,8 +2260,8 @@ impl QueryEditor {
                     .small()
                     .color(Color32::GRAY),
             );
-            side_search_box(ui, &mut self.history_search);
         });
+        side_search_box(ui, &mut self.history_search);
         ui.add_space(2.0);
         ScrollArea::vertical()
             .id_source("query_history_panel")
@@ -2293,7 +2299,7 @@ impl QueryEditor {
 
                 // Compact one-line rows instead of grouped cards.
                 ui.style_mut().spacing.item_spacing.y = 1.0;
-                let mut picked_sql = None;
+                let mut picked_entry = None;
                 for entry in &entries {
                     let conn_name = self
                         .connections
@@ -2314,7 +2320,7 @@ impl QueryEditor {
                         ),
                     );
                     if response.clicked() {
-                        picked_sql = Some(entry.sql.clone());
+                        picked_entry = Some(entry.clone());
                     }
                     response.on_hover_text(format!(
                         "{}\n{} · {} ms · {} rows",
@@ -2339,13 +2345,9 @@ impl QueryEditor {
                     ui.separator();
                 }
 
-                if let Some(sql) = picked_sql {
-                    if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                        tab.sql = sql;
-                        tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
-                        tab.dirty = true;
-                        self.status = "Loaded SQL from history".to_string();
-                    }
+                if let Some(entry) = picked_entry {
+                    self.load_query_context(tab_id, Some(entry.connection_id), entry.database, entry.schema, entry.sql);
+                    self.status = "Loaded SQL from history".to_string();
                 }
             });
     }
@@ -2358,7 +2360,14 @@ impl QueryEditor {
                     .small()
                     .color(Color32::GRAY),
             );
-            side_search_box(ui, &mut self.favorite_search);
+        });
+        ui.horizontal(|ui| {
+            let search_width = (ui.available_width() - 150.0).max(120.0);
+            ui.allocate_ui_with_layout(
+                vec2(search_width, 22.0),
+                Layout::left_to_right(Align::Center),
+                |ui| side_search_box(ui, &mut self.favorite_search),
+            );
             let editing = self.editing_favorite.is_some();
             if ui
                 .button(if editing { tr("Update") } else { tr("Save Current") })
@@ -2443,7 +2452,7 @@ impl QueryEditor {
                 });
                 ui.separator();
 
-                let mut picked_sql = None;
+                let mut picked_entry = None;
                 let mut edit_target = None;
                 let mut remove_id = None;
                 for entry in &entries {
@@ -2456,7 +2465,7 @@ impl QueryEditor {
                             ),
                         );
                         if name.clicked() {
-                            picked_sql = Some(entry.sql.clone());
+                            picked_entry = Some(entry.clone());
                         }
                         name.on_hover_text(&entry.sql);
                         ui.add_sized(
@@ -2497,13 +2506,12 @@ impl QueryEditor {
                     self.editing_favorite = Some(entry.id);
                     self.status = "Loaded SQL from favorites".to_string();
                 }
-                if let Some(sql) = picked_sql {
+                if let Some(entry) = picked_entry {
+                    self.load_query_context(tab_id, entry.connection_id, entry.database, entry.schema, entry.sql);
                     if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                        tab.sql = sql;
-                        tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
-                        tab.dirty = true;
-                        self.status = "Loaded SQL from favorites".to_string();
+                        tab.title = entry.title.clone();
                     }
+                    self.status = "Loaded SQL from favorites".to_string();
                 }
                 if let Some(id) = remove_id {
                     self.remove_favorite(id);
@@ -2553,6 +2561,35 @@ impl QueryEditor {
         }
     }
 
+    fn load_query_context(
+        &mut self,
+        tab_id: QueryId,
+        connection_id: Option<ConnectionId>,
+        database: Option<String>,
+        schema: Option<String>,
+        sql: String,
+    ) {
+        let target_connection = connection_id.filter(|id| {
+            self.connections.iter().any(|profile| profile.id == *id && profile.kind.is_relational())
+        });
+        if let Some(connection_id) = target_connection {
+            self.set_active_connection(connection_id);
+        }
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.database = database;
+            tab.schema = schema;
+            tab.sql = sql;
+            tab.highlighted_sql = db_common::highlight_sql(&tab.sql);
+            tab.dirty = true;
+            tab.available_databases.clear();
+            tab.available_schemas.clear();
+            tab.available_tables.clear();
+            tab.columns_by_table.clear();
+            tab.pending_column_loads.clear();
+        }
+        self.refresh_metadata_for_tab(tab_id);
+    }
+
     fn remove_favorite(&mut self, id: QueryId) {
         let service = self.query_service.clone();
         let tx = self.tx.clone();
@@ -2569,11 +2606,11 @@ fn connection_label(profile: &ConnectionProfile) -> String {
 
 /// Compact inline filter input shared by the history/favorites panel headers.
 fn side_search_box(ui: &mut Ui, text: &mut String) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let row_height = 22.0;
         let clear_width = 22.0;
         ui.add_sized(
-            [(ui.available_width() - clear_width).max(80.0), row_height],
+            [(ui.available_width() - clear_width).max(40.0), row_height],
             TextEdit::singleline(text).hint_text(tr("Search")),
         );
         if crate::ui::app::style::close_icon_button(ui, row_height, false)
