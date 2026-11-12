@@ -44,10 +44,7 @@ fn copy_duckdb_dll() {
         .expect("OUT_DIR does not have the expected target/{profile}/build/... layout");
     let dest = profile_dir.join("duckdb.dll");
 
-    let need_copy = match (std::fs::metadata(&src), std::fs::metadata(&dest)) {
-        (Ok(s), Ok(d)) => s.len() != d.len(),
-        _ => true,
-    };
+    let need_copy = std::fs::read(&src).ok() != std::fs::read(&dest).ok();
     if need_copy {
         std::fs::copy(&src, &dest).expect("failed to copy duckdb.dll next to the exe");
         println!("cargo:warning=copied duckdb.dll -> {}", dest.display());

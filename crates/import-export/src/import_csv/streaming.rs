@@ -145,3 +145,56 @@ fn transcode(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn batches_read_every_row_from_a_stable_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.csv");
+        let mut contents = "id,name\n".to_string();
+        for row in 0..10001 {
+            contents.push_str(&format!("{row},value-{row}\n"));
+        }
+        std::fs::write(&path, contents).unwrap();
+        let mut reader = CsvRowReader::open(&path, &CsvImportOptions::default()).unwrap();
+        std::fs::write(path, "replaced\n").unwrap();
+        let mut count = 0;
+        loop {
+            let batch = reader.read_batch(73).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            assert!(batch.len() <= 73);
+            assert_eq!(batch[0][0], count.to_string());
+            count += batch.len();
+        }
+        assert_eq!(count, 10001);
+    }
+    #[test]
+    fn handles_utf16_and_cancelled_decoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("utf16.csv");
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend(
+            "name\n\u{4e2d}\u{6587}\n"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
+        std::fs::write(&path, bytes).unwrap();
+        let mut reader = CsvRowReader::open(&path, &CsvImportOptions::default()).unwrap();
+        assert_eq!(
+            reader.next_row().unwrap().unwrap(),
+            vec!["\u{4e2d}\u{6587}"]
+        );
+        let cancellation = db_common::QueryCancellation::default();
+        cancellation.cancel();
+        assert!(CsvRowReader::open_cancellable(
+            &path,
+            &CsvImportOptions::default(),
+            Some(&cancellation)
+        )
+        .is_err());
+    }
+}

@@ -71,7 +71,7 @@ struct PostgresPool {
     config: ConnectionPoolConfig,
     semaphore: Arc<Semaphore>,
     idle: Mutex<Vec<Client>>,
-    size: Mutex<u32>,
+    size: std::sync::atomic::AtomicU32,
 }
 
 impl std::fmt::Debug for PostgresPool {
@@ -96,7 +96,7 @@ impl PostgresPool {
             config,
             semaphore: Arc::new(Semaphore::new(config.max_connections.max(1) as usize)),
             idle: Mutex::new(Vec::new()),
-            size: Mutex::new(0),
+            size: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -123,7 +123,7 @@ impl PostgresPool {
         }
 
         let client = self.connect().await?;
-        *self.size.lock().await += 1;
+        self.size.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Ok(PostgresPoolClient {
             pool: self.clone(),
@@ -150,7 +150,7 @@ impl PostgresPool {
     async fn stats(&self) -> ConnectionPoolStats {
         ConnectionPoolStats {
             connection_id: self.connection_id,
-            size: *self.size.lock().await,
+            size: self.size.load(std::sync::atomic::Ordering::Relaxed),
             idle: self.idle.lock().await.len() as u32,
             max_connections: self.config.max_connections.max(1),
         }
@@ -174,6 +174,16 @@ impl PostgresPoolClient {
     async fn release(mut self) {
         if let Some(client) = self.client.take() {
             self.pool.release(client).await;
+        }
+    }
+}
+
+impl Drop for PostgresPoolClient {
+    fn drop(&mut self) {
+        if self.client.is_some() {
+            self.pool
+                .size
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -550,6 +560,58 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
 
         pooled.release().await;
         Ok(results)
+    }
+
+    async fn execute_cancellable(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        statements: &[String],
+        pool_config: ConnectionPoolConfig,
+        cancellation: db_common::QueryCancellation,
+    ) -> Result<Vec<QueryResult>> {
+        let pool = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(AppError::validation("Query cancelled before connection acquisition")),
+            pool = self.pool_for(profile, password, pool_config) => pool?,
+        };
+        let pooled = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(AppError::validation("Query cancelled before execution")),
+            pooled = pool.acquire() => pooled?,
+        };
+        let result = {
+            let client = pooled.client()?;
+            let token = client.cancel_token();
+            let execution = execute_postgres_statements(client, statements);
+            tokio::pin!(execution);
+            let result = tokio::select! {
+                result = &mut execution => result,
+                _ = cancellation.cancelled() => {
+                    let cancel = async {
+                        match pool.tls.clone() {
+                            Some(tls) => token.cancel_query(tls).await,
+                            None => token.cancel_query(NoTls).await,
+                        }
+                    };
+                    let sent = tokio::time::timeout(std::time::Duration::from_secs(5), cancel).await;
+                    if !matches!(sent, Ok(Ok(()))) {
+                        return Err(AppError::validation("Client cancelled; PostgreSQL server cancellation unconfirmed; connection discarded"));
+                    }
+                    // Keep the connection reserved until the server finishes the cancelled request.
+                    if tokio::time::timeout(std::time::Duration::from_secs(10), &mut execution).await.is_err() {
+                        return Err(AppError::validation("Client cancelled; PostgreSQL completion unconfirmed; connection discarded"));
+                    }
+                    Err(AppError::validation("Query cancelled; PostgreSQL request completed"))
+                }
+            };
+            result
+        };
+        // Do not return failed/cancelled connections to the idle pool.
+        if result.is_ok() {
+            pooled.release().await;
+        }
+        result
     }
 
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {

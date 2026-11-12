@@ -13,3 +13,6 @@ serde.workspace = true
 serde_json.workspace = true
 rust_xlsxwriter = { version = "0.90", features = ["constant_memory"] }
 tempfile = "3"
+
+[dev-dependencies]
+zip = { version = "4.6", default-features = false, features = ["deflate"] }

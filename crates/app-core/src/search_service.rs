@@ -135,6 +135,7 @@ impl SearchService {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_document_query(
         &self,
         connection_id: ConnectionId,

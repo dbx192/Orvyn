@@ -96,7 +96,18 @@ impl BlockingSqlitePool {
             if state.size < self.config.max_connections.max(1) {
                 state.size += 1;
                 drop(state);
-                let conn = sqlite_connection(self.path.clone())?;
+                let conn = match sqlite_connection(self.path.clone()) {
+                    Ok(conn) => conn,
+                    Err(error) => {
+                        let mut state = self
+                            .state
+                            .lock()
+                            .map_err(|_| AppError::internal("SQLite pool lock poisoned"))?;
+                        state.size = state.size.saturating_sub(1);
+                        self.available.notify_one();
+                        return Err(error);
+                    }
+                };
                 return Ok(PooledSqliteConnection {
                     pool: self.clone(),
                     conn: Some(conn),
@@ -568,7 +579,7 @@ fn execute_sqlite_statements(
 }
 
 fn sqlite_version(path: PathBuf) -> Result<String> {
-    if !path.exists() {
+    if path != std::path::Path::new(":memory:") && !path.exists() {
         return Err(AppError::new(
             ErrorKind::Validation,
             "SQLite database file does not exist",
@@ -850,7 +861,7 @@ fn sqlite_create_table_sql(path: PathBuf, table: &str) -> Result<String> {
 }
 
 fn sqlite_connection(path: PathBuf) -> Result<rusqlite::Connection> {
-    if !path.exists() {
+    if path != std::path::Path::new(":memory:") && !path.exists() {
         return Err(AppError::new(
             ErrorKind::Validation,
             "SQLite database file does not exist",
@@ -921,4 +932,40 @@ fn sqlite_cell_value(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<
         }
         rusqlite::types::ValueRef::Blob(value) => CellValue::Bytes(value.to_vec()),
     })
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn interrupts_long_query_and_allows_connection_reuse() {
+        let executor = SqliteQueryExecutor::new();
+        let profile = ConnectionProfile::builder(DataSourceKind::Sqlite, "cancel test")
+            .file_path(":memory:")
+            .build()
+            .unwrap();
+        let cancellation = db_common::QueryCancellation::default();
+        let cancel = cancellation.clone();
+        let config = ConnectionPoolConfig {
+            max_connections: 1,
+            ..Default::default()
+        };
+        let statements = ["WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n".into()];
+        let query = executor.execute_cancellable(&profile, None, &statements, config, cancellation);
+        let trigger = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(query, trigger)
+        })
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        let result = executor
+            .execute(&profile, None, &["SELECT 42".into()], config)
+            .await
+            .unwrap();
+        assert_eq!(result[0].rows[0].values[0], CellValue::Int(42));
+    }
 }

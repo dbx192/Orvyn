@@ -81,3 +81,43 @@ impl XlsxWriter {
         self.workbook.save(&self.path).map_err(error)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db_common::Row;
+    use std::io::Read;
+
+    #[test]
+    fn workbook_preserves_large_integers_and_never_promotes_text_to_formulas() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.xlsx");
+        let mut writer = XlsxWriter::create(&path, &["large".into(), "literal".into()]).unwrap();
+        let page = QueryResult {
+            statement: String::new(),
+            columns: vec![],
+            rows: vec![Row::new(vec![
+                CellValue::UInt(u64::MAX),
+                CellValue::Text("=1+1".into()),
+            ])],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            notices: vec![],
+            metadata: Default::default(),
+        };
+        writer.write_page(&page).unwrap();
+        writer.write_page(&page).unwrap();
+        writer.finish().unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        let mut sheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut sheet)
+            .unwrap();
+        assert!(sheet.contains("18446744073709551615"));
+        assert!(sheet.contains("=1+1"));
+        assert!(!sheet.contains("<f>"));
+        assert!(sheet.contains("r=\"A3\""));
+    }
+}

@@ -1,0 +1,92 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config unixodbc-dev libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev
+      - if: runner.os == 'macOS'
+        run: brew install unixodbc
+      - run: python packaging/prepare-duckdb.py
+      - name: Runtime library paths
+        shell: bash
+        run: |
+          echo "$PWD/packaging/duckdb-download/local/1.5.4" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$PWD/packaging/duckdb-download/local/1.5.4" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$PWD/packaging/duckdb-download/local/1.5.4" >> "$GITHUB_ENV"
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - if: runner.os == 'Linux'
+        run: bash packaging/linux/package.sh
+      - if: runner.os == 'macOS'
+        run: bash packaging/macos/package.sh
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build -p orvyn --release --locked
+          New-Item -ItemType Directory -Force dist/windows
+          Copy-Item target/release/orvyn.exe, target/release/duckdb.dll dist/windows/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orvyn-${{ runner.os }}-${{ runner.arch }}
+          path: dist/
+  services:
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 10
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_ROOT_HOST: '%'
+        ports: ['3306:3306']
+        options: --health-cmd "mysqladmin ping" --health-interval 10s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 10
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: 'false'
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports: ['9200:9200']
+        options: --health-cmd "curl -fs http://localhost:9200/_cluster/health" --health-interval 10s --health-timeout 10s --health-retries 30
+    env:
+      ORVYN_TEST_PG_HOST: 127.0.0.1
+      ORVYN_TEST_PG_USER: postgres
+      ORVYN_TEST_PG_DATABASE: postgres
+      ORVYN_TEST_MYSQL_HOST: 127.0.0.1
+      ORVYN_TEST_MYSQL_USER: root
+      ORVYN_TEST_MYSQL_DATABASE: mysql
+      ORVYN_TEST_REDIS_HOST: 127.0.0.1
+      ORVYN_TEST_ES_HOST: 127.0.0.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config unixodbc-dev
+      - run: python3 packaging/prepare-duckdb.py
+      - run: cargo test -p app-core --test service_integration --locked -- --ignored

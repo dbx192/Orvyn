@@ -471,6 +471,7 @@ pub struct DocumentCollection {
 }
 
 /// Document store connector (MongoDB). Implemented in Phase 4.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait DocumentConnector: Send + Sync {
     fn kind(&self) -> DataSourceKind;

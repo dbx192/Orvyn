@@ -31,7 +31,9 @@ struct QueryPage {
     count: usize,
     notice: Option<String>,
 }
-type SharedQueryCell = Arc<Mutex<Option<Result<QueryPage, String>>>>;
+type AsyncCell<T> = Arc<Mutex<Option<T>>>;
+type ResultCell<T> = AsyncCell<Result<T, String>>;
+type SharedQueryCell = ResultCell<QueryPage>;
 
 pub struct SearchBrowser {
     search_service: SearchService,
@@ -47,11 +49,11 @@ pub struct SearchBrowser {
     error: Option<String>,
     notice: Option<String>,
     cell: Option<SharedQueryCell>,
-    save_cell: Option<Arc<Mutex<Option<Result<FavoriteQuery, String>>>>>,
-    history_cell: Option<Arc<Mutex<Option<Result<(), String>>>>>,
+    save_cell: Option<ResultCell<FavoriteQuery>>,
+    history_cell: Option<ResultCell<()>>,
     saved_queries: Vec<FavoriteQuery>,
     history_entries: Vec<QueryHistoryEntry>,
-    load_cell: Option<Arc<Mutex<Option<(Vec<QueryHistoryEntry>, Vec<FavoriteQuery>)>>>>,
+    load_cell: Option<AsyncCell<(Vec<QueryHistoryEntry>, Vec<FavoriteQuery>)>>,
     history_search: String,
     saved_search: String,
     show_saved: bool,
@@ -62,10 +64,10 @@ pub struct SearchBrowser {
     pit: Option<String>,
     cursors: std::collections::BTreeMap<u64, serde_json::Value>,
     task: Option<tokio::task::AbortHandle>,
-    mapping_cell: Arc<Mutex<Option<Result<Vec<(String, String)>, String>>>>,
+    mapping_cell: ResultCell<Vec<(String, String)>>,
     mapping_fields: Vec<(String, String)>,
     mapping_pending: bool,
-    export_cell: Option<Arc<Mutex<Option<Result<(), String>>>>>,
+    export_cell: Option<ResultCell<()>>,
 }
 
 impl SearchBrowser {
@@ -660,6 +662,7 @@ fn search_filter(ui: &mut Ui, text: &mut String) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_query(
     service: SearchService,
     kind: DataSourceKind,

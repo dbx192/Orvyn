@@ -852,6 +852,12 @@ fn qualified_import_table_name(
     }
 }
 
+impl Drop for ImportWizard {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,11 +889,5 @@ mod tests {
             .unwrap(),
             "\"main\".\"用户\""
         );
-    }
-}
-
-impl Drop for ImportWizard {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
     }
 }

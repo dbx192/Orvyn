@@ -19,6 +19,7 @@ pub fn transaction<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Res
     lock_path.push(".lock");
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)?;

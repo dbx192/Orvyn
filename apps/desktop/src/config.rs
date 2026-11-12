@@ -1,4 +1,7 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 pub(crate) fn data_dir() -> PathBuf {
     if let Some(path) = env::var_os("ORVYN_CONFIG_DIR") {
@@ -19,7 +22,7 @@ pub(crate) fn data_dir() -> PathBuf {
         .join("orvyn")
 }
 
-pub(crate) fn master_key(dir: &PathBuf) -> std::io::Result<String> {
+pub(crate) fn master_key(dir: &Path) -> std::io::Result<String> {
     if let Some(key) = env::var_os("ORVYN_MASTER_KEY") {
         let key = key.to_string_lossy().into_owned();
         if key.trim().is_empty() {

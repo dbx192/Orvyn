@@ -61,6 +61,7 @@ pub enum ObjectKind {
 pub struct ObjectDropState {
     pub kind: ObjectKind,
     pub name: String,
+    pub sql: Option<String>,
 }
 
 /// A request to alter a table's structure. The shell layer turns this into
@@ -166,19 +167,24 @@ impl AlterTableRequest {
             | AlterTableRequest::AddForeignKey { schema, .. } => schema.as_deref(),
         }
     }
-
 }
 
 fn local_ddl_dir() -> PathBuf {
-    
-    env::var_os("ORVYN_CONFIG_DIR").map(PathBuf::from).or_else(|| {
-        #[cfg(windows)]
-        { env::var_os("APPDATA").map(|path| PathBuf::from(path).join("Orvyn")) }
-        #[cfg(not(windows))]
-        { None }
-    }).or_else(|| env::var_os("XDG_CONFIG_HOME").map(|path| PathBuf::from(path).join("orvyn")))
-      .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-      .join("ddl")
+    env::var_os("ORVYN_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                env::var_os("APPDATA").map(|path| PathBuf::from(path).join("Orvyn"))
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        })
+        .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|path| PathBuf::from(path).join("orvyn")))
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("ddl")
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -190,10 +196,18 @@ fn parse_ddl_object(sql: &str) -> Option<(ObjectKind, String)> {
     // PostgreSQL trigger DDL commonly contains a helper CREATE FUNCTION
     // (which itself mentions RETURNS TRIGGER) followed by CREATE TRIGGER.
     // Prefer the trigger object when both exist, and ignore the type name.
-    let create = find_create_kind(&tokens, "trigger")
-        .or_else(|| tokens.iter().position(|token| token.eq_ignore_ascii_case("create")))?;
+    let create = find_create_kind(&tokens, "trigger").or_else(|| {
+        tokens
+            .iter()
+            .position(|token| token.eq_ignore_ascii_case("create"))
+    })?;
     let mut kind_index = create + 1;
-    if tokens.get(kind_index).is_some_and(|token| token.eq_ignore_ascii_case("or")) { kind_index += 2; }
+    if tokens
+        .get(kind_index)
+        .is_some_and(|token| token.eq_ignore_ascii_case("or"))
+    {
+        kind_index += 2;
+    }
     let kind = match tokens.get(kind_index)?.to_ascii_lowercase().as_str() {
         "trigger" => ObjectKind::Trigger,
         "function" => ObjectKind::Function,
@@ -251,8 +265,15 @@ fn save_local_ddl(table: &str, title: &str, sql: &str) -> Result<PathBuf, String
         None if title.to_ascii_lowercase().contains("function") => "function",
         None => "trigger",
     };
-    let name = parsed.map(|(_, name)| name).unwrap_or_else(|| title.to_string());
-    let path = dir.join(format!("{}__{}__{}.sql", sanitize_filename(table), kind, sanitize_filename(&name)));
+    let name = parsed
+        .map(|(_, name)| name)
+        .unwrap_or_else(|| title.to_string());
+    let path = dir.join(format!(
+        "{}__{}__{}.sql",
+        sanitize_filename(table),
+        kind,
+        sanitize_filename(&name)
+    ));
     fs::write(&path, sql.as_bytes()).map_err(|error| error.to_string())?;
     Ok(path)
 }
@@ -271,18 +292,49 @@ fn remove_local_ddl(table: &str, kind: ObjectKind, name: &str) {
     let _ = fs::remove_file(path);
 }
 
-fn merge_local_ddl(table: &str, mut triggers: Vec<TableTrigger>, mut functions: Vec<DatabaseFunction>) -> (Vec<TableTrigger>, Vec<DatabaseFunction>) {
+fn merge_local_ddl(
+    table: &str,
+    mut triggers: Vec<TableTrigger>,
+    mut functions: Vec<DatabaseFunction>,
+) -> (Vec<TableTrigger>, Vec<DatabaseFunction>) {
     let prefix = format!("{}__", sanitize_filename(table));
-    let Ok(entries) = fs::read_dir(local_ddl_dir()) else { return (triggers, functions) };
+    let Ok(entries) = fs::read_dir(local_ddl_dir()) else {
+        return (triggers, functions);
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(filename) = path.file_name().and_then(|name| name.to_str()) else { continue };
-        if !filename.starts_with(&prefix) || path.extension().and_then(|ext| ext.to_str()) != Some("sql") { continue; }
-        let Ok(sql) = fs::read_to_string(path) else { continue };
-        let Some((kind, name)) = parse_ddl_object(&sql) else { continue };
+        let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !filename.starts_with(&prefix)
+            || path.extension().and_then(|ext| ext.to_str()) != Some("sql")
+        {
+            continue;
+        }
+        let Ok(sql) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Some((kind, name)) = parse_ddl_object(&sql) else {
+            continue;
+        };
         match kind {
-            ObjectKind::Trigger if !triggers.iter().any(|item| item.name == name) => triggers.push(TableTrigger { name, event: String::new(), timing: String::new(), statement: Some(sql) }),
-            ObjectKind::Function if !functions.iter().any(|item| item.name == name) => functions.push(DatabaseFunction { name, return_type: None, language: None, definition: Some(sql), identity_arguments: None, kind: "local".to_string() }),
+            ObjectKind::Trigger if !triggers.iter().any(|item| item.name == name) => {
+                triggers.push(TableTrigger {
+                    name,
+                    event: String::new(),
+                    timing: String::new(),
+                    statement: Some(sql),
+                })
+            }
+            ObjectKind::Function if !functions.iter().any(|item| item.name == name) => functions
+                .push(DatabaseFunction {
+                    name,
+                    return_type: None,
+                    language: None,
+                    definition: Some(sql),
+                    identity_arguments: None,
+                    kind: "local".to_string(),
+                }),
             _ => {}
         }
     }
@@ -424,10 +476,11 @@ pub fn build_alter_table_sql(
                     old_name,
                     new_name,
                 )),
-                ProtocolFamily::ClickHouse
-                | ProtocolFamily::Tdengine => Err(AppError::unsupported(
-                    "RENAME COLUMN is not available for this data source yet",
-                )),
+                ProtocolFamily::ClickHouse | ProtocolFamily::Tdengine => {
+                    Err(AppError::unsupported(
+                        "RENAME COLUMN is not available for this data source yet",
+                    ))
+                }
                 _ => Err(AppError::validation(
                     "unsupported data source for RENAME COLUMN",
                 )),
@@ -608,7 +661,14 @@ fn parse_clipboard_column(text: &str) -> Option<(String, String, bool, Option<St
     }
     // The type runs from the second token up to the first SQL keyword.
     const KEYWORDS: [&str; 9] = [
-        "NOT", "NULL", "DEFAULT", "PRIMARY", "KEY", "UNIQUE", "AUTO_INCREMENT", "COMMENT",
+        "NOT",
+        "NULL",
+        "DEFAULT",
+        "PRIMARY",
+        "KEY",
+        "UNIQUE",
+        "AUTO_INCREMENT",
+        "COMMENT",
         "REFERENCES",
     ];
     let upper: Vec<String> = tokens.iter().map(|t| t.to_ascii_uppercase()).collect();
@@ -624,10 +684,9 @@ fn parse_clipboard_column(text: &str) -> Option<(String, String, bool, Option<St
     }
     let nullable = !(upper.iter().any(|t| t == "NOT") && upper.iter().any(|t| t == "NULL"));
     let default_value = upper.iter().position(|t| t == "DEFAULT").and_then(|pos| {
-        tokens.get(pos + 1).map(|v| {
-            v.trim_matches(|c| c == '\'' || c == '"')
-                .to_string()
-        })
+        tokens
+            .get(pos + 1)
+            .map(|v| v.trim_matches(|c| c == '\'' || c == '"').to_string())
     });
     Some((name, type_tokens.join(" "), nullable, default_value))
 }
@@ -1000,140 +1059,140 @@ impl TableStructureView {
             vec2(ui.available_width(), 32.0),
             Layout::left_to_right(Align::Center).with_main_wrap(true),
             |ui| {
-            ui.label(RichText::new(self.table_name()).strong().size(15.0));
-            if !self.details_loaded {
-                ui.label(
-                    RichText::new(tr("Details load on demand"))
-                        .small()
-                        .color(Color32::GRAY),
-                );
-            }
-            ui.separator();
-            if ui
-                .add_enabled(
-                    self.details_loaded,
-                    eframe::egui::Button::new(tr("Copy DDL")),
-                )
-                .clicked()
-            {
-                ui.output_mut(|o| o.copied_text = self.create_sql.clone());
-                message = Some("CREATE TABLE DDL copied to clipboard".to_string());
-            }
-            // Designer field actions: add / delete / primary key / order.
-            let selected = self.selected_column.filter(|i| *i < self.columns.len());
-            if ui
-                .add_enabled(self.details_loaded, Button::new(tr("Add Column")))
-                .on_hover_text(tr("Add a column to the table"))
-                .clicked()
-            {
-                self.add_inline_column(&mut message);
-            }
-            if ui
-                .add_enabled(
-                    self.details_loaded && selected.is_some(),
-                    Button::new(tr("Delete")),
-                )
-                .on_hover_text(tr("Delete the selected column"))
-                .clicked()
-            {
-                if let Some(index) = selected {
-                    self.pending_drop_column = Some(self.columns[index].name.clone());
+                ui.label(RichText::new(self.table_name()).strong().size(15.0));
+                if !self.details_loaded {
+                    ui.label(
+                        RichText::new(tr("Details load on demand"))
+                            .small()
+                            .color(Color32::GRAY),
+                    );
                 }
-            }
-            ui.separator();
-            if ui
-                .add_enabled(
-                    self.details_loaded
-                        && selected.is_some_and(|i| i > 0),
-                    Button::new("↑").min_size(egui::vec2(20.0, 18.0)),
-                )
-                .on_hover_text(tr("Move selected column up"))
-                .clicked()
-            {
-                self.move_selected_column(-1, &mut message);
-            }
-            if ui
-                .add_enabled(
-                    self.details_loaded
-                        && selected.is_some_and(|i| i + 1 < self.columns.len()),
-                    Button::new("↓").min_size(egui::vec2(20.0, 18.0)),
-                )
-                .on_hover_text(tr("Move selected column down"))
-                .clicked()
-            {
-                self.move_selected_column(1, &mut message);
-            }
-            if ui
-                .add_enabled(
-                    self.details_loaded && selected.is_some(),
-                    Button::new(tr("Primary key")),
-                )
-                .on_hover_text(tr("Toggle the selected column as primary key"))
-                .clicked()
-            {
-                if let Some(index) = selected {
-                    self.columns[index].primary_key = !self.columns[index].primary_key;
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        self.details_loaded,
+                        eframe::egui::Button::new(tr("Copy DDL")),
+                    )
+                    .clicked()
+                {
+                    ui.output_mut(|o| o.copied_text = self.create_sql.clone());
+                    message = Some("CREATE TABLE DDL copied to clipboard".to_string());
                 }
-            }
-            ui.separator();
-            if ui
-                .add_enabled(
-                    self.details_loaded && !self.columns.is_empty(),
-                    Button::new(tr("Add Index")),
-                )
-                .clicked()
-            {
-                self.add_inline_index(&mut message);
-            }
-            if ui
-                .add_enabled(
-                    self.details_loaded && !self.columns.is_empty(),
-                    Button::new(tr("Add FK")),
-                )
-                .clicked()
-            {
-                self.add_inline_fk(&mut message);
-            }
-            ui.separator();
-            let has_changes = self.has_pending_changes();
-            if ui
-                .add_enabled(self.details_loaded, Button::new(tr("Refresh")))
-                .on_hover_text(tr("Reload the table structure from the database"))
-                .clicked()
-            {
-                if self.has_pending_changes() {
-                    self.confirm_refresh = true;
-                } else {
-                    self.refresh_requested = true;
-                    message = Some("Refreshing structure...".to_string());
+                // Designer field actions: add / delete / primary key / order.
+                let selected = self.selected_column.filter(|i| *i < self.columns.len());
+                if ui
+                    .add_enabled(self.details_loaded, Button::new(tr("Add Column")))
+                    .on_hover_text(tr("Add a column to the table"))
+                    .clicked()
+                {
+                    self.add_inline_column(&mut message);
                 }
-            }
-            if ui
-                .add_enabled(has_changes, Button::new(tr("Save")))
-                .on_hover_text(tr("Apply all pending structure changes"))
-                .clicked()
-            {
-                let requests = self.staged_requests();
-                let count = requests.len();
-                self.pending_alter_batch.extend(requests);
-                let (obj_ops, ddl_error) = match self.index_fk_ddl_ops() {
-                    Ok(ops) => (ops, None),
-                    Err(error) => (Vec::new(), Some(error)),
-                };
-                if let Some(error) = ddl_error {
-                    message = Some(format!("Cannot build object DDL: {error}"));
-                } else {
-                    let op_count = obj_ops.len();
-                    self.pending_ddl.extend(obj_ops);
-                    message = Some(if op_count > 0 && count > 0 {
-                        format!("Saving {count} structure change(s), {op_count} object op(s)...")
-                    } else if op_count > 0 {
-                        format!("Saving {op_count} object op(s)...")
+                if ui
+                    .add_enabled(
+                        self.details_loaded && selected.is_some(),
+                        Button::new(tr("Delete")),
+                    )
+                    .on_hover_text(tr("Delete the selected column"))
+                    .clicked()
+                {
+                    if let Some(index) = selected {
+                        self.pending_drop_column = Some(self.columns[index].name.clone());
+                    }
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        self.details_loaded && selected.is_some_and(|i| i > 0),
+                        Button::new("↑").min_size(egui::vec2(20.0, 18.0)),
+                    )
+                    .on_hover_text(tr("Move selected column up"))
+                    .clicked()
+                {
+                    self.move_selected_column(-1, &mut message);
+                }
+                if ui
+                    .add_enabled(
+                        self.details_loaded && selected.is_some_and(|i| i + 1 < self.columns.len()),
+                        Button::new("↓").min_size(egui::vec2(20.0, 18.0)),
+                    )
+                    .on_hover_text(tr("Move selected column down"))
+                    .clicked()
+                {
+                    self.move_selected_column(1, &mut message);
+                }
+                if ui
+                    .add_enabled(
+                        self.details_loaded && selected.is_some(),
+                        Button::new(tr("Primary key")),
+                    )
+                    .on_hover_text(tr("Toggle the selected column as primary key"))
+                    .clicked()
+                {
+                    if let Some(index) = selected {
+                        self.columns[index].primary_key = !self.columns[index].primary_key;
+                    }
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        self.details_loaded && !self.columns.is_empty(),
+                        Button::new(tr("Add Index")),
+                    )
+                    .clicked()
+                {
+                    self.add_inline_index(&mut message);
+                }
+                if ui
+                    .add_enabled(
+                        self.details_loaded && !self.columns.is_empty(),
+                        Button::new(tr("Add FK")),
+                    )
+                    .clicked()
+                {
+                    self.add_inline_fk(&mut message);
+                }
+                ui.separator();
+                let has_changes = self.has_pending_changes();
+                if ui
+                    .add_enabled(self.details_loaded, Button::new(tr("Refresh")))
+                    .on_hover_text(tr("Reload the table structure from the database"))
+                    .clicked()
+                {
+                    if self.has_pending_changes() {
+                        self.confirm_refresh = true;
                     } else {
-                        format!("Saving {count} structure change(s)...")
-                    });
+                        self.refresh_requested = true;
+                        message = Some("Refreshing structure...".to_string());
+                    }
                 }
-            }
+                if ui
+                    .add_enabled(has_changes, Button::new(tr("Save")))
+                    .on_hover_text(tr("Apply all pending structure changes"))
+                    .clicked()
+                {
+                    let requests = self.staged_requests();
+                    let count = requests.len();
+                    self.pending_alter_batch.extend(requests);
+                    let (obj_ops, ddl_error) = match self.index_fk_ddl_ops() {
+                        Ok(ops) => (ops, None),
+                        Err(error) => (Vec::new(), Some(error)),
+                    };
+                    if let Some(error) = ddl_error {
+                        message = Some(format!("Cannot build object DDL: {error}"));
+                    } else {
+                        let op_count = obj_ops.len();
+                        self.pending_ddl.extend(obj_ops);
+                        message = Some(if op_count > 0 && count > 0 {
+                            format!(
+                                "Saving {count} structure change(s), {op_count} object op(s)..."
+                            )
+                        } else if op_count > 0 {
+                            format!("Saving {op_count} object op(s)...")
+                        } else {
+                            format!("Saving {count} structure change(s)...")
+                        });
+                    }
+                }
             },
         );
 
@@ -1330,10 +1389,7 @@ impl TableStructureView {
         self.col_original_name.push(None);
         self.editing_name = Some(self.columns.len() - 1);
         self.selected_column = Some(self.columns.len() - 1);
-        *message = Some(
-            tr("Column added; edit its properties inline and click Save")
-                .to_string(),
-        );
+        *message = Some(tr("Column added; edit its properties inline and click Save").to_string());
     }
 
     /// Move the currently selected column up or down in the designer display
@@ -1354,13 +1410,11 @@ impl TableStructureView {
         } else if self.editing_name == Some(to as usize) {
             self.editing_name = Some(from);
         }
-        *message = Some(
-            if delta < 0 {
-                "Moved column up".to_string()
-            } else {
-                "Moved column down".to_string()
-            },
-        );
+        *message = Some(if delta < 0 {
+            "Moved column up".to_string()
+        } else {
+            "Moved column down".to_string()
+        });
     }
 
     // ---- Drop Column ----
@@ -1832,8 +1886,7 @@ impl TableStructureView {
                             }
 
                             // ---- Length / precision (editable) ----
-                            let mut width_buf =
-                                type_field_width(&self.columns[idx].database_type);
+                            let mut width_buf = type_field_width(&self.columns[idx].database_type);
                             let width_response = ui.add(
                                 TextEdit::singleline(&mut width_buf)
                                     .desired_width(90.0)
@@ -1850,8 +1903,7 @@ impl TableStructureView {
                             }
 
                             // ---- Unsigned ----
-                            let mut unsigned =
-                                type_has_unsigned(&self.columns[idx].database_type);
+                            let mut unsigned = type_has_unsigned(&self.columns[idx].database_type);
                             let supports_unsigned =
                                 type_supports_unsigned(&self.columns[idx].database_type);
                             let unsigned_resp = ui.add_enabled(
@@ -1888,7 +1940,11 @@ impl TableStructureView {
                             };
 
                             // ---- Key ----
-                            ui.label(if self.columns[idx].primary_key { "PK" } else { "" });
+                            ui.label(if self.columns[idx].primary_key {
+                                "PK"
+                            } else {
+                                ""
+                            });
 
                             // ---- Comment (editable) ----
                             let mut comment_buf =
@@ -1997,7 +2053,8 @@ impl TableStructureView {
                                 });
                                 self.col_original_name.push(None);
                                 self.editing_name = Some(self.columns.len() - 1);
-                                status = Some("Column pasted from clipboard; rename it".to_string());
+                                status =
+                                    Some("Column pasted from clipboard; rename it".to_string());
                             }
                         }
                     });
@@ -2058,7 +2115,8 @@ impl TableStructureView {
                         ui.label(tr("Unsigned"));
                         let mut unsigned = type_has_unsigned(&column.database_type);
                         if ui.checkbox(&mut unsigned, "").changed() {
-                            column.database_type = set_type_unsigned(&column.database_type, unsigned);
+                            column.database_type =
+                                set_type_unsigned(&column.database_type, unsigned);
                         }
                         ui.end_row();
                         ui.label(tr("Primary key"));
@@ -2134,7 +2192,11 @@ impl TableStructureView {
                     format!("CREATE {unique}INDEX IF NOT EXISTS {full} ON {table_sql} ({cols})")
                 }
             }
-            _ => return Err(AppError::unsupported("index DDL is not supported for this data source")),
+            _ => {
+                return Err(AppError::unsupported(
+                    "index DDL is not supported for this data source",
+                ))
+            }
         };
         Ok(statement)
     }
@@ -2204,6 +2266,31 @@ impl TableStructureView {
         Ok(statement)
     }
 
+    fn routine_drop_sql(&self, routine: &DatabaseFunction) -> String {
+        let dialect = dialect_for_kind(self.kind);
+        let name = qualified_table_sql(
+            dialect.as_ref(),
+            self.kind,
+            self.database.as_deref(),
+            self.schema.as_deref(),
+            &routine.name,
+        )
+        .unwrap_or_else(|_| routine.name.clone());
+        let kind = if routine.kind.eq_ignore_ascii_case("procedure") {
+            "PROCEDURE"
+        } else {
+            "FUNCTION"
+        };
+        if self.kind.protocol_family() == ProtocolFamily::PostgreSql {
+            format!(
+                "DROP {kind} IF EXISTS {name}({})",
+                routine.identity_arguments.as_deref().unwrap_or("")
+            )
+        } else {
+            format!("DROP {kind} IF EXISTS {name}")
+        }
+    }
+
     /// Build DROP DDL for a trigger / function.
     fn build_object_drop_sql(&self, kind: ObjectKind, name: &str) -> String {
         let dialect = dialect_for_kind(self.kind);
@@ -2262,7 +2349,21 @@ impl TableStructureView {
         let Some((kind, name)) = parse_ddl_object(trimmed) else {
             return trimmed.to_string();
         };
-        format!("{};\n{trimmed}", self.build_object_drop_sql(kind, &name))
+        if kind == ObjectKind::Function && self.kind.protocol_family() == ProtocolFamily::PostgreSql
+        {
+            // PostgreSQL definitions use CREATE OR REPLACE and retain identity/dependencies.
+            return trimmed.to_string();
+        }
+        let drop_sql = if kind == ObjectKind::Function {
+            self.functions
+                .iter()
+                .find(|routine| routine.name == name)
+                .map(|routine| self.routine_drop_sql(routine))
+                .unwrap_or_else(|| self.build_object_drop_sql(kind, &name))
+        } else {
+            self.build_object_drop_sql(kind, &name)
+        };
+        format!("{drop_sql};\n{trimmed}")
     }
 
     /// Baseline CREATE text shown when authoring a new trigger in the DDL editor.
@@ -2345,23 +2446,25 @@ impl TableStructureView {
             if cur.primary || cur.name.is_empty() || cur.columns.is_empty() {
                 continue;
             }
-            match self
-                .original_indexes
-                .iter()
-                .find(|o| o.name == cur.name)
-            {
+            match self.original_indexes.iter().find(|o| o.name == cur.name) {
                 None => ops.push(DdlOperation {
-                    sql: self.build_index_ddl(cur, false).map_err(|e| e.message.clone())?,
+                    sql: self
+                        .build_index_ddl(cur, false)
+                        .map_err(|e| e.message.clone())?,
                     label: format!("Create index {}", cur.name),
                 }),
                 Some(orig) => {
                     if orig.unique != cur.unique || orig.columns != cur.columns {
                         ops.push(DdlOperation {
-                            sql: self.build_index_ddl(orig, true).map_err(|e| e.message.clone())?,
+                            sql: self
+                                .build_index_ddl(orig, true)
+                                .map_err(|e| e.message.clone())?,
                             label: format!("Rebuild index {}", cur.name),
                         });
                         ops.push(DdlOperation {
-                            sql: self.build_index_ddl(cur, false).map_err(|e| e.message.clone())?,
+                            sql: self
+                                .build_index_ddl(cur, false)
+                                .map_err(|e| e.message.clone())?,
                             label: format!("Recreate index {}", cur.name),
                         });
                     }
@@ -2372,7 +2475,9 @@ impl TableStructureView {
         for orig in &self.original_foreign_keys {
             if !self.foreign_keys.iter().any(|c| c.name == orig.name) {
                 ops.push(DdlOperation {
-                    sql: self.build_fk_ddl(orig, true).map_err(|e| e.message.clone())?,
+                    sql: self
+                        .build_fk_ddl(orig, true)
+                        .map_err(|e| e.message.clone())?,
                     label: format!("Drop foreign key {}", orig.name),
                 });
             }
@@ -2387,7 +2492,9 @@ impl TableStructureView {
                 .find(|o| o.name == cur.name)
             {
                 None => ops.push(DdlOperation {
-                    sql: self.build_fk_ddl(cur, false).map_err(|e| e.message.clone())?,
+                    sql: self
+                        .build_fk_ddl(cur, false)
+                        .map_err(|e| e.message.clone())?,
                     label: format!("Add foreign key {}", cur.name),
                 }),
                 Some(orig) => {
@@ -2398,11 +2505,15 @@ impl TableStructureView {
                         || orig.on_delete != cur.on_delete;
                     if changed {
                         ops.push(DdlOperation {
-                            sql: self.build_fk_ddl(orig, true).map_err(|e| e.message.clone())?,
+                            sql: self
+                                .build_fk_ddl(orig, true)
+                                .map_err(|e| e.message.clone())?,
                             label: format!("Rebuild foreign key {}", cur.name),
                         });
                         ops.push(DdlOperation {
-                            sql: self.build_fk_ddl(cur, false).map_err(|e| e.message.clone())?,
+                            sql: self
+                                .build_fk_ddl(cur, false)
+                                .map_err(|e| e.message.clone())?,
                             label: format!("Recreate foreign key {}", cur.name),
                         });
                     }
@@ -2506,8 +2617,7 @@ impl TableStructureView {
                             if ui
                                 .add_sized(
                                     [230.0, 22.0],
-                                    TextEdit::singleline(&mut cols_text)
-                                        .hint_text(tr("Columns")),
+                                    TextEdit::singleline(&mut cols_text).hint_text(tr("Columns")),
                                 )
                                 .changed()
                             {
@@ -2588,7 +2698,8 @@ impl TableStructureView {
                             if ui
                                 .add_sized(
                                     [130.0, 22.0],
-                                    TextEdit::singleline(&mut cols_text).hint_text(tr("Local cols")),
+                                    TextEdit::singleline(&mut cols_text)
+                                        .hint_text(tr("Local cols")),
                                 )
                                 .changed()
                             {
@@ -2710,8 +2821,11 @@ impl TableStructureView {
                     self.open_trigger_editor(index);
                 }
                 if let Some((kind, name)) = drop {
-                    self.pending_object_drop =
-                        Some(ObjectDropState { kind, name });
+                    self.pending_object_drop = Some(ObjectDropState {
+                        kind,
+                        name,
+                        sql: None,
+                    });
                 }
 
                 ui.add_space(6.0);
@@ -2772,7 +2886,7 @@ impl TableStructureView {
                                 .on_hover_text(tr("Drop function"))
                                 .clicked()
                             {
-                                drop = Some((ObjectKind::Function, func.name.clone()));
+                                drop = Some((func.name.clone(), self.routine_drop_sql(func)));
                             }
                             ui.end_row();
                         }
@@ -2780,8 +2894,8 @@ impl TableStructureView {
                 if let Some(index) = edit {
                     self.open_function_editor(index);
                 }
-                if let Some((kind, name)) = drop {
-                    self.pending_object_drop = Some(ObjectDropState { kind, name });
+                if let Some((name, sql)) = drop {
+                    self.pending_object_drop = Some(ObjectDropState { kind: ObjectKind::Function, name, sql: Some(sql) });
                 }
 
                 ui.add_space(6.0);
@@ -2857,7 +2971,11 @@ impl TableStructureView {
     /// Only open definitions retrieved from the server; never replace a routine with a stub.
     fn open_function_editor(&mut self, index: usize) {
         if let Some(func) = self.functions.get(index) {
-            if let Some(sql) = func.definition.as_ref().filter(|sql| !sql.trim().is_empty()) {
+            if let Some(sql) = func
+                .definition
+                .as_ref()
+                .filter(|sql| !sql.trim().is_empty())
+            {
                 self.ddl_editor = Some(DdlEditorState {
                     title: trf("Edit Function - {name}", &[("name", func.name.clone())]),
                     sql: sql.clone(),
@@ -2921,7 +3039,10 @@ impl TableStructureView {
                 ObjectKind::Trigger => self.triggers.retain(|item| item.name != drop.name),
                 ObjectKind::Function => self.functions.retain(|item| item.name != drop.name),
             }
-            let sql = self.build_object_drop_sql(drop.kind, &drop.name);
+            let sql = drop
+                .sql
+                .clone()
+                .unwrap_or_else(|| self.build_object_drop_sql(drop.kind, &drop.name));
             self.pending_ddl.push(DdlOperation {
                 sql,
                 label: trf("Drop {name}", &[("name", drop.name.clone())]),
@@ -3020,18 +3141,21 @@ fn fk_rule_combo(ui: &mut Ui, slot: &mut Option<String>, tag: (&str, usize)) {
         })
         .width(120.0)
         .show_ui(ui, |ui| {
-            let opts = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION", "SET DEFAULT"];
+            let opts = [
+                "",
+                "CASCADE",
+                "SET NULL",
+                "RESTRICT",
+                "NO ACTION",
+                "SET DEFAULT",
+            ];
             for opt in opts {
                 let value = if opt.is_empty() {
                     None
                 } else {
                     Some(opt.to_string())
                 };
-                ui.selectable_value(
-                    slot,
-                    value,
-                    if opt.is_empty() { "—" } else { opt },
-                );
+                ui.selectable_value(slot, value, if opt.is_empty() { "—" } else { opt });
             }
         });
 }
@@ -3486,7 +3610,10 @@ mod tests {
         view.database = None;
         view.schema = Some("public".to_string());
         let sql = view.build_object_drop_sql(ObjectKind::Trigger, "trg");
-        assert_eq!(sql, "DROP TRIGGER IF EXISTS \"trg\" ON \"public\".\"users\"");
+        assert_eq!(
+            sql,
+            "DROP TRIGGER IF EXISTS \"trg\" ON \"public\".\"users\""
+        );
     }
 
     #[test]

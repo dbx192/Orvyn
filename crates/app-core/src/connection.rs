@@ -250,14 +250,6 @@ impl ConnectionManager {
         // that case resolve the persisted profile by id before testing.
         let persisted_profile = self.get_profile(profile.id).await?;
         let mut resolved = profile.clone();
-        if let Some(saved) = &persisted_profile {
-            for (key, reference) in &saved.extra_secret_refs {
-                resolved
-                    .extra_secret_refs
-                    .entry(key.clone())
-                    .or_insert(reference.clone());
-            }
-        }
         self.resolve_extra_secrets(&mut resolved).await?;
         let stored_password = match persisted_profile.as_ref() {
             Some(saved) => self.load_password(saved).await?,

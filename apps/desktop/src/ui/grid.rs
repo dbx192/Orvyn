@@ -49,12 +49,12 @@ pub fn row_fill(ui: &Ui, row: usize, selected: bool) -> Color32 {
             Color32::from_rgb(227, 232, 240)
         }
     } else if ui.visuals().dark_mode {
-        if row % 2 == 0 {
+        if row.is_multiple_of(2) {
             Color32::from_rgb(19, 20, 23)
         } else {
             Color32::from_rgb(23, 24, 27)
         }
-    } else if row % 2 == 0 {
+    } else if row.is_multiple_of(2) {
         Color32::from_rgb(255, 255, 255)
     } else {
         Color32::from_rgb(248, 249, 251)
