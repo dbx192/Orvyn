@@ -17,6 +17,13 @@ pub struct CsvRowReader {
 }
 impl CsvRowReader {
     pub fn open(path: &Path, options: &CsvImportOptions) -> Result<Self> {
+        Self::open_cancellable(path, options, None)
+    }
+    pub fn open_cancellable(
+        path: &Path,
+        options: &CsvImportOptions,
+        cancellation: Option<&db_common::QueryCancellation>,
+    ) -> Result<Self> {
         let mut input = File::open(path)?;
         let mut prefix = [0u8; 3];
         let count = input.read(&mut prefix)?;
@@ -36,13 +43,19 @@ impl CsvRowReader {
             None => (UTF_8, 0, "UTF-8"),
         };
         let mut snapshot = tempfile::NamedTempFile::new()?;
-        let decoded = transcode(&mut input, snapshot.as_file_mut(), encoding, skip as u64);
+        let decoded = transcode(
+            &mut input,
+            snapshot.as_file_mut(),
+            encoding,
+            skip as u64,
+            cancellation,
+        );
         let label = match decoded {
             Ok(()) => label,
             Err(error) if bom.is_none() && error.kind == db_common::ErrorKind::TypeConversion => {
                 snapshot.as_file_mut().set_len(0)?;
                 snapshot.as_file_mut().seek(SeekFrom::Start(0))?;
-                transcode(&mut input, snapshot.as_file_mut(), GB18030, 0)?;
+                transcode(&mut input, snapshot.as_file_mut(), GB18030, 0, cancellation)?;
                 "GB18030/GBK"
             }
             Err(error) => return Err(error),
@@ -98,12 +111,16 @@ fn transcode(
     output: &mut File,
     encoding: &'static Encoding,
     skip: u64,
+    cancellation: Option<&db_common::QueryCancellation>,
 ) -> Result<()> {
     input.seek(SeekFrom::Start(skip))?;
     let mut decoder = encoding.new_decoder_without_bom_handling();
     let mut bytes = [0u8; 8192];
     let mut utf8 = [0u8; 32768];
     loop {
+        if cancellation.is_some_and(|token| token.is_cancelled()) {
+            return Err(AppError::validation("CSV import cancelled"));
+        }
         let count = input.read(&mut bytes)?;
         let last = count == 0;
         let mut used = 0;

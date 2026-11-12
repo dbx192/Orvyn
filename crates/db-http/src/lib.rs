@@ -1210,20 +1210,30 @@ impl HttpSqlConnector for CloudflareD1HttpConnector {
             ));
         }
 
-        let result = json
+        let results = json
             .get("result")
             .and_then(|r| r.as_array())
-            .and_then(|results| results.first())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-
-        let rows = result
-            .get("results")
-            .and_then(|r| r.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(vec![rows_to_query_result(sql, &rows)])
+            .ok_or_else(|| AppError::validation("D1 response is missing statement results"))?;
+        results
+            .iter()
+            .map(|result| {
+                if result.get("success").and_then(|v| v.as_bool()) == Some(false) {
+                    return Err(
+                        AppError::validation("D1 statement failed").with_detail(result.to_string())
+                    );
+                }
+                let rows = result
+                    .get("results")
+                    .and_then(|r| r.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut output = rows_to_query_result(sql, &rows);
+                if let Some(changes) = result.pointer("/meta/changes").and_then(|v| v.as_u64()) {
+                    output.affected_rows = changes;
+                }
+                Ok(output)
+            })
+            .collect()
     }
 
     async fn list_databases(

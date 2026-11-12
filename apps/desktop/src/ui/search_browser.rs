@@ -64,6 +64,8 @@ pub struct SearchBrowser {
     task: Option<tokio::task::AbortHandle>,
     mapping_cell: Arc<Mutex<Option<Result<Vec<(String, String)>, String>>>>,
     mapping_fields: Vec<(String, String)>,
+    mapping_pending: bool,
+    export_cell: Option<Arc<Mutex<Option<Result<(), String>>>>>,
 }
 
 impl SearchBrowser {
@@ -139,6 +141,11 @@ impl SearchBrowser {
             task: None,
             mapping_cell,
             mapping_fields: Vec::new(),
+            mapping_pending: matches!(
+                kind,
+                DataSourceKind::Elasticsearch | DataSourceKind::Easysearch
+            ),
+            export_cell: None,
         }
     }
 
@@ -393,6 +400,8 @@ impl SearchBrowser {
                 }
                 Some(Err(message)) => {
                     self.error = Some(message.clone());
+                    self.task = None;
+                    self.reset_pages();
                     self.result_text.clear();
                     return Some(message);
                 }
@@ -431,6 +440,8 @@ impl SearchBrowser {
             || self.save_cell.is_some()
             || self.history_cell.is_some()
             || self.load_cell.is_some()
+            || self.mapping_pending
+            || self.export_cell.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -445,7 +456,16 @@ impl SearchBrowser {
             }
         }
 
+        if let Some(cell) = self.export_cell.take() {
+            let result = cell.lock().unwrap().take();
+            match result {
+                Some(Ok(())) => self.notice = Some("Current page exported".into()),
+                Some(Err(error)) => self.error = Some(error),
+                None => self.export_cell = Some(cell),
+            }
+        }
         if let Some(result) = self.mapping_cell.lock().unwrap().take() {
+            self.mapping_pending = false;
             match result {
                 Ok(fields) => self.mapping_fields = fields,
                 Err(error) => self.notice = Some(format!("Field suggestions unavailable: {error}")),
@@ -518,21 +538,33 @@ impl SearchBrowser {
             }
             if ui
                 .add_enabled(
-                    !self.running && !self.result_text.is_empty(),
-                    Button::new("Export JSON"),
+                    !self.running && !self.result_text.is_empty() && self.export_cell.is_none(),
+                    Button::new("Export current page JSON"),
                 )
                 .clicked()
             {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON", &["json"])
-                    .set_file_name("results.json")
-                    .save_file()
-                {
-                    match db_common::atomic_file::replace(&path, self.result_text.as_bytes()) {
-                        Ok(()) => self.notice = Some("Results exported".to_string()),
-                        Err(error) => self.error = Some(error.diagnostic_message()),
-                    }
-                }
+                let text = self.result_text.clone();
+                let cell = Arc::new(Mutex::new(None));
+                self.export_cell = Some(cell.clone());
+                self.runtime.spawn(async move {
+                    let result = if let Some(file) = rfd::AsyncFileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .set_file_name("results.json")
+                        .save_file()
+                        .await
+                    {
+                        let path = file.path().to_path_buf();
+                        tokio::task::spawn_blocking(move || {
+                            db_common::atomic_file::replace(&path, text.as_bytes())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result.map_err(|e| e.diagnostic_message()))
+                    } else {
+                        Ok(())
+                    };
+                    *cell.lock().unwrap() = Some(result);
+                });
             }
         });
         if self.kind.is_document() {
@@ -668,6 +700,7 @@ async fn run_query(
                 if query.get("sort").is_none() {
                     query["sort"] = serde_json::json!(["_shard_doc"]);
                 }
+                query.as_object_mut().unwrap().remove("search_after");
                 if let Some(cursor) = cursor {
                     query["search_after"] = cursor;
                 } else if offset > 0 {

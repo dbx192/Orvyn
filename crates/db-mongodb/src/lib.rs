@@ -247,6 +247,9 @@ impl DocumentConnector for MongoDbDocumentConnector {
         offset: u64,
     ) -> Result<serde_json::Value> {
         use mongodb::bson::doc;
+        if !query.is_object() {
+            return Err(AppError::validation("MongoDB query must be an object"));
+        }
         let operation = query
             .get("operation")
             .and_then(|v| v.as_str())
@@ -257,6 +260,11 @@ impl DocumentConnector for MongoDbDocumentConnector {
             return Err(AppError::new(
                 ErrorKind::Permission,
                 "connection is read-only",
+            ));
+        }
+        if operation == "aggregate" && contains_write_stage(query) {
+            return Err(AppError::validation(
+                "Paginated aggregation does not support $out or $merge",
             ));
         }
         let limit = limit.clamp(1, 10000);
@@ -282,12 +290,19 @@ impl DocumentConnector for MongoDbDocumentConnector {
                     .limit(i64::from(limit))
                     .skip(offset)
                     .max_time(std::time::Duration::from_secs(30));
-                if query.get("projection").is_some() {
+                if query.get("operation").is_some() && query.get("projection").is_some() {
                     action = action.projection(document("projection")?);
                 }
-                if query.get("sort").is_some() {
-                    action = action.sort(document("sort")?);
+                let mut sort = if query.get("operation").is_some() {
+                    document("sort")?
+                } else {
+                    Document::new()
+                };
+                // A unique tiebreaker keeps equal sort values stable across pages.
+                if !sort.contains_key("_id") {
+                    sort.insert("_id", 1);
                 }
+                action = action.sort(sort);
                 let mut cursor = action.await.map_err(connection_error)?;
                 while let Some(item) = futures_util::StreamExt::next(&mut cursor).await {
                     documents.push(bson_to_json(&item.map_err(connection_error)?)?);

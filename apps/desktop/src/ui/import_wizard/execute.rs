@@ -47,11 +47,18 @@ impl ImportJob {
         let path = PathBuf::from(&self.preview.file_path);
         let options = self.options.clone();
         let cancellation = self.cancellation.clone();
+        let expected_headers = self.preview.headers.clone();
         // Backpressure keeps at most two batches in memory, including the active batch.
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         let producer = tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<()> {
-                let mut reader = CsvRowReader::open(&path, &options)?;
+                let mut reader =
+                    CsvRowReader::open_cancellable(&path, &options, Some(&cancellation))?;
+                if !expected_headers.starts_with(&reader.headers) {
+                    return Err(db_common::AppError::validation(
+                        "CSV headers changed since preview; reload the preview",
+                    ));
+                }
                 while !cancellation.is_cancelled() {
                     let rows = reader.read_batch(batch_size)?;
                     if rows.is_empty() {

@@ -593,9 +593,13 @@ impl ImportWizard {
         if let Some(ref result) = self.import_result {
             // Show completed result
             ui.label(
-                RichText::new("✅ Import complete!")
-                    .color(Color32::GREEN)
-                    .size(18.0),
+                RichText::new(if result.cancelled {
+                    "Import cancelled"
+                } else {
+                    "Import complete"
+                })
+                .color(Color32::GREEN)
+                .size(18.0),
             );
             ui.add_space(8.0);
             if result.cancelled {
