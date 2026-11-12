@@ -250,7 +250,8 @@ impl DesktopApp {
             modifiers: platform_modifiers(),
             key: Key::F,
         };
-        if input.modifiers.shift
+        if self.active_panel == ActivePanel::QueryEditor
+            && input.modifiers.shift
             && matches_shortcut(&input, &shift_f)
             && self.query_editor.format_current_sql().is_some()
         {

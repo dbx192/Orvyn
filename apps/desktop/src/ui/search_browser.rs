@@ -41,8 +41,6 @@ pub struct SearchBrowser {
     cell: Option<SharedQueryCell>,
     save_cell: Option<Arc<Mutex<Option<Result<FavoriteQuery, String>>>>>,
     history_cell: Option<Arc<Mutex<Option<Result<(), String>>>>>,
-    completion_visible: bool,
-    completion_cursor: usize,
     saved_queries: Vec<FavoriteQuery>,
     history_entries: Vec<QueryHistoryEntry>,
     load_cell: Option<Arc<Mutex<Option<(Vec<QueryHistoryEntry>, Vec<FavoriteQuery>)>>>>,
@@ -91,8 +89,6 @@ impl SearchBrowser {
             cell: None,
             save_cell: None,
             history_cell: None,
-            completion_visible: false,
-            completion_cursor: 0,
             saved_queries: Vec::new(),
             history_entries: Vec::new(),
             load_cell: Some(load_cell),
@@ -163,10 +159,17 @@ impl SearchBrowser {
     }
 
     fn format_query(&mut self) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&self.query_text) {
-            if let Ok(formatted) = serde_json::to_string_pretty(&value) {
-                self.query_text = formatted;
+        if self.kind.is_search() || self.kind.is_document() {
+            match serde_json::from_str::<serde_json::Value>(&self.query_text) {
+                Ok(value) => {
+                    self.query_text = serde_json::to_string_pretty(&value)
+                        .unwrap_or_else(|_| self.query_text.clone());
+                    self.error = None;
+                }
+                Err(error) => self.error = Some(error.to_string()),
             }
+        } else {
+            self.query_text = crate::ui::sql_formatter::format_sql(&self.query_text);
         }
     }
 
@@ -209,8 +212,18 @@ impl SearchBrowser {
                         && (favorite.database.is_some() || favorite.schema.is_some())
                         && (query.is_empty()
                             || favorite.title.to_lowercase().contains(&query)
-                            || favorite.schema.as_deref().unwrap_or_default().to_lowercase().contains(&query)
-                            || favorite.database.as_deref().unwrap_or_default().to_lowercase().contains(&query)
+                            || favorite
+                                .schema
+                                .as_deref()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .contains(&query)
+                            || favorite
+                                .database
+                                .as_deref()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .contains(&query)
                             || favorite.sql.to_lowercase().contains(&query))
                 }) {
                     if ui
@@ -223,7 +236,11 @@ impl SearchBrowser {
                 }
             });
         if let Some(favorite) = selected {
-            self.object = favorite.schema.clone().or(favorite.database.clone()).unwrap_or_default();
+            self.object = favorite
+                .schema
+                .clone()
+                .or(favorite.database.clone())
+                .unwrap_or_default();
             self.query_text = favorite.sql;
         }
     }
@@ -242,7 +259,12 @@ impl SearchBrowser {
                         && entry.object.is_some()
                         && (query.is_empty()
                             || entry.summary.to_lowercase().contains(&query)
-                            || entry.object.as_deref().unwrap_or_default().to_lowercase().contains(&query)
+                            || entry
+                                .object
+                                .as_deref()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .contains(&query)
                             || entry.sql.to_lowercase().contains(&query))
                 }) {
                     if ui
@@ -343,17 +365,21 @@ impl SearchBrowser {
                 ui.add(Spinner::new().size(16.0));
                 ui.label(tr("Running..."));
             }
-            if ui.add_enabled(!self.running, Button::new(tr("Format"))).clicked() {
+            if ui
+                .add_enabled(!self.running, Button::new(tr("Format")))
+                .clicked()
+            {
                 self.format_query();
             }
-            if ui.add_enabled(self.save_cell.is_none(), Button::new(tr("Save"))).clicked() {
+            if ui
+                .add_enabled(self.save_cell.is_none(), Button::new(tr("Save")))
+                .clicked()
+            {
                 self.save_query();
             }
             if self.kind.is_search() {
                 ui.selectable_value(&mut self.show_saved, false, tr("History"));
                 ui.selectable_value(&mut self.show_saved, true, tr("Favorites"));
-            }
-            if self.kind.is_search() {
             }
         });
         ui.add_space(6.0);
@@ -365,39 +391,24 @@ impl SearchBrowser {
             });
         }
         ui.label(RichText::new(tr("Query (JSON DSL or SQL)")).strong());
-        let query_output = TextEdit::multiline(&mut self.query_text)
-            .code_editor()
-            .desired_rows(8)
-            .desired_width(f32::INFINITY)
-            .show(ui);
-        let query_response = &query_output.response;
-        if let Some(range) = query_output.cursor_range {
-            self.completion_cursor = char_to_byte_offset(
-                &self.query_text,
-                range.primary.ccursor.index,
-            );
-        }
-        self.completion_visible = query_response.has_focus()
-            && (query_response.changed()
-                || ui.input(|input| input.key_pressed(Key::Space) && input.modifiers.ctrl));
-        if self.completion_visible && self.kind.is_search() {
-            ui.horizontal_wrapped(|ui| {
-                for (label, snippet) in [
-                    ("match_all", "\"match_all\": {}"),
-                    ("match", "\"match\": { \"field\": \"value\" }"),
-                    ("term", "\"term\": { \"field\": \"value\" }"),
-                    ("bool", "\"bool\": { \"must\": [], \"filter\": [] }"),
-                ] {
-                    if ui.small_button(label).clicked() {
-                        self.query_text = insert_completion(
-                            &self.query_text,
-                            self.completion_cursor,
-                            snippet,
-                        );
-                        self.completion_visible = false;
-                    }
-                }
-            });
+        let editor_id = ui.make_persistent_id(("search_query", self.connection_id, &self.object));
+        crate::ui::query_input::editor(
+            ui,
+            editor_id,
+            &mut self.query_text,
+            self.kind,
+            &self.object,
+            8,
+        );
+        if ui.memory(|memory| memory.has_focus(editor_id))
+            && ui.input_mut(|input| {
+                input.consume_key(
+                    eframe::egui::Modifiers::CTRL | eframe::egui::Modifiers::SHIFT,
+                    Key::F,
+                )
+            })
+        {
+            self.format_query();
         }
         if self.kind.is_search() {
             if self.show_saved {
@@ -433,18 +444,6 @@ impl SearchBrowser {
 
         status
     }
-}
-
-fn char_to_byte_offset(text: &str, char_offset: usize) -> usize {
-    text.char_indices()
-        .nth(char_offset)
-        .map(|(offset, _)| offset)
-        .unwrap_or(text.len())
-}
-
-fn insert_completion(text: &str, cursor: usize, snippet: &str) -> String {
-    let cursor = cursor.min(text.len());
-    format!("{}{}{}", &text[..cursor], snippet, &text[cursor..])
 }
 
 fn search_filter(ui: &mut Ui, text: &mut String) {

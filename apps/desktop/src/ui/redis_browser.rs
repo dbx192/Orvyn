@@ -838,12 +838,8 @@ impl RedisBrowserUi {
                 }
             });
             ui.add_space(6.0);
-            ui.add(
-                TextEdit::multiline(&mut self.cli_command)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(5)
-                    .hint_text("SET mykey hello\nLRANGE mylist 0 9"),
-            );
+            let editor_id = ui.make_persistent_id(("redis_cli", self.connection_id));
+            crate::ui::query_input::editor(ui, editor_id, &mut self.cli_command, DataSourceKind::Redis, "", 5);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(!self.cli_running, Button::new(tr("Execute")))

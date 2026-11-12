@@ -303,6 +303,10 @@ impl QueryEditor {
         if formatted != tab.sql {
             tab.sql = formatted.clone();
             tab.dirty = true;
+            tab.cursor_offset = floor_char_boundary(&tab.sql, tab.cursor_offset);
+            tab.selection = None;
+            tab.completion.visible = false;
+            schedule_sql_highlight(tab);
             return Some(formatted);
         }
         None
@@ -1070,6 +1074,11 @@ impl QueryEditor {
                                     tab.completion.visible = false;
                                 }
 
+                                if tab.completion.visible && output.response.has_focus() {
+                                    ui.memory_mut(|memory| memory.set_focus_lock_filter(editor_id, eframe::egui::EventFilter {
+                                        tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true,
+                                    }));
+                                }
                                 let inserted = output.response.has_focus().then(|| {
                                     completion_panel(ui, completion_pos, tab, completion_command)
                                 });
@@ -2923,9 +2932,9 @@ fn schedule_sql_highlight(tab: &mut QueryEditorTab) {
     tab.highlight_due_at = Some(Instant::now() + SQL_HIGHLIGHT_DEBOUNCE);
 }
 
-/// A short list of SQL keywords offered when no table/column context is
-/// available. Kept lowercase to match the user's typing style.
+/// Common SQL keywords and functions offered alongside metadata candidates.
 const SQL_KEYWORD_SUGGESTIONS: &[&str] = &[
+    "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "CAST", "OVER", "PARTITION", "FETCH", "TOP",
     "SELECT",
     "FROM",
     "WHERE",
@@ -3071,6 +3080,13 @@ fn update_completion_for_tab(tab: &mut QueryEditorTab) {
         }
     }
 
+    if !prefix.is_empty() && !matches!(context, CompletionContext::Keyword | CompletionContext::Table) {
+        for keyword in SQL_KEYWORD_SUGGESTIONS {
+            if matches_prefix(keyword, prefix) && !items.iter().any(|item| item.label.eq_ignore_ascii_case(keyword)) {
+                items.push(CompletionItem { label: keyword.to_string(), insert_text: keyword.to_string(), kind: CompletionKind::Keyword, detail: String::new() });
+            }
+        }
+    }
     let waiting_for_metadata = matches!(context, CompletionContext::Column { .. })
         && !missing_completion_columns_for_context(tab, before, &context).is_empty();
     if items.is_empty() && !waiting_for_metadata {
@@ -3121,6 +3137,12 @@ fn missing_completion_columns(tab: &QueryEditorTab) -> Vec<String> {
 }
 
 fn completion_context(before: &str, word_start: usize, prefix: &str) -> CompletionContext {
+    if db_common::highlight_sql(before).last().is_some_and(|token| {
+        token.range.end == before.len()
+            && matches!(token.kind, SqlTokenKind::StringLiteral | SqlTokenKind::Comment)
+    }) {
+        return CompletionContext::None;
+    }
     let clause = before[..word_start].trim_end();
     if let Some(stripped) = clause.strip_suffix('.') {
         let qualifier = last_sql_identifier(stripped).map(ToOwned::to_owned);
@@ -3137,7 +3159,7 @@ fn completion_context(before: &str, word_start: usize, prefix: &str) -> Completi
         "SELECT" | "WHERE" | "ON" | "HAVING" | "SET" | "AND" | "OR" | "BY"
     ) {
         CompletionContext::Column { qualifier: None }
-    } else if !prefix.is_empty() && (clause.is_empty() || clause.ends_with(';')) {
+    } else if !prefix.is_empty() && prefix.chars().next().is_some_and(|ch| ch.is_alphabetic()) {
         CompletionContext::Keyword
     } else {
         CompletionContext::None
@@ -3547,6 +3569,19 @@ mod completion_tests {
             context_for("SELECT * FROM books LIMIT 10"),
             CompletionContext::None
         );
+    }
+
+    #[test]
+    fn suggests_keywords_after_expressions_but_not_inside_literals() {
+        assert_eq!(context_for("SELECT * FROM books WH"), CompletionContext::Keyword);
+        assert_eq!(context_for("SELECT 'WH"), CompletionContext::None);
+        assert_eq!(context_for("SELECT * -- WH"), CompletionContext::None);
+        let profile = ConnectionProfile::builder(DataSourceKind::Sqlite, "completion").file_path(":memory:").build().unwrap();
+        let mut tab = QueryEditorTab::new(&profile);
+        tab.sql = "SELECT COU".to_owned();
+        tab.cursor_offset = tab.sql.len();
+        update_completion_for_tab(&mut tab);
+        assert!(tab.completion.items.iter().any(|item| item.label == "COUNT"));
     }
 
     #[test]

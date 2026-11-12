@@ -7,6 +7,7 @@ pub mod i18n;
 pub mod import_wizard;
 pub mod object_tree;
 pub mod query_editor;
+pub mod query_input;
 pub mod redis_browser;
 pub mod result_grid;
 pub mod samples;
