@@ -493,6 +493,44 @@ impl SearchConnector for ElasticsearchSearchConnector {
         .await
     }
 
+    async fn open_point_in_time(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        index: &str,
+    ) -> Result<String> {
+        let base = elasticsearch_base_url(profile)?;
+        let req = HttpRequest::new(
+            Method::POST,
+            format!("{base}{}/_pit?keep_alive=1m", urlencoding::encode(index)),
+            elasticsearch_auth(profile, password),
+            "failed to open search snapshot",
+        );
+        let json = make_request(req).await?;
+        json.get("id")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| AppError::new(ErrorKind::Query, "search snapshot response has no id"))
+    }
+    async fn close_point_in_time(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        id: &str,
+    ) -> Result<()> {
+        let base = elasticsearch_base_url(profile)?;
+        let mut req = HttpRequest::new(
+            Method::DELETE,
+            format!("{base}_pit"),
+            elasticsearch_auth(profile, password),
+            "failed to close search snapshot",
+        );
+        req.content_type = Some("application/json");
+        req.body = Some(serde_json::json!({"id": id}).to_string());
+        make_request(req).await?;
+        Ok(())
+    }
+
     async fn search(
         &self,
         profile: &ConnectionProfile,
@@ -512,7 +550,11 @@ impl SearchConnector for ElasticsearchSearchConnector {
         })?;
         let mut req = HttpRequest::new(
             Method::POST,
-            format!("{base}{index}/_search"),
+            if query.get("pit").is_some() {
+                format!("{base}_search")
+            } else {
+                format!("{base}{}/_search", urlencoding::encode(index))
+            },
             auth,
             "failed to run Elasticsearch search",
         );

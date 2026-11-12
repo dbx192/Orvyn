@@ -307,6 +307,10 @@ impl ResultSetGrid {
                     self.save_export(ExportFormat::Csv, action);
                     ui.close_menu();
                 }
+                if ui.button("Save XLSX").clicked() {
+                    self.save_export(ExportFormat::Xlsx, action);
+                    ui.close_menu();
+                }
                 if ui.button(tr("Save JSON")).clicked() {
                     self.save_export(ExportFormat::Json, action);
                     ui.close_menu();
@@ -741,6 +745,7 @@ impl ResultSetGrid {
             Ok(text) => {
                 copy_to_clipboard(ui, text);
                 *action = Some(ResultSetGridAction::Message(match format {
+                    ExportFormat::Xlsx => "XLSX saved".to_string(),
                     ExportFormat::Csv => "CSV export copied to clipboard".to_string(),
                     ExportFormat::Json => "JSON export copied to clipboard".to_string(),
                     ExportFormat::ExcelCompatible => {
@@ -759,11 +764,13 @@ impl ResultSetGrid {
 
     fn save_export(&self, format: ExportFormat, action: &mut Option<ResultSetGridAction>) {
         let ext = match format {
+            ExportFormat::Xlsx => "xlsx",
             ExportFormat::Csv => "csv",
             ExportFormat::Json => "json",
             ExportFormat::ExcelCompatible => "tsv",
         };
         let format_name = match format {
+            ExportFormat::Xlsx => "XLSX",
             ExportFormat::Csv => "CSV",
             ExportFormat::Json => "JSON",
             ExportFormat::ExcelCompatible => "Excel",

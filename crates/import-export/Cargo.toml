@@ -11,3 +11,4 @@ db-common.workspace = true
 encoding_rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rust_xlsxwriter = { version = "0.90", features = ["constant_memory"] }

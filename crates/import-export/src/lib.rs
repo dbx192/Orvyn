@@ -2,6 +2,8 @@
 
 pub mod import_csv;
 
+mod xlsx;
+
 use db_common::{base64_preview, human_bytes, CellValue, QueryResult, Result};
 use std::{
     fs::File,
@@ -18,11 +20,15 @@ pub struct QueryResultFileWriter {
 enum ExportWriter {
     Delimited(Box<csv::Writer<File>>),
     Json(BufWriter<File>),
+    Xlsx(Box<xlsx::XlsxWriter>),
 }
 
 impl QueryResultFileWriter {
     pub fn create(format: ExportFormat, path: &Path, columns: Vec<String>) -> Result<Self> {
         let output = match format {
+            ExportFormat::Xlsx => {
+                ExportWriter::Xlsx(Box::new(xlsx::XlsxWriter::create(path, &columns)?))
+            }
             ExportFormat::Csv | ExportFormat::ExcelCompatible => {
                 let delimiter = if format == ExportFormat::Csv {
                     b','
@@ -63,6 +69,7 @@ impl QueryResultFileWriter {
     pub fn write_page(&mut self, result: &QueryResult) -> Result<usize> {
         let page_rows = result.rows.len();
         match &mut self.output {
+            ExportWriter::Xlsx(writer) => writer.write_page(result)?,
             ExportWriter::Delimited(writer) => {
                 for row in &result.rows {
                     let record = (0..self.columns.len())
@@ -107,6 +114,7 @@ impl QueryResultFileWriter {
 
     pub fn finish(mut self) -> Result<usize> {
         match &mut self.output {
+            ExportWriter::Xlsx(writer) => writer.finish()?,
             ExportWriter::Delimited(writer) => writer.flush().map_err(db_common::AppError::from)?,
             ExportWriter::Json(writer) => {
                 writer
@@ -124,6 +132,7 @@ pub enum ExportFormat {
     Csv,
     Json,
     ExcelCompatible,
+    Xlsx,
 }
 
 pub fn validate_export_file_name(file_name: &str) -> Result<()> {
@@ -132,6 +141,9 @@ pub fn validate_export_file_name(file_name: &str) -> Result<()> {
 
 pub fn export_query_result(result: &QueryResult, format: ExportFormat) -> Result<String> {
     match format {
+        ExportFormat::Xlsx => Err(db_common::AppError::validation(
+            "XLSX is a binary format; export it to a file",
+        )),
         ExportFormat::Csv => Ok(export_delimited(result, ',')),
         ExportFormat::Json => export_json(result),
         ExportFormat::ExcelCompatible => Ok(export_delimited(result, '\t')),

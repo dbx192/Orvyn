@@ -21,6 +21,18 @@ pub fn editor(
     object: &str,
     rows: usize,
 ) {
+    editor_with_fields(ui, id, text, kind, object, rows, &[]);
+}
+
+pub fn editor_with_fields(
+    ui: &mut Ui,
+    id: Id,
+    text: &mut String,
+    kind: DataSourceKind,
+    object: &str,
+    rows: usize,
+    fields: &[(String, String)],
+) {
     let state_id = id.with("completion");
     let mut state = ui
         .ctx()
@@ -56,6 +68,7 @@ pub fn editor(
         let cursor = byte_offset(text, range.primary.ccursor.index);
         if output.response.has_focus() && (output.response.changed() || requested) {
             state = candidates(text, cursor, kind, object);
+            add_field_candidates(text, cursor, &mut state, fields);
         } else if (cursor != state.cursor || *text != state.source) && output.response.has_focus() {
             state.visible = false;
         }
@@ -221,6 +234,103 @@ fn candidates(text: &str, cursor: usize, kind: DataSourceKind, object: &str) -> 
     state
 }
 
+fn add_field_candidates(
+    text: &str,
+    cursor: usize,
+    state: &mut Completion,
+    fields: &[(String, String)],
+) {
+    if fields.is_empty() {
+        return;
+    }
+    let end = cursor.min(text.len());
+    if !text.is_char_boundary(end) {
+        return;
+    }
+    let start = text[..end]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(end);
+    let quoted = text[..start].ends_with('"');
+    let before = text[..start.saturating_sub(usize::from(quoted))].trim_end();
+    let key = before.ends_with(['{', ',']);
+    let value = quoted && before.ends_with([':', '[', ',']);
+    if !key && !value {
+        return;
+    }
+    let mut replacement_end = end;
+    while let Some(c) = text[replacement_end..].chars().next() {
+        if !(c.is_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+            break;
+        }
+        replacement_end += c.len_utf8();
+    }
+    let has_quote = text[replacement_end..].starts_with('"');
+    let has_colon = text[replacement_end + usize::from(has_quote)..]
+        .trim_start()
+        .starts_with(':');
+    let prefix = text[start..end].to_lowercase();
+    state.start = start.saturating_sub(usize::from(quoted));
+    state.end = replacement_end + usize::from(has_quote);
+    for (field, ty) in fields {
+        if !field.to_lowercase().starts_with(&prefix) {
+            continue;
+        }
+        let name = serde_json::to_string(field).unwrap_or_default();
+        let insert = if key && !has_colon {
+            format!("{name}: null")
+        } else {
+            name
+        };
+        state.items.push((format!("{field} ({ty})"), insert));
+    }
+    state.visible = !state.items.is_empty();
+}
+
+pub fn mapping_fields(mapping: &serde_json::Value) -> Vec<(String, String)> {
+    fn properties(value: &serde_json::Value, prefix: &str, result: &mut Vec<(String, String)>) {
+        for key in ["properties", "fields"] {
+            if let Some(fields) = value.get(key).and_then(|v| v.as_object()) {
+                for (name, field) in fields {
+                    let name = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{prefix}.{name}")
+                    };
+                    result.push((
+                        name.clone(),
+                        field
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("object")
+                            .to_string(),
+                    ));
+                    properties(field, &name, result);
+                }
+            }
+        }
+    }
+    let mut result = Vec::new();
+    properties(mapping, "", &mut result);
+    if let Some(indices) = mapping.as_object() {
+        for index in indices.values() {
+            let mappings = index.get("mappings").unwrap_or(index);
+            properties(mappings, "", &mut result);
+            if let Some(types) = mappings.as_object() {
+                for typed in types.values() {
+                    properties(typed, "", &mut result);
+                }
+            }
+        }
+    }
+    result.sort();
+    result.dedup();
+    result
+}
+
 const ES: &[(&str, &str)] = &[
     ("query", "\"query\": {}"),
     ("match_all", "\"match_all\": {}"),
@@ -252,6 +362,13 @@ const MEILI: &[(&str, &str)] = &[
     ("attributesToRetrieve", "\"attributesToRetrieve\": []"),
 ];
 const MONGO: &[(&str, &str)] = &[
+    ("operation", "\"operation\": \"find\""),
+    ("filter", "\"filter\": {}"),
+    ("projection", "\"projection\": {}"),
+    ("sort", "\"sort\": {}"),
+    ("pipeline", "\"pipeline\": []"),
+    ("document", "\"document\": {}"),
+    ("update", "\"update\": {\"$set\": {}}"),
     ("$eq", "\"$eq\": null"),
     ("$ne", "\"$ne\": null"),
     ("$gt", "\"$gt\": 0"),

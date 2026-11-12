@@ -66,6 +66,21 @@ impl SearchService {
             .await
     }
 
+    pub async fn open_point_in_time(&self, id: ConnectionId, index: &str) -> Result<String> {
+        let (profile, password) = self.load(id, None).await?;
+        self.registry
+            .search(profile.kind)?
+            .open_point_in_time(&profile, password.as_deref(), index)
+            .await
+    }
+    pub async fn close_point_in_time(&self, id: ConnectionId, pit: &str) -> Result<()> {
+        let (profile, password) = self.load(id, None).await?;
+        self.registry
+            .search(profile.kind)?
+            .close_point_in_time(&profile, password.as_deref(), pit)
+            .await
+    }
+
     /// Run a search query (JSON DSL) against a search index.
     pub async fn search(
         &self,

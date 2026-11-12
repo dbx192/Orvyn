@@ -1271,6 +1271,18 @@ impl QueryEditor {
                                 .map(|editor| editor.result().clone())
                         });
                     export_request = Some((query_result, ExportFormat::Json));
+                }                if ui.button("Export XLSX").clicked() {
+                    let query_result = result
+                        .grid
+                        .as_ref()
+                        .map(|grid| grid.result().clone())
+                        .or_else(|| {
+                            result
+                                .table_editor
+                                .as_ref()
+                                .map(|editor| editor.result().clone())
+                        });
+                    export_request = Some((query_result, ExportFormat::Xlsx));
                 }
             });
 
@@ -2227,6 +2239,7 @@ impl QueryEditor {
         };
 
         let (label, ext) = match format {
+            ExportFormat::Xlsx => ("XLSX", "xlsx"),
             ExportFormat::Csv => ("CSV", "csv"),
             ExportFormat::Json => ("JSON", "json"),
             ExportFormat::ExcelCompatible => ("Excel", "tsv"),

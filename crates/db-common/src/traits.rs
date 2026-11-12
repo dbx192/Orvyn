@@ -524,6 +524,29 @@ pub struct SearchResult {
 pub trait SearchConnector: Send + Sync {
     fn kind(&self) -> DataSourceKind;
 
+    async fn open_point_in_time(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        index: &str,
+    ) -> Result<String> {
+        let _ = (profile, password, index);
+        Err(crate::AppError::unsupported(
+            "point-in-time search is unavailable",
+        ))
+    }
+    async fn close_point_in_time(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        id: &str,
+    ) -> Result<()> {
+        let _ = (profile, password, id);
+        Err(crate::AppError::unsupported(
+            "point-in-time search is unavailable",
+        ))
+    }
+
     async fn test_connection(
         &self,
         profile: &ConnectionProfile,
