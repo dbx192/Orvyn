@@ -282,7 +282,7 @@ fn merge_local_ddl(table: &str, mut triggers: Vec<TableTrigger>, mut functions: 
         let Some((kind, name)) = parse_ddl_object(&sql) else { continue };
         match kind {
             ObjectKind::Trigger if !triggers.iter().any(|item| item.name == name) => triggers.push(TableTrigger { name, event: String::new(), timing: String::new(), statement: Some(sql) }),
-            ObjectKind::Function if !functions.iter().any(|item| item.name == name) => functions.push(DatabaseFunction { name, return_type: None, language: None, kind: "local".to_string() }),
+            ObjectKind::Function if !functions.iter().any(|item| item.name == name) => functions.push(DatabaseFunction { name, return_type: None, language: None, definition: Some(sql), identity_arguments: None, kind: "local".to_string() }),
             _ => {}
         }
     }

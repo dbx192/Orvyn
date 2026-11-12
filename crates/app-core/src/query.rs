@@ -299,6 +299,23 @@ impl QueryService {
         request: QueryExecutionRequest,
         runtime_password: Option<&str>,
     ) -> Result<QueryExecutionReport> {
+        self.execute_cancellable(
+            request,
+            runtime_password,
+            db_common::QueryCancellation::default(),
+        )
+        .await
+    }
+
+    pub async fn execute_cancellable(
+        &self,
+        request: QueryExecutionRequest,
+        runtime_password: Option<&str>,
+        cancellation: db_common::QueryCancellation,
+    ) -> Result<QueryExecutionReport> {
+        if cancellation.is_cancelled() {
+            return Err(cancellation.error());
+        }
         let statements = statements_for_request(&request)?;
         let execution_plan = execution_plan_for(
             &statements,
@@ -340,7 +357,6 @@ impl QueryService {
         let pool_config = self.pool_config;
         let password_for_task = password;
 
-        let cancellation = db_common::QueryCancellation::default();
         {
             let mut state = self.state.lock().await;
             if state.running.contains_key(&request.tab_id) {

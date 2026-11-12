@@ -2,17 +2,17 @@
 
 //! CSV import wizard: step-by-step guide to import CSV data into a database table.
 
+mod execute;
+use execute::{ImportJob, ImportProgress};
+
 use crate::ui::i18n::text as tr;
 use app_core::{connection::ConnectionManager, metadata::MetadataService, query::QueryService};
 use db_common::dialect::{BacktickDialect, BracketDialect, DoubleQuoteDialect};
-use db_common::{
-    ConnectionId, DataSourceKind, Dialect, Identifier, QueryExecutionMode, QueryExecutionRequest,
-    QueryId, Result, TableColumn,
-};
+use db_common::{ConnectionId, DataSourceKind, Dialect, Identifier, Result, TableColumn};
 use eframe::egui::{Button, Color32, ComboBox, Frame, RichText, ScrollArea, Ui};
 use import_export::import_csv::{
-    auto_map_fields, generate_insert_batches, parse_csv_preview, validate_types, CsvImportOptions,
-    CsvPreview, FieldMapping, ValidationReport,
+    auto_map_fields, parse_csv_preview, validate_types, CsvImportOptions, CsvPreview, FieldMapping,
+    ValidationReport,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -26,6 +26,8 @@ pub struct ImportResult {
     pub failed_rows: usize,
     pub errors: Vec<String>,
     pub elapsed_secs: f64,
+    pub cancelled: bool,
+    pub failure_file: Option<PathBuf>,
 }
 
 /// Steps of the import wizard.
@@ -80,6 +82,8 @@ pub struct ImportWizard {
     loading: bool,
     error: Option<String>,
     status: String,
+    cancellation: db_common::QueryCancellation,
+    progress: Arc<Mutex<ImportProgress>>,
 }
 
 impl ImportWizard {
@@ -118,6 +122,8 @@ impl ImportWizard {
             loading: false,
             error: None,
             status: String::new(),
+            cancellation: Default::default(),
+            progress: Default::default(),
         }
     }
 
@@ -134,6 +140,10 @@ impl ImportWizard {
 
         // Poll pending async tasks
         self.poll_pending();
+        if self.loading {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
 
         // Header
         ui.heading(format!("📥 {} CSV → {}", tr("Import"), self.table_name()));
@@ -509,8 +519,11 @@ impl ImportWizard {
         if let Some(ref report) = self.validation_report {
             if report.issues.is_empty() {
                 ui.label(
-                    RichText::new(format!("✅ {}", tr("All rows passed validation!")))
-                        .color(Color32::GREEN),
+                    RichText::new(format!(
+                        "✅ {}",
+                        "Preview rows passed validation; all batches are checked during import"
+                    ))
+                    .color(Color32::GREEN),
                 );
             } else {
                 ui.label(
@@ -585,7 +598,16 @@ impl ImportWizard {
                     .size(18.0),
             );
             ui.add_space(8.0);
+            if result.cancelled {
+                ui.colored_label(
+                    Color32::YELLOW,
+                    "Import cancelled; completed batches were retained",
+                );
+            }
             ui.label(format!("Total rows: {}", result.total_rows));
+            if let Some(path) = &result.failure_file {
+                ui.label(format!("Failed/unconfirmed rows: {}", path.display()));
+            }
             ui.label(format!("Successful: {}", result.success_rows));
             if result.failed_rows > 0 {
                 ui.label(
@@ -609,7 +631,15 @@ impl ImportWizard {
                     .size(16.0),
             );
             ui.add_space(8.0);
-            ui.label("Executing batch INSERT statements in the background.");
+            let progress = self.progress.lock().unwrap().clone();
+            ui.label(format!(
+                "Processed: {} / {}",
+                progress.processed,
+                self.preview.as_ref().map_or(0, |p| p.estimated_total_rows)
+            ));
+            if ui.button("Cancel import").clicked() {
+                self.cancellation.cancel();
+            }
         } else {
             let preview = match &self.preview {
                 Some(p) => p,
@@ -688,93 +718,29 @@ impl ImportWizard {
         let cell: Arc<Mutex<Option<Result<ImportResult>>>> = Arc::new(Mutex::new(None));
         self.pending_import = Some(cell.clone());
 
+        self.cancellation = Default::default();
+        *self.progress.lock().unwrap() = ImportProgress::default();
+        let cancellation = self.cancellation.clone();
+        let progress = self.progress.clone();
+        let options = self.csv_options.clone();
         rt.spawn(async move {
-            let result = async {
-                let start = std::time::Instant::now();
-                let profile = connection_manager
-                    .get_profile(connection_id)
-                    .await?
-                    .ok_or_else(|| {
-                        db_common::AppError::validation("connection profile not found")
-                    })?;
-                let dialect = import_dialect(profile.kind);
-                let qualified = qualified_import_table_name(
-                    profile.kind,
-                    database.as_deref(),
-                    schema.as_deref(),
-                    &table,
-                    dialect.as_ref(),
-                )?;
-                let total = preview.sample_rows.len();
-                let mut success = 0usize;
-                let mut failed = 0usize;
-                let mut errors = Vec::new();
-                let batches = generate_insert_batches(
-                    &preview.sample_rows,
-                    &preview.headers,
-                    &table_columns,
-                    &mapping,
-                    &qualified,
-                    dialect.as_ref(),
-                    batch_size,
-                )?;
-
-                for (i, batch_sql) in batches.iter().enumerate() {
-                    match query_service
-                        .execute(
-                            QueryExecutionRequest {
-                                tab_id: QueryId::new(),
-                                connection_id,
-                                database: database.clone(),
-                                schema: schema.clone(),
-                                sql: batch_sql.clone(),
-                                mode: QueryExecutionMode::All,
-                                cursor_offset: 0,
-                                selection: None,
-                                timeout_ms: 60000,
-                                result_limit: None,
-                                result_offset: 0,
-                                result_total_rows: None,
-                            },
-                            None,
-                        )
-                        .await
-                    {
-                        Ok(report) => {
-                            let affected: u64 =
-                                report.results.iter().map(|r| r.affected_rows).sum();
-                            success += affected as usize;
-                            if report.results.iter().any(|r| r.affected_rows == 0) {
-                                errors.push(format!(
-                                    "Batch {}: some rows may not have been inserted",
-                                    i + 1
-                                ));
-                            }
-                        }
-                        Err(error) => {
-                            let batch_rows = batch_size.min(total - i * batch_size);
-                            failed += batch_rows;
-                            let detail = error
-                                .detail
-                                .as_deref()
-                                .map(|detail| format!(": {detail}"))
-                                .unwrap_or_default();
-                            errors.push(format!("Batch {}: {}{}", i + 1, error.message, detail));
-                            if stop_on_error {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                Ok(ImportResult {
-                    total_rows: total,
-                    success_rows: success,
-                    failed_rows: failed,
-                    errors,
-                    elapsed_secs: start.elapsed().as_secs_f64(),
-                })
+            let result = ImportJob {
+                preview,
+                mapping,
+                table_columns,
+                batch_size,
+                stop_on_error,
+                query_service,
+                connection_manager,
+                connection_id,
+                database,
+                schema,
+                table,
+                cancellation,
+                progress,
+                options,
             }
+            .run()
             .await;
             *cell.lock().unwrap() = Some(result);
         });
@@ -913,5 +879,11 @@ mod tests {
             .unwrap(),
             "\"main\".\"用户\""
         );
+    }
+}
+
+impl Drop for ImportWizard {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }

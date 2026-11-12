@@ -1,7 +1,8 @@
 //! CSV import: parse, preview, field mapping, type validation, and batch INSERT generation.
 
 use db_common::{Dialect, Identifier, Result, TableColumn};
-use encoding_rs::{GB18030, UTF_16BE, UTF_16LE};
+#[cfg(test)]
+use encoding_rs::GB18030;
 use std::path::Path;
 
 /// Preview of a CSV file after parsing the header and first N rows.
@@ -64,103 +65,38 @@ impl Default for CsvImportOptions {
     }
 }
 
-/// Parse a CSV file and return a preview with the first `sample_limit` data rows.
+pub use streaming::CsvRowReader;
+mod streaming;
+pub const PREVIEW_ROWS: usize = 100;
+
+/// Scan the file for a row count while retaining at most PREVIEW_ROWS records.
 pub fn parse_csv_preview(path: &Path, options: &CsvImportOptions) -> Result<CsvPreview> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| db_common::AppError::validation(format!("Failed to open CSV: {e}")))?;
-    let (text, encoding) = decode_csv_text(&bytes)?;
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(options.delimiter)
-        .has_headers(false)
-        .flexible(true)
-        .from_reader(text.as_bytes());
-
-    let mut all_records: Vec<Vec<String>> = Vec::new();
-    for result in reader.records() {
-        let record =
-            result.map_err(|e| db_common::AppError::validation(format!("CSV parse error: {e}")))?;
-        all_records.push(record.iter().map(|s| s.to_string()).collect());
-    }
-
-    if all_records.is_empty() {
-        return Err(db_common::AppError::validation("CSV file is empty"));
-    }
-
-    let max_cols = all_records.iter().map(|r| r.len()).max().unwrap_or(0);
-
-    let (headers, data_start) = if options.has_header {
-        let hdrs = all_records[0].clone();
-        // Pad headers to match max columns
-        let mut padded = hdrs;
-        while padded.len() < max_cols {
-            padded.push(format!("Column_{}", padded.len() + 1));
+    let mut reader = CsvRowReader::open(path, options)?;
+    let encoding = reader.encoding.to_string();
+    let mut headers = reader.headers.clone();
+    let mut sample_rows = Vec::new();
+    let mut total = 0u64;
+    while let Some(row) = reader.next_row()? {
+        while headers.len() < row.len() {
+            headers.push(format!("Column_{}", headers.len() + 1));
         }
-        (padded, 1usize)
-    } else {
-        let hdrs: Vec<String> = (1..=max_cols).map(|i| format!("Column_{i}")).collect();
-        (hdrs, 0usize)
-    };
-
-    // Normalize all rows to have the same number of columns as headers
-    let data_rows: Vec<Vec<String>> = all_records[data_start..]
-        .iter()
-        .map(|row| {
-            let mut padded = row.clone();
-            padded.resize(headers.len(), String::new());
-            padded
-        })
-        .collect();
-
-    let total = data_rows.len() as u64;
-
+        if sample_rows.len() < PREVIEW_ROWS {
+            sample_rows.push(row);
+        }
+        total += 1;
+    }
+    for row in &mut sample_rows {
+        row.resize(headers.len(), String::new());
+    }
     Ok(CsvPreview {
         headers,
-        sample_rows: data_rows,
+        sample_rows,
         estimated_total_rows: total,
         has_header: options.has_header,
         delimiter: options.delimiter,
         file_path: path.display().to_string(),
-        encoding: encoding.to_string(),
+        encoding,
     })
-}
-
-fn decode_csv_text(bytes: &[u8]) -> Result<(String, &'static str)> {
-    if let Some(content) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
-        return std::str::from_utf8(content)
-            .map(|text| (text.to_string(), "UTF-8 BOM"))
-            .map_err(|error| {
-                db_common::AppError::validation(format!(
-                    "CSV has an invalid UTF-8 byte sequence: {error}"
-                ))
-            });
-    }
-
-    if let Some(content) = bytes.strip_prefix(b"\xFF\xFE") {
-        return decode_legacy_csv(content, UTF_16LE, "UTF-16 LE");
-    }
-    if let Some(content) = bytes.strip_prefix(b"\xFE\xFF") {
-        return decode_legacy_csv(content, UTF_16BE, "UTF-16 BE");
-    }
-
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return Ok((text.to_string(), "UTF-8"));
-    }
-
-    decode_legacy_csv(bytes, GB18030, "GB18030/GBK")
-}
-
-fn decode_legacy_csv(
-    bytes: &[u8],
-    encoding: &'static encoding_rs::Encoding,
-    label: &'static str,
-) -> Result<(String, &'static str)> {
-    let (text, had_errors) = encoding.decode_without_bom_handling(bytes);
-    if had_errors {
-        return Err(db_common::AppError::validation(
-            "CSV is not valid UTF-8, UTF-16, or GB18030 near an invalid byte sequence",
-        ));
-    }
-    Ok((text.into_owned(), label))
 }
 
 /// Auto-map CSV headers to table columns by case-insensitive name matching.
@@ -318,7 +254,7 @@ pub fn generate_insert_batches(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    for chunk in rows.chunks(batch_size) {
+    for chunk in rows.chunks(batch_size.max(1)) {
         let mut values_clauses = Vec::new();
         for row in chunk {
             let vals: Vec<String> = mapped_columns
