@@ -169,13 +169,15 @@ impl DesktopApp {
                     ui.label(tr("Format"));
                     eframe::egui::ComboBox::from_id_source("table_export_format")
                         .selected_text(match request.format {
+                            ExportFormat::Xlsx => "XLSX",
                             ExportFormat::Csv => "CSV",
                             ExportFormat::Json => "JSON",
-                            ExportFormat::ExcelCompatible => "Excel",
+                            ExportFormat::ExcelCompatible => "TSV",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut request.format, ExportFormat::Csv, "CSV");
                             ui.selectable_value(&mut request.format, ExportFormat::Json, "JSON");
+                            ui.selectable_value(&mut request.format, ExportFormat::Xlsx, "XLSX");
                         });
                 });
                 ui.add_space(8.0);
@@ -203,6 +205,7 @@ impl DesktopApp {
             // on a background thread instead.
             if launch_file_dialog {
                 let (label, ext) = match export_format {
+                    ExportFormat::Xlsx => ("XLSX", "xlsx"),
                     ExportFormat::Csv => ("CSV", "csv"),
                     ExportFormat::Json => ("JSON", "json"),
                     ExportFormat::ExcelCompatible => ("Excel", "tsv"),

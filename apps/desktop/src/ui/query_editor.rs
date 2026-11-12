@@ -1921,8 +1921,8 @@ impl QueryEditor {
                             }
                             Err(error) => {
                                 if error.kind == ErrorKind::Cancelled {
-                                    tab.execution_error = Some("Execution cancelled".to_string());
-                                    self.status = "Execution cancelled".to_string();
+                                    tab.execution_error = Some(error.diagnostic_message());
+                                    self.status = error.diagnostic_message();
                                 } else {
                                     let diagnostic = error.diagnostic_message();
                                     tab.execution_error = Some(diagnostic.clone());

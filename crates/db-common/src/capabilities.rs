@@ -157,24 +157,6 @@ impl ConnectorCapabilities {
         }
     }
 
-    const fn restricted(family: ProtocolFamily, notes: &'static str) -> Self {
-        Self {
-            support: SupportLevel::Restricted,
-            protocol_family: family,
-            connection_test: true,
-            sql_query: false,
-            metadata: false,
-            crud: false,
-            transactions: false,
-            http_json: false,
-            document_kv: false,
-            search: false,
-            ddl: false,
-            read_only_default: false,
-            notes: Some(notes),
-        }
-    }
-
     /// Document store with full native support (MongoDB).
     const fn document_full(family: ProtocolFamily, notes: &'static str) -> Self {
         Self {

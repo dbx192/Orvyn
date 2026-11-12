@@ -155,9 +155,10 @@ impl DesktopApp {
                     match result {
                         Ok(payload) => {
                             let format_label = match payload.format {
-                                ExportFormat::Csv => "CSV",
+                                ExportFormat::Xlsx => "XLSX",
+                            ExportFormat::Csv => "CSV",
                                 ExportFormat::Json => "JSON",
-                                ExportFormat::ExcelCompatible => "Excel",
+                                ExportFormat::ExcelCompatible => "TSV",
                             };
                             self.state.set_status(format!(
                                 "{} export completed: {} ({} rows) -> {}",

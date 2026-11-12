@@ -79,6 +79,10 @@ pub struct DatabaseFunction {
     pub return_type: Option<String>,
     pub language: Option<String>,
     pub kind: String,
+    #[serde(default)]
+    pub definition: Option<String>,
+    #[serde(default)]
+    pub identity_arguments: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -296,6 +300,35 @@ pub trait RelationalQueryExecutor: Send + Sync {
         statements: &[String],
         pool_config: ConnectionPoolConfig,
     ) -> Result<Vec<QueryResult>>;
+
+    async fn execute_cancellable(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        statements: &[String],
+        config: ConnectionPoolConfig,
+        cancellation: crate::QueryCancellation,
+    ) -> Result<Vec<QueryResult>> {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(crate::AppError::new(crate::ErrorKind::Cancelled,
+                "Client request cancelled; this driver cannot confirm server termination")),
+            result = self.execute(profile, password, statements, config) => result,
+        }
+    }
+    async fn execute_in_transaction_cancellable(
+        &self,
+        id: QueryId,
+        statements: &[String],
+        cancellation: crate::QueryCancellation,
+    ) -> Result<Vec<QueryResult>> {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(crate::AppError::new(crate::ErrorKind::Cancelled,
+                "Client request cancelled; transaction state must be checked before reuse")),
+            result = self.execute_in_transaction(id, statements) => result,
+        }
+    }
 
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>>;
 

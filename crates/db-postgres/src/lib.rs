@@ -489,7 +489,8 @@ impl RelationalMetadataReader for PostgresMetadataReader {
                             WHEN 'a' THEN 'AGGREGATE' \
                             WHEN 'w' THEN 'WINDOW' \
                             ELSE 'FUNCTION' \
-                        END AS kind \
+                        END AS kind, pg_get_functiondef(p.oid) AS definition, \
+                        pg_get_function_identity_arguments(p.oid) AS identity_arguments \
                  FROM pg_proc p \
                  JOIN pg_namespace n ON p.pronamespace = n.oid \
                  LEFT JOIN pg_language l ON p.prolang = l.oid \
@@ -508,6 +509,8 @@ impl RelationalMetadataReader for PostgresMetadataReader {
                 return_type: row.get(1),
                 language: row.get(2),
                 kind: row.get(3),
+                definition: row.get(4),
+                identity_arguments: row.get(5),
             })
             .collect())
     }

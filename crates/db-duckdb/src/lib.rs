@@ -424,6 +424,39 @@ impl RelationalQueryExecutor for DuckDbQueryExecutor {
         })?
     }
 
+    async fn execute_cancellable(
+        &self,
+        profile: &ConnectionProfile,
+        _password: Option<&str>,
+        statements: &[String],
+        pool_config: ConnectionPoolConfig,
+        cancellation: db_common::QueryCancellation,
+    ) -> Result<Vec<QueryResult>> {
+        let pool = self.pool_for(profile, pool_config).await?;
+        let statements = statements.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let pooled = pool.acquire()?;
+            let connection = pooled.connection()?;
+            let interrupt = connection.interrupt_handle();
+            let _registration = cancellation.register(move || interrupt.interrupt());
+            if cancellation.is_cancelled() {
+                return Err(cancellation.error());
+            }
+            let result = execute_duckdb_statements(connection, &statements);
+            if cancellation.is_cancelled() {
+                Err(cancellation.error())
+            } else {
+                result
+            }
+        })
+        .await
+        .map_err(|error| {
+            AppError::new(ErrorKind::Internal, "DuckDB query task failed")
+                .with_detail(error.to_string())
+        })?
+    }
+
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
         let Some(pool) = self.pools.lock().await.get(&connection_id).cloned() else {
             return Ok(None);
@@ -479,6 +512,41 @@ impl RelationalQueryExecutor for DuckDbQueryExecutor {
                 .get_mut(&transaction_id)
                 .ok_or_else(|| AppError::validation("transaction is not active"))?;
             execute_duckdb_statements(pooled.connection()?, &statements)
+        })
+        .await
+        .map_err(|error| {
+            AppError::new(ErrorKind::Internal, "DuckDB transaction task failed")
+                .with_detail(error.to_string())
+        })?
+    }
+
+    async fn execute_in_transaction_cancellable(
+        &self,
+        transaction_id: QueryId,
+        statements: &[String],
+        cancellation: db_common::QueryCancellation,
+    ) -> Result<Vec<QueryResult>> {
+        let statements = statements.to_vec();
+        let transactions = self.transactions.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut transactions = transactions
+                .lock()
+                .map_err(|_| AppError::internal("DuckDB transaction lock poisoned"))?;
+            let pooled = transactions
+                .get_mut(&transaction_id)
+                .ok_or_else(|| AppError::validation("transaction is not active"))?;
+            let connection = pooled.connection()?;
+            let interrupt = connection.interrupt_handle();
+            let _registration = cancellation.register(move || interrupt.interrupt());
+            if cancellation.is_cancelled() {
+                return Err(cancellation.error());
+            }
+            let result = execute_duckdb_statements(connection, &statements);
+            if cancellation.is_cancelled() {
+                Err(cancellation.error())
+            } else {
+                result
+            }
         })
         .await
         .map_err(|error| {
@@ -789,6 +857,8 @@ fn duckdb_functions(path: PathBuf, schema: &str) -> Result<Vec<DatabaseFunction>
             return_type: row.get::<_, Option<String>>(1)?,
             language: None,
             kind: "FUNCTION".to_string(),
+            definition: None,
+            identity_arguments: None,
         })
     }) {
         Ok(rows) => rows,

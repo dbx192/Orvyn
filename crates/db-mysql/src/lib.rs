@@ -499,11 +499,38 @@ impl RelationalMetadataReader for MySqlMetadataReader {
 
         let mut functions = Vec::new();
         for row in rows {
+            let name = mysql_string(&row, "ROUTINE_NAME")?;
+            let kind = mysql_string(&row, "ROUTINE_TYPE")?;
+            let ddl_sql = format!(
+                "SHOW CREATE {} `{}`.`{}`",
+                if kind.eq_ignore_ascii_case("PROCEDURE") {
+                    "PROCEDURE"
+                } else {
+                    "FUNCTION"
+                },
+                database.replace('`', "``"),
+                name.replace('`', "``")
+            );
+            // SHOW CREATE includes parameters, characteristics, security and body.
+            // Missing SHOW ROUTINE privileges must not produce a fabricated editable stub.
+            let definition = match sqlx::query(&ddl_sql).fetch_one(&pool).await {
+                Ok(ddl) => mysql_optional_string(
+                    &ddl,
+                    if kind.eq_ignore_ascii_case("PROCEDURE") {
+                        "Create Procedure"
+                    } else {
+                        "Create Function"
+                    },
+                )?,
+                Err(_) => None,
+            };
             functions.push(DatabaseFunction {
-                name: mysql_string(&row, "ROUTINE_NAME")?,
+                name,
+                kind,
                 return_type: mysql_optional_string(&row, "DTD_IDENTIFIER")?,
                 language: mysql_optional_string(&row, "EXTERNAL_LANGUAGE")?,
-                kind: mysql_string(&row, "ROUTINE_TYPE")?,
+                definition,
+                identity_arguments: None,
             });
         }
         Ok(functions)
@@ -876,11 +903,12 @@ fn mysql_execute_error(error: sqlx::Error, statement: &str) -> AppError {
             }
             app
         }
-        other => AppError::new(ErrorKind::Query, "failed to execute MySQL statement")
-            .with_detail(format!(
+        other => AppError::new(ErrorKind::Query, "failed to execute MySQL statement").with_detail(
+            format!(
                 "{}\n\nSQL:\n{sql}",
                 redact_connection_url(&other.to_string())
-            )),
+            ),
+        ),
     }
 }
 

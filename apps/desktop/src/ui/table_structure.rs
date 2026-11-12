@@ -2755,12 +2755,14 @@ impl TableStructureView {
                         ui.end_row();
 
                         for (index, func) in self.functions.iter().enumerate() {
-                            ui.label(&func.name);
+                            ui.label(match &func.identity_arguments {
+                                Some(args) => format!("{}({args})", func.name), None => func.name.clone(),
+                            });
                             ui.label(func.return_type.as_deref().unwrap_or(""));
                             ui.label(&func.kind);
                             if ui
-                                .small_button(tr("Edit"))
-                                .on_hover_text(tr("Edit function DDL"))
+                                .add_enabled(func.definition.is_some(), Button::new(tr("Edit")).small())
+                                .on_hover_text(if func.definition.is_some() { tr("Edit function DDL") } else { "Definition unavailable: check routine privileges or driver support".to_string() })
                                 .clicked()
                             {
                                 edit = Some(index);
@@ -2852,21 +2854,16 @@ impl TableStructureView {
         }
     }
 
-    /// Open the DDL editor pre-filled with a CREATE FUNCTION stub. The full
-    /// body is not kept in the metadata, so it is left for the user to paste.
+    /// Only open definitions retrieved from the server; never replace a routine with a stub.
     fn open_function_editor(&mut self, index: usize) {
         if let Some(func) = self.functions.get(index) {
-            let ret = func.return_type.as_deref().unwrap_or("void");
-            let lang = func.language.as_deref().unwrap_or("plpgsql");
-            let sql = format!(
-                "CREATE OR REPLACE FUNCTION {}()\nRETURNS {}\nAS $$\n    -- Full definition not retained by metadata; paste it here.\nBEGIN\n    RAISE NOTICE 'TODO';\nEND;\n$$ LANGUAGE {};",
-                func.name, ret, lang,
-            );
-            self.ddl_editor = Some(DdlEditorState {
-                title: trf("Edit Function - {name}", &[("name", func.name.clone())]),
-                sql,
-            });
-            self.active_tab = StructureTab::Functions;
+            if let Some(sql) = func.definition.as_ref().filter(|sql| !sql.trim().is_empty()) {
+                self.ddl_editor = Some(DdlEditorState {
+                    title: trf("Edit Function - {name}", &[("name", func.name.clone())]),
+                    sql: sql.clone(),
+                });
+                self.active_tab = StructureTab::Functions;
+            }
         }
     }
 

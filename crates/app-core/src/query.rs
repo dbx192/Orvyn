@@ -8,20 +8,20 @@ use crate::registry::DriverRegistry;
 use crate::storage::{FavoriteQueryStore, QueryHistoryStore};
 use crate::task::TaskManager;
 use db_common::{
-    count_result_page_statement, highlight_sql, page_result_statement,
-    split_statements, statement_at_offset, statement_summary, unsupported_kind, AppError,
-    CellValue, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind,
-    FavoriteQuery, PageSize, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
-    QueryHistoryEntry, QueryId, QueryResult, QueryTab, RelationalQueryExecutor, Result,
-    SqlHighlightToken, TextRange, QUERY_RESULT_METADATA_PAGE_LIMIT,
-    QUERY_RESULT_METADATA_PAGE_OFFSET, QUERY_RESULT_METADATA_TOTAL_ROWS,
+    count_result_page_statement, highlight_sql, page_result_statement, split_statements,
+    statement_at_offset, statement_summary, unsupported_kind, AppError, CellValue, ConnectionId,
+    ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind, FavoriteQuery, PageSize,
+    QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest, QueryHistoryEntry, QueryId,
+    QueryResult, QueryTab, RelationalQueryExecutor, Result, SqlHighlightToken, TextRange,
+    QUERY_RESULT_METADATA_PAGE_LIMIT, QUERY_RESULT_METADATA_PAGE_OFFSET,
+    QUERY_RESULT_METADATA_TOTAL_ROWS,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
     time::Instant,
 };
-use tokio::{sync::Mutex, task::AbortHandle};
+use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
 pub const DEFAULT_HISTORY_LIMIT: usize = 500;
@@ -237,7 +237,7 @@ impl QueryService {
         let mut state = self.state.lock().await;
         state.tabs.remove(&tab_id);
         if let Some(handle) = state.running.remove(&tab_id) {
-            handle.abort();
+            handle.cancel();
         }
         if let Some(transaction) = state.transactions.remove(&tab_id) {
             drop(state);
@@ -340,33 +340,50 @@ impl QueryService {
         let pool_config = self.pool_config;
         let password_for_task = password;
 
+        let cancellation = db_common::QueryCancellation::default();
+        {
+            let mut state = self.state.lock().await;
+            if state.running.contains_key(&request.tab_id) {
+                return Err(AppError::validation(
+                    "query tab already has a running execution",
+                ));
+            }
+            state.running.insert(request.tab_id, cancellation.clone());
+        }
         let handle = tokio::spawn(async move {
-            tokio::time::timeout(request_for_task.timeout(), async {
+            let operation = async {
                 if active_transaction {
                     executor
-                        .execute_in_transaction(request_for_task.tab_id, &statements_for_task)
+                        .execute_in_transaction_cancellable(
+                            request_for_task.tab_id,
+                            &statements_for_task,
+                            cancellation.clone(),
+                        )
                         .await
                 } else {
                     executor
-                        .execute(
+                        .execute_cancellable(
                             &profile,
                             password_for_task.as_deref(),
                             &statements_for_task,
                             pool_config,
+                            cancellation.clone(),
                         )
                         .await
                 }
-            })
-            .await
-            .map_err(|_| AppError::new(ErrorKind::Timeout, "query execution timed out"))?
+            };
+            tokio::pin!(operation);
+            tokio::select! {
+                result = &mut operation => result,
+                _ = tokio::time::sleep(request_for_task.timeout()) => {
+                    cancellation.cancel();
+                    // Interrupt-aware drivers drain the cancelled operation before recycling
+                    // their connection. Other drivers report that termination is unconfirmed.
+                    let _ = operation.await;
+                    Err(AppError::new(ErrorKind::Timeout, "Query timed out; cancellation requested"))
+                }
+            }
         });
-        let abort_handle = handle.abort_handle();
-
-        self.state
-            .lock()
-            .await
-            .running
-            .insert(request.tab_id, abort_handle);
 
         let result = handle.await.map_err(|error| {
             if error.is_cancelled() {
@@ -423,6 +440,17 @@ impl QueryService {
             .connections
             .profile_with_password(request.connection_id, runtime_password)
             .await?;
+        if profile.security.read_only
+            && statements
+                .iter()
+                .any(|sql| !db_common::is_read_only_statement(sql))
+        {
+            return Err(AppError::new(
+                ErrorKind::Permission,
+                "connection is read-only",
+            ));
+        }
+
         if let Some(database) = request
             .database
             .as_deref()
@@ -611,7 +639,7 @@ impl QueryService {
     pub async fn stop_execution(&self, tab_id: QueryId) -> Result<()> {
         let handle = self.state.lock().await.running.remove(&tab_id);
         if let Some(handle) = handle {
-            handle.abort();
+            handle.cancel();
             return Ok(());
         }
 
@@ -844,7 +872,7 @@ impl QueryService {
 #[derive(Default)]
 struct QueryServiceState {
     tabs: BTreeMap<QueryId, QueryTab>,
-    running: BTreeMap<QueryId, AbortHandle>,
+    running: BTreeMap<QueryId, db_common::QueryCancellation>,
     transactions: BTreeMap<QueryId, TransactionState>,
     history: VecDeque<QueryHistoryEntry>,
     favorites: BTreeMap<QueryId, FavoriteQuery>,
