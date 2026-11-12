@@ -82,7 +82,10 @@ pub fn split_statements(sql: &str) -> Vec<String> {
             if let Some((end, new_terminator)) = parse_delimiter_command(sql, index) {
                 terminator = new_terminator;
                 current.clear();
-                while chars.peek().is_some_and(|(next_index, _)| *next_index < end) {
+                while chars
+                    .peek()
+                    .is_some_and(|(next_index, _)| *next_index < end)
+                {
                     chars.next();
                 }
                 continue;
@@ -364,6 +367,164 @@ pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<String> {
     }
 
     None
+}
+
+/// Conservative client-side read-only policy, independent of result-set routing.
+/// Database accounts should also have read-only permissions: user-defined functions
+/// and vendor extensions can have side effects which a lexical policy cannot prove.
+pub fn is_read_only_statement(sql: &str) -> bool {
+    let tokens = highlight_sql(sql);
+    // MySQL executes these comments. Do not silently discard their contents.
+    if tokens.iter().any(|t| {
+        t.kind == SqlTokenKind::Comment
+            && (sql[t.range.start..t.range.end].starts_with("/*!")
+                || sql[t.range.start..t.range.end].starts_with("/*M!"))
+    }) {
+        return false;
+    }
+    let values: Vec<String> = tokens
+        .iter()
+        .filter(|t| t.kind != SqlTokenKind::Comment)
+        .map(|t| match t.kind {
+            SqlTokenKind::StringLiteral | SqlTokenKind::QuotedIdentifier => String::new(),
+            _ => sql[t.range.start..t.range.end].to_ascii_lowercase(),
+        })
+        .collect();
+    let Some(first) = values.first().map(String::as_str) else {
+        return false;
+    };
+    if !matches!(
+        first,
+        "select" | "with" | "values" | "show" | "describe" | "desc" | "explain" | "pragma"
+    ) {
+        return false;
+    }
+    const MUTATIONS: &[&str] = &[
+        "insert",
+        "update",
+        "delete",
+        "merge",
+        "replace",
+        "upsert",
+        "create",
+        "alter",
+        "drop",
+        "truncate",
+        "grant",
+        "revoke",
+        "call",
+        "exec",
+        "execute",
+        "copy",
+        "attach",
+        "detach",
+        "vacuum",
+        "reindex",
+        "analyze",
+        "set",
+        "reset",
+        "use",
+        "load",
+        "install",
+        "import",
+        "export",
+        "refresh",
+        "into",
+        "lock",
+        "unlock",
+        "nextval",
+        "setval",
+        "set_config",
+        "pg_advisory_lock",
+        "pg_advisory_xact_lock",
+        "lo_import",
+        "lo_export",
+        "dblink_exec",
+        "load_extension",
+        "writefile",
+    ];
+    // EXPLAIN ANALYZE SELECT is safe at this layer; ANALYZE as a statement is not.
+    if values.iter().enumerate().any(|(i, v)| {
+        MUTATIONS.contains(&v.as_str()) && !(v == "analyze" && first == "explain" && i == 1)
+    }) {
+        return false;
+    }
+    if values.iter().filter(|v| v.as_str() == ";").count() > 1
+        || values
+            .iter()
+            .position(|v| v == ";")
+            .is_some_and(|i| i + 1 != values.len())
+    {
+        return false;
+    }
+    if first == "pragma" {
+        if values.iter().any(|v| v == "=") {
+            return false;
+        }
+        let pragma = values
+            .iter()
+            .skip(1)
+            .take_while(|v| v.as_str() != "(" && v.as_str() != ";")
+            .filter(|v| v.as_str() != ".")
+            .last()
+            .map(String::as_str)
+            .unwrap_or("");
+        return matches!(
+            pragma,
+            "table_info"
+                | "table_xinfo"
+                | "index_info"
+                | "index_xinfo"
+                | "index_list"
+                | "foreign_key_list"
+                | "database_list"
+                | "compile_options"
+                | "integrity_check"
+                | "quick_check"
+                | "foreign_key_check"
+                | "function_list"
+                | "module_list"
+                | "pragma_list"
+                | "collation_list"
+        );
+    }
+    true
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+    #[test]
+    fn rejects_writes_disguised_as_queries() {
+        for sql in [
+            "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x",
+            "WITH x AS (SELECT 1) UPDATE t SET a=1",
+            "EXPLAIN ANALYZE DELETE FROM t",
+            "PRAGMA journal_mode(WAL)",
+            "PRAGMA query_only=OFF",
+            "SELECT * INTO outfile 'x' FROM t",
+            "SELECT 1; DELETE FROM t",
+            "SELECT 1 /*! INTO OUTFILE 'x' */",
+            "SELECT nextval('sequence')",
+            "SELECT * FROM t FOR UPDATE",
+        ] {
+            assert!(!is_read_only_statement(sql), "{sql}");
+        }
+    }
+    #[test]
+    fn accepts_reads_comments_and_quoted_keywords() {
+        for sql in [
+            "-- comment\nSELECT 1",
+            "SELECT 'delete', \"update\" FROM t",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "EXPLAIN ANALYZE SELECT * FROM t",
+            "PRAGMA main.table_info('users')",
+            "SELECT 1;",
+            "/* update */ SELECT 1",
+        ] {
+            assert!(is_read_only_statement(sql), "{sql}");
+        }
+    }
 }
 
 pub fn is_result_set_statement(sql: &str) -> bool {
@@ -1124,8 +1285,12 @@ mod tests {
     #[test]
     fn flattens_plain_selects_and_strips_order_by_for_count() {
         assert_eq!(
-            page_result_statement("SELECT * FROM `askme`.`books` ORDER BY `id`", 100, 3_864_100)
-                .as_deref(),
+            page_result_statement(
+                "SELECT * FROM `askme`.`books` ORDER BY `id`",
+                100,
+                3_864_100
+            )
+            .as_deref(),
             Some("SELECT * FROM `askme`.`books` ORDER BY `id`\nLIMIT 100 OFFSET 3864100")
         );
         assert_eq!(
@@ -1197,7 +1362,9 @@ mod tests {
     #[test]
     fn keeps_trigger_body_semicolons_together() {
         assert_eq!(
-            split_statements("CREATE TRIGGER t AFTER INSERT ON tab BEGIN SELECT 1; SELECT 2; END; SELECT 3"),
+            split_statements(
+                "CREATE TRIGGER t AFTER INSERT ON tab BEGIN SELECT 1; SELECT 2; END; SELECT 3"
+            ),
             vec![
                 "CREATE TRIGGER t AFTER INSERT ON tab BEGIN SELECT 1; SELECT 2; END",
                 "SELECT 3"

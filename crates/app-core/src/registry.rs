@@ -197,12 +197,13 @@ impl DriverRegistry {
             Arc::new(db_redis::RedisMetadataReaderImpl),
         );
 
-        // TDengine: real HTTP REST connection probe only; SQL query / metadata
-        // are not registered, so those operations return Unsupported.
+        // TDengine REST SQL and metadata; transactions remain unsupported.
         testers.insert(
             DataSourceKind::TDengine,
             Arc::new(db_tdengine::TdengineConnectionTester),
         );
+        relational_query.insert(DataSourceKind::TDengine, Arc::new(db_tdengine::TdengineQueryExecutor));
+        relational_metadata.insert(DataSourceKind::TDengine, Arc::new(db_tdengine::TdengineMetadataReader));
 
         // ---- Search services ----
         let es_tester: Arc<dyn ConnectionTester> = Arc::new(db_http::ElasticsearchConnectionTester);

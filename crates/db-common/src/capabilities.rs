@@ -293,10 +293,11 @@ impl DataSourceKind {
                 ..ConnectorCapabilities::full_relational(ProtocolFamily::ClickHouse)
             },
             Self::SqlServer => ConnectorCapabilities::full_relational(ProtocolFamily::SqlServer),
-            Self::TDengine => ConnectorCapabilities::restricted(
-                ProtocolFamily::Tdengine,
-                "TDengine REST probe available; full query/metadata pending",
-            ),
+            Self::TDengine => ConnectorCapabilities {
+                transactions: false,
+                notes: Some("TDengine REST SQL and table/stable metadata; no transactions or views"),
+                ..ConnectorCapabilities::full_relational(ProtocolFamily::Tdengine)
+            },
 
             Self::MongoDb => ConnectorCapabilities::document_full(
                 ProtocolFamily::Mongo,
@@ -520,7 +521,7 @@ impl DataSourceKind {
                 ExtraParamField {
                     key: "odbc_connection_string",
                     label: "Raw ODBC connection string (overrides all)",
-                    kind: ExtraParamKind::Text,
+                    kind: ExtraParamKind::Password,
                     required: false,
                     placeholder: None,
                 },
@@ -536,7 +537,7 @@ impl DataSourceKind {
                 ExtraParamField {
                     key: "odbc_connection_string",
                     label: "Raw ODBC connection string (overrides all)",
-                    kind: ExtraParamKind::Text,
+                    kind: ExtraParamKind::Password,
                     required: false,
                     placeholder: None,
                 },
@@ -552,7 +553,7 @@ impl DataSourceKind {
                 ExtraParamField {
                     key: "odbc_connection_string",
                     label: "Raw ODBC connection string (overrides all)",
-                    kind: ExtraParamKind::Text,
+                    kind: ExtraParamKind::Password,
                     required: false,
                     placeholder: None,
                 },

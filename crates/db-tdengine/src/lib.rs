@@ -1,11 +1,4 @@
-//! TDengine adapter crate (restricted).
-//!
-//! TDengine's flagship interface is the TDengine REST API (`/rest/sql`), which
-//! accepts SQL over HTTP and returns typed JSON. This adapter only implements
-//! connectivity probing so the user can test a saved TDengine config; full SQL
-//! query / metadata support is not yet wired to a driver, so callers routing
-//! through [`DriverRegistry::relational_*`] get a structured `Unsupported`
-//! error (the kind is not registered there).
+//! TDengine REST SQL, typed results and metadata. Transactions are unsupported.
 
 use async_trait::async_trait;
 use db_common::{
@@ -28,21 +21,35 @@ async fn rest_query(
         SslMode::Disable => "http",
         SslMode::Prefer | SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => "https",
     };
+    let path = profile.extra_param("http_path").unwrap_or("/rest/sql");
+    let database = profile
+        .database
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|name| format!("/{}", urlencoding::encode(name)))
+        .unwrap_or_default();
     let url = format!(
-        "{scheme}://{}:{}/rest/sql",
+        "{scheme}://{}:{}/{}{database}",
         profile.required_host()?,
-        profile.required_port()?
+        profile.required_port()?,
+        path.trim_matches('/')
     );
 
     let username = profile.username.as_deref().unwrap_or_default();
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| {
-            AppError::new(ErrorKind::Connection, "failed to build HTTP client")
-                .with_detail(error.to_string())
-        })?;
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client>> = std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|error| {
+                    AppError::new(ErrorKind::Connection, "failed to build HTTP client")
+                        .with_detail(error.to_string())
+                })
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
 
     let response = client
         .post(&url)
@@ -125,5 +132,291 @@ impl ConnectionTester for TdengineConnectionTester {
             report = report.with_server_version(version);
         }
         Ok(report)
+    }
+}
+
+use db_common::{
+    CellValue, Column, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DatabaseObject,
+    DatabaseObjectKind, QueryId, QueryResult, RelationalMetadataReader, RelationalQueryExecutor,
+    Row, TableColumn, TableIndex,
+};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TdengineQueryExecutor;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TdengineMetadataReader;
+
+fn decode_result(sql: &str, json: &serde_json::Value) -> Result<QueryResult> {
+    let mut result = QueryResult::empty(sql);
+    if let Some(meta) = json.get("column_meta").and_then(|v| v.as_array()) {
+        for column in meta {
+            let name = column.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+                AppError::new(ErrorKind::Serialization, "invalid TDengine column metadata")
+            })?;
+            result.columns.push(Column::new(
+                name,
+                column.get(1).map(ToString::to_string).unwrap_or_default(),
+            ));
+        }
+    } else if let Some(head) = json.get("head").and_then(|v| v.as_array()) {
+        result.columns = head
+            .iter()
+            .map(|v| Column::new(v.as_str().unwrap_or(""), "UNKNOWN"))
+            .collect();
+    }
+    if let Some(rows) = json.get("data").and_then(|v| v.as_array()) {
+        for row in rows {
+            let cells = row
+                .as_array()
+                .ok_or_else(|| AppError::new(ErrorKind::Serialization, "invalid TDengine row"))?;
+            result.rows.push(Row::new(
+                cells
+                    .iter()
+                    .map(|cell| match cell {
+                        serde_json::Value::Null => CellValue::Null,
+                        serde_json::Value::Bool(v) => CellValue::Bool(*v),
+                        serde_json::Value::Number(v) if v.is_i64() => {
+                            CellValue::Int(v.as_i64().unwrap())
+                        }
+                        serde_json::Value::Number(v) if v.is_u64() => {
+                            CellValue::UInt(v.as_u64().unwrap())
+                        }
+                        serde_json::Value::Number(v) => {
+                            CellValue::Float(v.as_f64().unwrap_or_default())
+                        }
+                        serde_json::Value::String(v) => CellValue::Text(v.clone()),
+                        v => CellValue::Json(v.clone()),
+                    })
+                    .collect(),
+            ));
+        }
+    }
+    result.affected_rows = json
+        .get("rows")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(result.rows.len() as u64);
+    Ok(result)
+}
+
+#[async_trait]
+impl RelationalQueryExecutor for TdengineQueryExecutor {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::TDengine
+    }
+    async fn execute(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        statements: &[String],
+        _config: ConnectionPoolConfig,
+    ) -> Result<Vec<QueryResult>> {
+        let mut results = Vec::new();
+        for sql in statements {
+            if profile.security.read_only && !db_common::is_read_only_statement(sql) {
+                return Err(AppError::new(
+                    ErrorKind::Permission,
+                    "connection is read-only",
+                ));
+            }
+            let start = std::time::Instant::now();
+            results.push(
+                decode_result(sql, &rest_query(profile, password, sql).await?)?
+                    .with_elapsed(start.elapsed()),
+            );
+        }
+        Ok(results)
+    }
+    async fn pool_stats(&self, _: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
+        Ok(None)
+    }
+    async fn close_pool(&self, _: ConnectionId) -> Result<()> {
+        Ok(())
+    }
+    async fn begin_transaction(
+        &self,
+        _: &ConnectionProfile,
+        _: Option<&str>,
+        _: QueryId,
+        _: ConnectionPoolConfig,
+    ) -> Result<()> {
+        Err(AppError::unsupported("TDengine has no client transactions"))
+    }
+    async fn execute_in_transaction(&self, _: QueryId, _: &[String]) -> Result<Vec<QueryResult>> {
+        Err(AppError::unsupported("TDengine has no client transactions"))
+    }
+    async fn commit_transaction(&self, _: QueryId) -> Result<()> {
+        Err(AppError::unsupported("TDengine has no client transactions"))
+    }
+    async fn rollback_transaction(&self, _: QueryId) -> Result<()> {
+        Err(AppError::unsupported("TDengine has no client transactions"))
+    }
+}
+fn identifier(value: &str) -> String {
+    format!("`{}`", value.replace('`', "``"))
+}
+fn selected_profile(profile: &ConnectionProfile, database: Option<&str>) -> ConnectionProfile {
+    let mut profile = profile.clone();
+    if let Some(database) = database {
+        profile.database = Some(database.to_string());
+    }
+    profile
+}
+#[async_trait]
+impl RelationalMetadataReader for TdengineMetadataReader {
+    fn kind(&self) -> DataSourceKind {
+        DataSourceKind::TDengine
+    }
+    async fn list_databases(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>> {
+        objects(
+            profile,
+            password,
+            "SHOW DATABASES",
+            DatabaseObjectKind::Database,
+        )
+        .await
+    }
+    async fn list_schemas(
+        &self,
+        _: &ConnectionProfile,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>> {
+        Ok(Vec::new())
+    }
+    async fn list_tables(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>> {
+        let profile = selected_profile(profile, database);
+        let mut tables =
+            objects(&profile, password, "SHOW TABLES", DatabaseObjectKind::Table).await?;
+        tables.extend(
+            objects(
+                &profile,
+                password,
+                "SHOW STABLES",
+                DatabaseObjectKind::Table,
+            )
+            .await?,
+        );
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        tables.dedup_by(|a, b| a.name == b.name);
+        Ok(tables)
+    }
+    async fn list_views(
+        &self,
+        _: &ConnectionProfile,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<DatabaseObject>> {
+        Ok(Vec::new())
+    }
+    async fn list_columns(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        _: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<TableColumn>> {
+        let sql = format!("DESCRIBE {}", identifier(table));
+        let result = decode_result(
+            &sql,
+            &rest_query(&selected_profile(profile, database), password, &sql).await?,
+        )?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| TableColumn {
+                name: row
+                    .values
+                    .first()
+                    .map(CellValue::display)
+                    .unwrap_or_default(),
+                database_type: row
+                    .values
+                    .get(1)
+                    .map(CellValue::display)
+                    .unwrap_or_default(),
+                nullable: true,
+                default_value: None,
+                primary_key: false,
+                comment: row
+                    .values
+                    .get(3)
+                    .map(CellValue::display)
+                    .filter(|s| !s.is_empty()),
+            })
+            .collect())
+    }
+    async fn list_indexes(
+        &self,
+        _: &ConnectionProfile,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &str,
+    ) -> Result<Vec<TableIndex>> {
+        Ok(Vec::new())
+    }
+    async fn get_create_table_sql(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: Option<&str>,
+        _: Option<&str>,
+        table: &str,
+    ) -> Result<String> {
+        let sql = format!("SHOW CREATE TABLE {}", identifier(table));
+        let result = decode_result(
+            &sql,
+            &rest_query(&selected_profile(profile, database), password, &sql).await?,
+        )?;
+        result
+            .rows
+            .first()
+            .and_then(|row| row.values.last())
+            .map(CellValue::display)
+            .ok_or_else(|| AppError::new(ErrorKind::Query, "TDengine returned no table definition"))
+    }
+}
+async fn objects(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+    sql: &str,
+    kind: DatabaseObjectKind,
+) -> Result<Vec<DatabaseObject>> {
+    let result = decode_result(sql, &rest_query(profile, password, sql).await?)?;
+    Ok(result
+        .rows
+        .iter()
+        .filter_map(|row| row.values.first())
+        .map(|cell| DatabaseObject {
+            kind,
+            name: cell.display(),
+            schema: None,
+            parent: profile.database.clone(),
+        })
+        .collect())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn decodes_rest_types_without_truncating_unsigned_values() {
+        let json = serde_json::json!({"column_meta":[["n",14,8],["text",8,20],["empty",4,4]],
+            "data":[[18446744073709551615u64,"hello",null]],"rows":1});
+        let result = decode_result("SELECT * FROM t", &json).unwrap();
+        assert_eq!(result.columns[0].name, "n");
+        assert_eq!(result.rows[0].values[0], CellValue::UInt(u64::MAX));
+        assert_eq!(result.rows[0].values[2], CellValue::Null);
     }
 }

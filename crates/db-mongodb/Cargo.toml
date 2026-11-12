@@ -13,3 +13,4 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["net"] }
 urlencoding.workspace = true
+sha2.workspace = true

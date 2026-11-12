@@ -471,6 +471,26 @@ pub trait DocumentConnector: Send + Sync {
         limit: u32,
     ) -> Result<Vec<serde_json::Value>>;
 
+    /// Extended document query: find, aggregate, insert, update or delete.
+    /// Connectors validate the envelope and enforce read-only mutation policy.
+    async fn execute_document_query(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        database: &str,
+        collection: &str,
+        query: &serde_json::Value,
+        limit: u32,
+        offset: u64,
+    ) -> Result<serde_json::Value> {
+        let _ = (
+            profile, password, database, collection, query, limit, offset,
+        );
+        Err(crate::AppError::unsupported(
+            "extended document queries are not supported",
+        ))
+    }
+
     async fn delete_document(
         &self,
         profile: &ConnectionProfile,
@@ -492,6 +512,10 @@ pub struct SearchIndex {
 pub struct SearchResult {
     pub total: Option<u64>,
     pub documents: Vec<serde_json::Value>,
+    /// Complete server response, retaining hit IDs/scores/sort keys,
+    /// aggregations, timing, shard failures and total relation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_response: Option<serde_json::Value>,
 }
 
 /// Search-service connector (Elasticsearch / Easysearch / Meilisearch /

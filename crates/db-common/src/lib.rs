@@ -3,6 +3,7 @@
 //! This crate intentionally contains only cross-cutting types and stateless
 //! helpers. Concrete database drivers belong in their own adapter crates.
 
+pub mod atomic_file;
 pub mod bytes;
 pub mod capabilities;
 pub mod connection;
@@ -45,7 +46,7 @@ pub use result_set::{
 };
 pub use session::{SessionInfo, SessionState, TaskInfo, TaskKind, TaskProgress, TaskStatus};
 pub use sql::{
-    count_result_page_statement, highlight_sql, is_result_set_statement,
+    count_result_page_statement, highlight_sql, is_read_only_statement, is_result_set_statement,
     limit_result_preview_statement, looks_like_unqualified_mutation, page_result_statement,
     split_statements, statement_at_offset, statement_summary, trim_sql,
 };

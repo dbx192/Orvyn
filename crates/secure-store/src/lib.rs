@@ -28,10 +28,18 @@ const PROVIDER: &str = "encrypted-file";
 ///
 /// This is a portable first-stage implementation. Platform keychains can later
 /// implement the same trait without changing app-core.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EncryptedFileStore {
     path: PathBuf,
     key: [u8; 32],
+}
+
+impl std::fmt::Debug for EncryptedFileStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedFileStore")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl EncryptedFileStore {
@@ -62,14 +70,20 @@ impl EncryptedFileStore {
             })?
     }
 
-    async fn write_file(&self, file: SecretFile) -> Result<()> {
+    async fn modify_file(
+        &self,
+        modify: impl FnOnce(&mut SecretFile) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let path = self.path.clone();
-        task::spawn_blocking(move || write_secret_file(path, &file))
-            .await
-            .map_err(|error| {
-                AppError::new(ErrorKind::Internal, "secret write task failed")
-                    .with_detail(error.to_string())
-            })?
+        task::spawn_blocking(move || {
+            db_common::atomic_file::transaction(&path, || {
+                let mut file = read_secret_file(path.clone())?;
+                modify(&mut file)?;
+                write_secret_file(path.clone(), &file)
+            })
+        })
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
     }
 
     fn encrypt(&self, secret: &str) -> Result<EncryptedSecret> {
@@ -119,16 +133,17 @@ impl EncryptedFileStore {
 #[async_trait]
 impl SecureStore for EncryptedFileStore {
     async fn put_secret(&self, label: &str, secret: &str) -> Result<CredentialRef> {
-        let mut file = self.read_file().await?;
         let key = Uuid::new_v4().to_string();
-        file.secrets.insert(
-            key.clone(),
-            SecretRecord {
-                label: label.to_string(),
-                encrypted: self.encrypt(secret)?,
-            },
-        );
-        self.write_file(file).await?;
+        let record = SecretRecord {
+            label: label.to_string(),
+            encrypted: self.encrypt(secret)?,
+        };
+        let record_key = key.clone();
+        self.modify_file(move |file| {
+            file.secrets.insert(record_key, record);
+            Ok(())
+        })
+        .await?;
 
         Ok(CredentialRef::new(PROVIDER, key))
     }
@@ -151,9 +166,12 @@ impl SecureStore for EncryptedFileStore {
             return Ok(());
         }
 
-        let mut file = self.read_file().await?;
-        file.secrets.remove(&credential_ref.key);
-        self.write_file(file).await
+        let key = credential_ref.key.clone();
+        self.modify_file(move |file| {
+            file.secrets.remove(&key);
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -176,7 +194,7 @@ fn write_secret_file(path: PathBuf, file: &SecretFile) -> Result<()> {
     }
 
     let bytes = serde_json::to_vec_pretty(file)?;
-    fs::write(path, bytes)?;
+    db_common::atomic_file::replace(&path, &bytes)?;
     Ok(())
 }
 

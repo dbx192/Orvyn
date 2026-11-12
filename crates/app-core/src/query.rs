@@ -8,7 +8,7 @@ use crate::registry::DriverRegistry;
 use crate::storage::{FavoriteQueryStore, QueryHistoryStore};
 use crate::task::TaskManager;
 use db_common::{
-    count_result_page_statement, highlight_sql, is_result_set_statement, page_result_statement,
+    count_result_page_statement, highlight_sql, page_result_statement,
     split_statements, statement_at_offset, statement_summary, unsupported_kind, AppError,
     CellValue, ConnectionId, ConnectionPoolConfig, ConnectionPoolStats, DataSourceKind, ErrorKind,
     FavoriteQuery, PageSize, QueryExecutionMode, QueryExecutionReport, QueryExecutionRequest,
@@ -313,7 +313,7 @@ impl QueryService {
         if profile.security.read_only
             && statements
                 .iter()
-                .any(|statement| !is_result_set_statement(statement))
+                .any(|statement| !db_common::is_read_only_statement(statement))
         {
             return Err(AppError::new(
                 ErrorKind::Validation,

@@ -120,6 +120,31 @@ impl SearchService {
             .await
     }
 
+    pub async fn execute_document_query(
+        &self,
+        connection_id: ConnectionId,
+        runtime_password: Option<&str>,
+        database: &str,
+        collection: &str,
+        query: &serde_json::Value,
+        limit: u32,
+        offset: u64,
+    ) -> Result<serde_json::Value> {
+        let (profile, password) = self.load(connection_id, runtime_password).await?;
+        self.registry
+            .document(profile.kind)?
+            .execute_document_query(
+                &profile,
+                password.as_deref(),
+                database,
+                collection,
+                query,
+                limit,
+                offset,
+            )
+            .await
+    }
+
     /// Execute a SQL statement against an HTTP-SQL database (Cloudflare D1).
     pub async fn execute_sql(
         &self,
@@ -129,6 +154,13 @@ impl SearchService {
         sql: &str,
     ) -> Result<Vec<QueryResult>> {
         let (profile, password) = self.load(connection_id, runtime_password).await?;
+        if profile.security.read_only
+            && db_common::split_statements(sql)
+                .iter()
+                .any(|statement| !db_common::is_read_only_statement(statement))
+        {
+            return Err(db_common::AppError::validation("connection is read-only"));
+        }
         let connector = self.registry.http_sql(profile.kind)?;
         let mut results = connector
             .execute(&profile, password.as_deref(), sql)

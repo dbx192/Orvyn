@@ -45,6 +45,7 @@ struct ConnectionForm {
     /// Stored as strings regardless of underlying type; Choice kinds store the
     /// selected option verbatim.
     extra_params: BTreeMap<String, String>,
+    extra_secret_refs: BTreeMap<String, db_common::CredentialRef>,
 }
 
 impl ConnectionForm {
@@ -67,6 +68,7 @@ impl ConnectionForm {
             read_only: false,
             ssl_mode: SslMode::Prefer,
             extra_params: BTreeMap::new(),
+            extra_secret_refs: BTreeMap::new(),
         };
         form.apply_kind_defaults();
         form
@@ -92,6 +94,7 @@ impl ConnectionForm {
             read_only: profile.security.read_only,
             ssl_mode: profile.security.ssl_mode,
             extra_params: profile.extra_params.clone(),
+            extra_secret_refs: profile.extra_secret_refs.clone(),
         }
     }
 
@@ -158,6 +161,7 @@ impl ConnectionForm {
                 save_password: self.save_password,
             },
             extra_params,
+            extra_secret_refs: self.extra_secret_refs.clone(),
         }
     }
 }
@@ -623,7 +627,12 @@ impl ConnectionManagerUi {
                         continue;
                     }
                     ui.label(field.label);
-                    render_extra_param_field(ui, &mut self.form.extra_params, &field);
+                    render_extra_param_field(
+                        ui,
+                        &mut self.form.extra_params,
+                        &field,
+                        &mut self.form.extra_secret_refs,
+                    );
                     ui.end_row();
                 }
             });
@@ -1120,16 +1129,17 @@ async fn export_connections_to_file(
 
     for mut profile in profiles {
         let password = if include_passwords {
-            manager
-                .profile_with_password(profile.id, None)
-                .await?
-                .1
-                .filter(|password| !password.is_empty())
+            let (resolved, password) = manager.profile_with_password(profile.id, None).await?;
+            profile = resolved;
+            password.filter(|password| !password.is_empty())
         } else {
             None
         };
-
         profile.password_ref = None;
+        profile.extra_secret_refs.clear();
+        if !include_passwords {
+            profile.strip_secrets();
+        }
         if password.is_none() {
             profile.security.save_password = false;
         }
@@ -1302,6 +1312,7 @@ fn render_extra_param_field(
     ui: &mut Ui,
     extra_params: &mut BTreeMap<String, String>,
     field: &ExtraParamField,
+    secret_refs: &mut BTreeMap<String, db_common::CredentialRef>,
 ) {
     let entry = extra_params
         .entry(field.key.to_string())
@@ -1319,8 +1330,18 @@ fn render_extra_param_field(
                 TextEdit::singleline(entry)
                     .password(true)
                     .desired_width(260.0)
-                    .hint_text(field.placeholder.unwrap_or("")),
+                    .hint_text(if secret_refs.contains_key(field.key) {
+                        "Saved (leave blank to keep)"
+                    } else {
+                        field.placeholder.unwrap_or("")
+                    }),
             );
+            if secret_refs.contains_key(field.key)
+                && ui.small_button("Clear saved secret").clicked()
+            {
+                secret_refs.remove(field.key);
+                entry.clear();
+            }
         }
         ExtraParamKind::Choice(options) => {
             let selected = entry.clone();

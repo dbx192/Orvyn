@@ -59,22 +59,28 @@ impl<'a> HttpRequest<'a> {
     }
 }
 
-/// Shared transport helper: build a client once per call, apply auth / body,
+/// Shared transport helper: reuse a pooled client, apply per-request auth / body,
 /// send, and return the parsed JSON after checking the HTTP status code.
 async fn make_request(req: HttpRequest<'_>) -> Result<serde_json::Value> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        // `connect_timeout` does not cover a server that accepts the TCP
-        // connection but never sends a response. Without a total deadline the
-        // connection dialog remains busy indefinitely and its actions stay
-        // disabled.
-        .timeout(Duration::from_secs(10))
-        .user_agent(format!("orvyn/{ADAPTER_NAME}"))
-        .build()
-        .map_err(|error| {
-            AppError::new(ErrorKind::Connection, "failed to build HTTP client")
-                .with_detail(error.to_string())
-        })?;
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client>> = std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                // `connect_timeout` does not cover a server that accepts the TCP
+                // connection but never sends a response. Without a total deadline the
+                // connection dialog remains busy indefinitely and its actions stay
+                // disabled.
+                .timeout(Duration::from_secs(10))
+                .user_agent(format!("orvyn/{ADAPTER_NAME}"))
+                .build()
+                .map_err(|error| {
+                    AppError::new(ErrorKind::Connection, "failed to build HTTP client")
+                        .with_detail(error.to_string())
+                })
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
 
     let mut builder = client.request(req.method, &req.url);
     match req.auth {
@@ -542,7 +548,11 @@ impl SearchConnector for ElasticsearchSearchConnector {
             }
         }
 
-        Ok(SearchResult { total, documents })
+        Ok(SearchResult {
+            total,
+            documents,
+            raw_response: Some(json),
+        })
     }
 }
 
@@ -734,7 +744,11 @@ impl SearchConnector for MeilisearchSearchConnector {
             }
         }
 
-        Ok(SearchResult { total, documents })
+        Ok(SearchResult {
+            total,
+            documents,
+            raw_response: Some(json),
+        })
     }
 }
 
@@ -928,7 +942,11 @@ impl SearchConnector for ManticoreSearchConnector {
             }
         }
 
-        Ok(SearchResult { total, documents })
+        Ok(SearchResult {
+            total,
+            documents,
+            raw_response: Some(json),
+        })
     }
 }
 

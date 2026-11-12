@@ -23,3 +23,4 @@ orvyn-connections.json
 .trae/
 .idea/
 packaging/duckdb-download
+IMPLEMENTATION_PLAN.md

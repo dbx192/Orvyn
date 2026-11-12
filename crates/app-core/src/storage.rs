@@ -40,14 +40,20 @@ impl FileConnectionProfileStore {
             })?
     }
 
-    async fn write_file(&self, file: ConnectionProfileFile) -> Result<()> {
+    async fn modify_file(
+        &self,
+        modify: impl FnOnce(&mut ConnectionProfileFile) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let path = self.path.clone();
-        task::spawn_blocking(move || write_profile_file(path, &file))
-            .await
-            .map_err(|error| {
-                AppError::new(ErrorKind::Internal, "connection profile write task failed")
-                    .with_detail(error.to_string())
-            })?
+        task::spawn_blocking(move || {
+            db_common::atomic_file::transaction(&path, || {
+                let mut file = read_profile_file(path.clone())?;
+                modify(&mut file)?;
+                write_profile_file(path.clone(), &file)
+            })
+        })
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
     }
 }
 
@@ -70,7 +76,7 @@ fn write_profile_file(path: PathBuf, file: &ConnectionProfileFile) -> Result<()>
     }
 
     let bytes = serde_json::to_vec_pretty(file)?;
-    fs::write(path, bytes)?;
+    db_common::atomic_file::replace(&path, &bytes)?;
     Ok(())
 }
 
@@ -87,20 +93,24 @@ impl ConnectionProfileStore for FileConnectionProfileStore {
 
     async fn upsert(&self, profile: ConnectionProfile) -> Result<()> {
         profile.validate()?;
-        let mut file = self.read_file().await?;
-        file.profiles.insert(profile.id, profile);
-        self.write_file(file).await
+        self.modify_file(move |file| {
+            file.profiles.insert(profile.id, profile);
+            Ok(())
+        })
+        .await
     }
 
     async fn delete(&self, id: ConnectionId) -> Result<()> {
-        let mut file = self.read_file().await?;
-        if file.profiles.remove(&id).is_none() {
-            return Err(AppError::new(
-                ErrorKind::Validation,
-                "connection profile not found",
-            ));
-        }
-        self.write_file(file).await
+        self.modify_file(move |file| {
+            if file.profiles.remove(&id).is_none() {
+                return Err(AppError::new(
+                    ErrorKind::Validation,
+                    "connection profile not found",
+                ));
+            }
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -196,14 +206,20 @@ impl FileQueryHistoryStore {
             })?
     }
 
-    async fn write_file(&self, file: QueryHistoryFile) -> Result<()> {
+    async fn modify_file(
+        &self,
+        modify: impl FnOnce(&mut QueryHistoryFile) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let path = self.path.clone();
-        task::spawn_blocking(move || write_history_file(path, &file))
-            .await
-            .map_err(|error| {
-                AppError::new(ErrorKind::Internal, "query history write task failed")
-                    .with_detail(error.to_string())
-            })?
+        task::spawn_blocking(move || {
+            db_common::atomic_file::transaction(&path, || {
+                let mut file = read_history_file(path.clone())?;
+                modify(&mut file)?;
+                write_history_file(path.clone(), &file)
+            })
+        })
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
     }
 }
 
@@ -226,7 +242,7 @@ fn write_history_file(path: PathBuf, file: &QueryHistoryFile) -> Result<()> {
     }
 
     let bytes = serde_json::to_vec_pretty(file)?;
-    fs::write(path, bytes)?;
+    db_common::atomic_file::replace(&path, &bytes)?;
     Ok(())
 }
 
@@ -237,23 +253,30 @@ impl QueryHistoryStore for FileQueryHistoryStore {
     }
 
     async fn add(&self, entry: QueryHistoryEntry) -> Result<()> {
-        let mut file = self.read_file().await?;
-        file.entries.insert(0, entry);
-        while file.entries.len() > 100 {
-            file.entries.pop();
-        }
-        self.write_file(file).await
+        self.modify_file(move |file| {
+            file.entries.insert(0, entry);
+            while file.entries.len() > 100 {
+                file.entries.pop();
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn clear(&self) -> Result<()> {
-        let file = QueryHistoryFile::default();
-        self.write_file(file).await
+        self.modify_file(|file| {
+            file.entries.clear();
+            Ok(())
+        })
+        .await
     }
 
     async fn remove(&self, id: QueryId) -> Result<()> {
-        let mut file = self.read_file().await?;
-        file.entries.retain(|e| e.id != id);
-        self.write_file(file).await
+        self.modify_file(move |file| {
+            file.entries.retain(|e| e.id != id);
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -277,14 +300,20 @@ impl FileFavoriteQueryStore {
             })?
     }
 
-    async fn write_file(&self, file: FavoriteQueryFile) -> Result<()> {
+    async fn modify_file(
+        &self,
+        modify: impl FnOnce(&mut FavoriteQueryFile) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         let path = self.path.clone();
-        task::spawn_blocking(move || write_favorite_file(path, &file))
-            .await
-            .map_err(|error| {
-                AppError::new(ErrorKind::Internal, "favorite query write task failed")
-                    .with_detail(error.to_string())
-            })?
+        task::spawn_blocking(move || {
+            db_common::atomic_file::transaction(&path, || {
+                let mut file = read_favorite_file(path.clone())?;
+                modify(&mut file)?;
+                write_favorite_file(path.clone(), &file)
+            })
+        })
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
     }
 }
 
@@ -307,7 +336,7 @@ fn write_favorite_file(path: PathBuf, file: &FavoriteQueryFile) -> Result<()> {
     }
 
     let bytes = serde_json::to_vec_pretty(file)?;
-    fs::write(path, bytes)?;
+    db_common::atomic_file::replace(&path, &bytes)?;
     Ok(())
 }
 
@@ -323,20 +352,24 @@ impl FavoriteQueryStore for FileFavoriteQueryStore {
     }
 
     async fn upsert(&self, favorite: FavoriteQuery) -> Result<()> {
-        let mut file = self.read_file().await?;
-        file.favorites.insert(favorite.id, favorite);
-        self.write_file(file).await
+        self.modify_file(move |file| {
+            file.favorites.insert(favorite.id, favorite);
+            Ok(())
+        })
+        .await
     }
 
     async fn delete(&self, id: QueryId) -> Result<()> {
-        let mut file = self.read_file().await?;
-        if file.favorites.remove(&id).is_none() {
-            return Err(AppError::new(
-                ErrorKind::Validation,
-                "favorite query not found",
-            ));
-        }
-        self.write_file(file).await
+        self.modify_file(move |file| {
+            if file.favorites.remove(&id).is_none() {
+                return Err(AppError::new(
+                    ErrorKind::Validation,
+                    "favorite query not found",
+                ));
+            }
+            Ok(())
+        })
+        .await
     }
 }
 

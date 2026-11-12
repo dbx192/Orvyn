@@ -356,7 +356,7 @@ impl Default for ConnectionSecurity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionProfile {
     pub id: ConnectionId,
     pub name: String,
@@ -370,9 +370,42 @@ pub struct ConnectionProfile {
     pub file_path: Option<String>,
     pub security: ConnectionSecurity,
     pub extra_params: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_secret_refs: BTreeMap<String, CredentialRef>,
+}
+
+impl fmt::Debug for ConnectionProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectionProfile")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("security", &self.security)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ConnectionProfile {
+    pub fn sensitive_extra_keys(&self) -> Vec<&'static str> {
+        let mut keys: Vec<_> = self
+            .kind
+            .extra_params_schema()
+            .into_iter()
+            .filter(|field| field.kind == crate::ExtraParamKind::Password)
+            .map(|field| field.key)
+            .collect();
+        // Raw connection strings can embed passwords even on an imported profile.
+        keys.push("odbc_connection_string");
+        keys
+    }
+
+    pub fn strip_secrets(&mut self) {
+        self.password_ref = None;
+        self.extra_secret_refs.clear();
+        for key in self.sensitive_extra_keys() {
+            self.extra_params.remove(key);
+        }
+    }
+
     pub fn builder(kind: DataSourceKind, name: impl Into<String>) -> ConnectionProfileBuilder {
         ConnectionProfileBuilder::new(kind, name)
     }
@@ -483,6 +516,7 @@ impl ConnectionProfileBuilder {
                 file_path: None,
                 security: ConnectionSecurity::default(),
                 extra_params: BTreeMap::new(),
+                extra_secret_refs: BTreeMap::new(),
             },
         }
     }

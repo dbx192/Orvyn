@@ -36,6 +36,7 @@ pub struct ConnectionManager {
     store: Arc<dyn ConnectionProfileStore>,
     secure_store: Arc<dyn SecureStore>,
     registry: DriverRegistry,
+    mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ConnectionManager {
@@ -48,6 +49,7 @@ impl ConnectionManager {
             store,
             secure_store,
             registry: DriverRegistry::from_testers(testers),
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -65,6 +67,7 @@ impl ConnectionManager {
             store,
             secure_store,
             registry,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -81,56 +84,145 @@ impl ConnectionManager {
         &self.registry
     }
 
-    #[instrument(skip(self, password), fields(kind = ?profile.kind, profile_id = %profile.id))]
+    #[instrument(skip(self, profile, password), fields(kind = ?profile.kind, profile_id = %profile.id))]
     pub async fn create_profile(
         &self,
         mut profile: ConnectionProfile,
         password: PasswordUpdate,
     ) -> Result<ConnectionProfile> {
+        let _guard = self.mutation_lock.lock().await;
         profile.validate()?;
+        profile.extra_secret_refs.clear();
+        self.protect_extra_secrets(&mut profile).await?;
         profile.password_ref = self.apply_password_update(None, &profile, password).await?;
         self.store.upsert(profile.clone()).await?;
         info!(connection_id = %profile.id, "connection profile created");
         Ok(profile)
     }
 
-    #[instrument(skip(self, password), fields(profile_id = %profile.id))]
+    #[instrument(skip(self, profile, password), fields(profile_id = %profile.id))]
     pub async fn update_profile(
         &self,
         mut profile: ConnectionProfile,
         password: PasswordUpdate,
     ) -> Result<ConnectionProfile> {
+        let _guard = self.mutation_lock.lock().await;
         profile.validate()?;
         let previous =
             self.store.get(profile.id).await?.ok_or_else(|| {
                 AppError::new(ErrorKind::Validation, "connection profile not found")
             })?;
+        profile
+            .extra_secret_refs
+            .retain(|key, reference| previous.extra_secret_refs.get(key) == Some(reference));
+        self.protect_extra_secrets(&mut profile).await?;
         profile.password_ref = self
             .apply_password_update(previous.password_ref.as_ref(), &profile, password)
             .await?;
         self.store.upsert(profile.clone()).await?;
+        // Retire old credentials only after the new profile is durable.
+        self.retire_secrets(&previous, Some(&profile)).await;
         info!(connection_id = %profile.id, "connection profile updated");
         Ok(profile)
     }
 
     pub async fn delete_profile(&self, id: ConnectionId) -> Result<()> {
-        if let Some(profile) = self.store.get(id).await? {
-            if let Some(credential_ref) = profile.password_ref.as_ref() {
-                self.secure_store.delete_secret(credential_ref).await?;
-            }
-        }
-
+        let _guard = self.mutation_lock.lock().await;
+        let previous = self.store.get(id).await?;
         self.store.delete(id).await?;
+        if let Some(previous) = previous {
+            self.retire_secrets(&previous, None).await;
+        }
         info!(connection_id = %id, "connection profile deleted");
         Ok(())
     }
 
     pub async fn get_profile(&self, id: ConnectionId) -> Result<Option<ConnectionProfile>> {
-        self.store.get(id).await
+        let _guard = self.mutation_lock.lock().await;
+        match self.store.get(id).await? {
+            Some(profile) => Ok(Some(self.migrate_profile(profile).await?)),
+            None => Ok(None),
+        }
     }
 
     pub async fn list_profiles(&self) -> Result<Vec<ConnectionProfile>> {
-        self.store.list().await
+        let _guard = self.mutation_lock.lock().await;
+        let mut profiles = Vec::new();
+        for profile in self.store.list().await? {
+            profiles.push(self.migrate_profile(profile).await?);
+        }
+        Ok(profiles)
+    }
+
+    async fn protect_extra_secrets(&self, profile: &mut ConnectionProfile) -> Result<()> {
+        for key in profile.sensitive_extra_keys() {
+            if let Some(secret) = profile.extra_params.remove(key) {
+                profile.extra_secret_refs.remove(key);
+                if !secret.is_empty() {
+                    let reference = self
+                        .secure_store
+                        .put_secret(&profile.connection_label(), &secret)
+                        .await?;
+                    profile.extra_secret_refs.insert(key.to_string(), reference);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn migrate_profile(&self, mut profile: ConnectionProfile) -> Result<ConnectionProfile> {
+        if profile
+            .sensitive_extra_keys()
+            .iter()
+            .any(|key| profile.extra_params.contains_key(*key))
+        {
+            self.protect_extra_secrets(&mut profile).await?;
+            self.store.upsert(profile.clone()).await?;
+        }
+        Ok(profile)
+    }
+
+    async fn resolve_extra_secrets(&self, profile: &mut ConnectionProfile) -> Result<()> {
+        for (key, reference) in &profile.extra_secret_refs {
+            if profile.extra_params.contains_key(key) {
+                continue;
+            }
+            let secret = self
+                .secure_store
+                .get_secret(reference)
+                .await?
+                .ok_or_else(|| {
+                    AppError::new(
+                        ErrorKind::Credential,
+                        "stored connection credential is missing",
+                    )
+                })?;
+            profile.extra_params.insert(key.clone(), secret);
+        }
+        Ok(())
+    }
+
+    async fn retire_secrets(
+        &self,
+        previous: &ConnectionProfile,
+        current: Option<&ConnectionProfile>,
+    ) {
+        for reference in previous
+            .password_ref
+            .iter()
+            .chain(previous.extra_secret_refs.values())
+        {
+            let retained = current.is_some_and(|p| {
+                p.password_ref.as_ref() == Some(reference)
+                    || p.extra_secret_refs.values().any(|r| r == reference)
+            });
+            if !retained {
+                // An orphan is recoverable; a failed save must never destroy a usable credential.
+                if self.secure_store.delete_secret(reference).await.is_err() {
+                    tracing::warn!("failed to retire an unreferenced credential");
+                }
+            }
+        }
     }
 
     #[instrument(skip(self, runtime_password), fields(profile_id = %id))]
@@ -156,7 +248,17 @@ impl ConnectionManager {
         let tester = self.registry.tester(profile.kind)?.clone();
         // Callers may pass an editor-built profile with no password_ref. In
         // that case resolve the persisted profile by id before testing.
-        let persisted_profile = self.store.get(profile.id).await?;
+        let persisted_profile = self.get_profile(profile.id).await?;
+        let mut resolved = profile.clone();
+        if let Some(saved) = &persisted_profile {
+            for (key, reference) in &saved.extra_secret_refs {
+                resolved
+                    .extra_secret_refs
+                    .entry(key.clone())
+                    .or_insert(reference.clone());
+            }
+        }
+        self.resolve_extra_secrets(&mut resolved).await?;
         let stored_password = match persisted_profile.as_ref() {
             Some(saved) => self.load_password(saved).await?,
             None => self.load_password(profile).await?,
@@ -167,7 +269,7 @@ impl ConnectionManager {
         for attempt in 0..=CONNECTION_TEST_RETRIES {
             let result = match tokio::time::timeout(
                 CONNECTION_TEST_TIMEOUT,
-                tester.test_connection(profile, password),
+                tester.test_connection(&resolved, password),
             )
             .await
             {
@@ -218,17 +320,8 @@ impl ConnectionManager {
     ) -> Result<Option<db_common::CredentialRef>> {
         match password {
             PasswordUpdate::Keep => Ok(previous.cloned().or_else(|| profile.password_ref.clone())),
-            PasswordUpdate::Clear => {
-                if let Some(previous) = previous {
-                    self.secure_store.delete_secret(previous).await?;
-                }
-                Ok(None)
-            }
+            PasswordUpdate::Clear => Ok(None),
             PasswordUpdate::Replace(secret) => {
-                if let Some(previous) = previous {
-                    self.secure_store.delete_secret(previous).await?;
-                }
-
                 if secret.is_empty() || !profile.security.save_password {
                     return Ok(None);
                 }
@@ -255,15 +348,17 @@ impl ConnectionManager {
         id: ConnectionId,
         runtime_password: Option<&str>,
     ) -> Result<(ConnectionProfile, Option<String>)> {
-        let profile =
-            self.store.get(id).await?.ok_or_else(|| {
-                AppError::new(ErrorKind::Validation, "connection profile not found")
-            })?;
+        let profile = self
+            .get_profile(id)
+            .await?
+            .ok_or_else(|| AppError::new(ErrorKind::Validation, "connection profile not found"))?;
         let password = match runtime_password {
             Some(password) => Some(password.to_string()),
             None => self.load_password(&profile).await?,
         };
 
+        let mut profile = profile;
+        self.resolve_extra_secrets(&mut profile).await?;
         Ok((profile, password))
     }
 }
@@ -371,6 +466,64 @@ mod tests {
         assert!(error
             .message
             .contains("PostgreSQL connection test timed out"));
+    }
+
+    #[tokio::test]
+    async fn encrypts_migrates_and_resolves_extra_credentials() {
+        let store = Arc::new(MemoryConnectionProfileStore::default());
+        let manager = ConnectionManager::new(
+            store.clone(),
+            Arc::new(MemorySecureStore::default()),
+            Vec::new(),
+        );
+        let mut profile = ConnectionProfile::builder(DataSourceKind::Elasticsearch, "search")
+            .host("localhost")
+            .build()
+            .unwrap();
+        profile.set_extra_param("es_api_key", "private-api-key");
+        let id = profile.id;
+        store.upsert(profile).await.unwrap(); // Simulate the legacy plaintext format.
+        let migrated = manager.get_profile(id).await.unwrap().unwrap();
+        assert!(!serde_json::to_string(&migrated)
+            .unwrap()
+            .contains("private-api-key"));
+        assert!(!format!("{migrated:?}").contains("private-api-key"));
+        assert!(!store
+            .get(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .extra_params
+            .contains_key("es_api_key"));
+        assert_eq!(
+            manager
+                .profile_with_password(id, None)
+                .await
+                .unwrap()
+                .0
+                .extra_param("es_api_key"),
+            Some("private-api-key")
+        );
+        let updated = manager
+            .update_profile(migrated, PasswordUpdate::Keep)
+            .await
+            .unwrap();
+        assert!(updated.extra_secret_refs.contains_key("es_api_key"));
+        let mut cleared = updated;
+        cleared.set_extra_param("es_api_key", "");
+        manager
+            .update_profile(cleared, PasswordUpdate::Keep)
+            .await
+            .unwrap();
+        assert_eq!(
+            manager
+                .profile_with_password(id, None)
+                .await
+                .unwrap()
+                .0
+                .extra_param("es_api_key"),
+            None
+        );
     }
 
     fn test_manager() -> ConnectionManager {
