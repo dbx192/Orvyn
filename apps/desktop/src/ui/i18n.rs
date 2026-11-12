@@ -118,7 +118,7 @@ pub fn set_locale(locale: Locale) -> Result<(), String> {
     fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
     let settings = AppSettings { version: 1, locale };
     let bytes = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
-    fs::write(config_dir.join("app-settings.json"), bytes).map_err(|error| error.to_string())
+    db_common::atomic_file::replace(&config_dir.join("app-settings.json"), &bytes).map_err(|error| error.to_string())
 }
 
 pub fn text(key: &str) -> String {

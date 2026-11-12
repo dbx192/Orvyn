@@ -588,6 +588,60 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         execute_mysql_statements_on_pool(&pool, statements).await
     }
 
+    async fn execute_cancellable(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        statements: &[String],
+        pool_config: ConnectionPoolConfig,
+        cancellation: db_common::QueryCancellation,
+    ) -> Result<Vec<QueryResult>> {
+        if brand_for(profile).is_some_and(MysqlBrand::uses_text_protocol) {
+            return tokio::select! {
+                _ = cancellation.cancelled() => Err(AppError::new(ErrorKind::Cancelled, "Client cancelled; server termination unconfirmed")),
+                result = self.execute(profile, password, statements, pool_config) => result,
+            };
+        }
+        let pool = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancellation.error()),
+            pool = self.pool_for(profile, password, pool_config) => pool?,
+        };
+        let mut connection = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancellation.error()),
+            connection = pool.acquire() => connection.map_err(mysql_connection_error)?,
+        };
+        let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
+            .fetch_one(&mut *connection).await.map_err(mysql_query_error)?;
+        let (result, cancelled) = {
+            let execution = execute_mysql_statements_on_connection(&mut connection, statements);
+            tokio::pin!(execution);
+            tokio::select! {
+                result = &mut execution => (result, false),
+                _ = cancellation.cancelled() => {
+                    // A separate control connection avoids deadlocking a pool of size one.
+                    // Keep the original connection reserved until KILL and response draining finish.
+                    let control = async {
+                        use sqlx::Connection;
+                        let mut control = MySqlConnection::connect_with(&pool.connect_options()).await?;
+                        sqlx::raw_sql(&format!("KILL QUERY {id}")).execute(&mut control).await?;
+                        Ok::<(), sqlx::Error>(())
+                    };
+                    let sent = tokio::time::timeout(std::time::Duration::from_secs(5), control).await;
+                    let message = if matches!(sent, Ok(Ok(()))) {
+                        if tokio::time::timeout(std::time::Duration::from_secs(10), &mut execution).await.is_ok() {
+                            "Query cancelled; MySQL request completed"
+                        } else { "Client cancelled; MySQL completion unconfirmed; connection discarded" }
+                    } else { "Client cancelled; MySQL server cancellation unconfirmed; connection discarded" };
+                    (Err(AppError::new(ErrorKind::Cancelled, message)), true)
+                }
+            }
+        };
+        if cancelled { connection.close_on_drop(); }
+        result
+    }
+
     async fn pool_stats(&self, connection_id: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
         let pools = self
             .pools

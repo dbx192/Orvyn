@@ -3,7 +3,7 @@
 //! `ConnectorCapabilities` describes what a `DataSourceKind` can actually do
 //! today (full / compatible / restricted / unsupported) plus the granular
 //! capability flags the UI uses to show, hide or disable actions. The matrix
-//! reflects the currently-registered pure-Rust drivers, not aspirational
+//! reflects the currently registered native and ODBC drivers, not aspirational
 //! support, so the UI never advertises an action that will return
 //! `ErrorKind::Unsupported`.
 
@@ -216,7 +216,31 @@ impl ConnectorCapabilities {
 
 }
 
+/// Metadata actually exposed by the registered connector, not server feature claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MetadataCapabilities {
+    pub views: bool,
+    pub indexes: bool,
+    pub foreign_keys: bool,
+    pub triggers: bool,
+    pub routines: bool,
+    pub routine_definitions: bool,
+}
+
 impl DataSourceKind {
+    pub const fn metadata_capabilities(self) -> MetadataCapabilities {
+        let family = self.protocol_family();
+        let analytic = matches!(self, Self::Doris | Self::SelectDb | Self::StarRocks);
+        MetadataCapabilities {
+            views: self.is_relational() && !matches!(self, Self::TDengine),
+            indexes: self.is_relational() && !matches!(self, Self::ClickHouse | Self::TDengine) && !analytic,
+            foreign_keys: matches!(family, ProtocolFamily::PostgreSql | ProtocolFamily::Sqlite | ProtocolFamily::DuckDb | ProtocolFamily::Odbc) || (matches!(family, ProtocolFamily::MySql) && !analytic),
+            triggers: matches!(family, ProtocolFamily::PostgreSql | ProtocolFamily::Sqlite) || (matches!(family, ProtocolFamily::MySql) && !analytic),
+            routines: matches!(family, ProtocolFamily::PostgreSql | ProtocolFamily::DuckDb) || (matches!(family, ProtocolFamily::MySql) && !analytic),
+            routine_definitions: matches!(family, ProtocolFamily::PostgreSql) || (matches!(family, ProtocolFamily::MySql) && !analytic),
+        }
+    }
+
     pub const fn capabilities(self) -> ConnectorCapabilities {
         match self {
             Self::MySql => ConnectorCapabilities::full_relational(ProtocolFamily::MySql),
@@ -276,6 +300,7 @@ impl DataSourceKind {
             },
             Self::SqlServer => ConnectorCapabilities::full_relational(ProtocolFamily::SqlServer),
             Self::TDengine => ConnectorCapabilities {
+                support: SupportLevel::Restricted,
                 transactions: false,
                 notes: Some("TDengine REST SQL and table/stable metadata; no transactions or views"),
                 ..ConnectorCapabilities::full_relational(ProtocolFamily::Tdengine)

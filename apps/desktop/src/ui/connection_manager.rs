@@ -1151,7 +1151,8 @@ async fn export_connections_to_file(
         profiles: entries,
     };
     let bytes = serde_json::to_vec_pretty(&file)?;
-    tokio::fs::write(path, bytes).await?;
+    tokio::task::spawn_blocking(move || db_common::atomic_file::replace(&path, &bytes))
+        .await.map_err(|error| AppError::internal(error.to_string()))??;
     Ok(file.profiles.len())
 }
 

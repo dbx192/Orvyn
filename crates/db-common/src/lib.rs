@@ -25,7 +25,7 @@ pub mod validation;
 
 pub use bytes::{base64_preview, human_bytes};
 pub use cancellation::QueryCancellation;
-pub use capabilities::{ConnectorCapabilities, ExtraParamField, ExtraParamKind, SupportLevel};
+pub use capabilities::{ConnectorCapabilities, MetadataCapabilities, ExtraParamField, ExtraParamKind, SupportLevel};
 pub use connection::{
     unsupported_kind, ConnectionProfile, ConnectionProfileBuilder, ConnectionSecurity,
     ConnectionStatus, ConnectionTestReport, CredentialRef, DataSourceKind, PasswordUpdate, SslMode,

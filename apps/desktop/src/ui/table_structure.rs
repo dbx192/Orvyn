@@ -274,7 +274,7 @@ fn save_local_ddl(table: &str, title: &str, sql: &str) -> Result<PathBuf, String
         kind,
         sanitize_filename(&name)
     ));
-    fs::write(&path, sql.as_bytes()).map_err(|error| error.to_string())?;
+    db_common::atomic_file::replace(&path, sql.as_bytes()).map_err(|error| error.to_string())?;
     Ok(path)
 }
 
@@ -1135,7 +1135,7 @@ impl TableStructureView {
                 ui.separator();
                 if ui
                     .add_enabled(
-                        self.details_loaded && !self.columns.is_empty(),
+                        self.details_loaded && !self.columns.is_empty() && self.kind.metadata_capabilities().indexes,
                         Button::new(tr("Add Index")),
                     )
                     .clicked()
@@ -1144,7 +1144,7 @@ impl TableStructureView {
                 }
                 if ui
                     .add_enabled(
-                        self.details_loaded && !self.columns.is_empty(),
+                        self.details_loaded && !self.columns.is_empty() && self.kind.metadata_capabilities().foreign_keys,
                         Button::new(tr("Add FK")),
                     )
                     .clicked()
@@ -1222,33 +1222,20 @@ impl TableStructureView {
     }
 
     fn tabs(&mut self, ui: &mut Ui) {
+        let support = self.kind.metadata_capabilities();
+        let tabs = [
+            (StructureTab::Columns, true, format!("{} {}", tr("Columns"), self.columns.len())),
+            (StructureTab::Indexes, support.indexes, format!("{} {}", tr("Indexes"), self.indexes.len())),
+            (StructureTab::ForeignKeys, support.foreign_keys, format!("{} {}", tr("Foreign Keys"), self.foreign_keys.len())),
+            (StructureTab::Triggers, support.triggers, format!("{} {}", tr("Triggers"), self.triggers.len())),
+            (StructureTab::Functions, support.routines, format!("{} {}", tr("Functions"), self.functions.len())),
+            (StructureTab::Ddl, true, tr("DDL")),
+        ];
+        if tabs.iter().any(|(tab, enabled, _)| *tab == self.active_tab && !enabled) { self.active_tab = StructureTab::Columns; }
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(
-                &mut self.active_tab,
-                StructureTab::Columns,
-                format!("{} {}", tr("Columns"), self.columns.len()),
-            );
-            ui.selectable_value(
-                &mut self.active_tab,
-                StructureTab::Indexes,
-                format!("{} {}", tr("Indexes"), self.indexes.len()),
-            );
-            ui.selectable_value(
-                &mut self.active_tab,
-                StructureTab::ForeignKeys,
-                format!("{} {}", tr("Foreign Keys"), self.foreign_keys.len()),
-            );
-            ui.selectable_value(
-                &mut self.active_tab,
-                StructureTab::Triggers,
-                format!("{} {}", tr("Triggers"), self.triggers.len()),
-            );
-            ui.selectable_value(
-                &mut self.active_tab,
-                StructureTab::Functions,
-                format!("{} {}", tr("Functions"), self.functions.len()),
-            );
-            ui.selectable_value(&mut self.active_tab, StructureTab::Ddl, tr("DDL"));
+            for (tab, enabled, label) in tabs {
+                ui.add_enabled_ui(enabled, |ui| { ui.selectable_value(&mut self.active_tab, tab, label); });
+            }
         });
     }
 
