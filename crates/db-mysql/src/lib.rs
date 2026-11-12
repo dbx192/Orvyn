@@ -613,7 +613,9 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
             connection = pool.acquire() => connection.map_err(mysql_connection_error)?,
         };
         let id: u64 = sqlx::query_scalar("SELECT CONNECTION_ID()")
-            .fetch_one(&mut *connection).await.map_err(mysql_query_error)?;
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(mysql_query_error)?;
         let (result, cancelled) = {
             let execution = execute_mysql_statements_on_connection(&mut connection, statements);
             tokio::pin!(execution);
@@ -625,7 +627,7 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
                     let control = async {
                         use sqlx::Connection;
                         let mut control = MySqlConnection::connect_with(&pool.connect_options()).await?;
-                        sqlx::raw_sql(&format!("KILL QUERY {id}")).execute(&mut control).await?;
+                        sqlx::query(&format!("KILL QUERY {id}")).execute(&mut control).await?;
                         Ok::<(), sqlx::Error>(())
                     };
                     let sent = tokio::time::timeout(std::time::Duration::from_secs(5), control).await;
@@ -638,7 +640,9 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
                 }
             }
         };
-        if cancelled { connection.close_on_drop(); }
+        if cancelled {
+            connection.close_on_drop();
+        }
         result
     }
 

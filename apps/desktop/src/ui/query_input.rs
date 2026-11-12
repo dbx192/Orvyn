@@ -450,6 +450,30 @@ mod tests {
     }
 
     #[test]
+    fn mapping_completion_preserves_nested_field_names_and_existing_values() {
+        let mapping = serde_json::json!({"index":{"mappings":{"properties":{
+            "user":{"properties":{"name":{"type":"text","fields":{"keyword":{"type":"keyword"}}}}}
+        }}}});
+        let fields = mapping_fields(&mapping);
+        assert!(fields.contains(&("user.name.keyword".into(), "keyword".into())));
+        for text in [r#"{"user.na": 1}"#, r#"{"exists":{"field":"user.na"}}"#] {
+            let cursor = text.find("user.na").unwrap() + "user.na".len();
+            let mut state = Completion::default();
+            add_field_candidates(text, cursor, &mut state, &fields);
+            let insert = &state
+                .items
+                .iter()
+                .find(|(label, _)| label == "user.name (text)")
+                .unwrap()
+                .1;
+            let mut result = text.to_string();
+            result.replace_range(state.start..state.end, insert);
+            assert!(serde_json::from_str::<serde_json::Value>(&result).is_ok());
+            assert!(result.contains("user.name"));
+        }
+    }
+
+    #[test]
     fn popup_survives_idle_frames_and_accepts_without_inserting_tab_or_newline() {
         for accept in [Key::Tab, Key::Enter] {
             let ctx = egui::Context::default();

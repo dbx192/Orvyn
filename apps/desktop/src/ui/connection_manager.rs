@@ -1152,7 +1152,8 @@ async fn export_connections_to_file(
     };
     let bytes = serde_json::to_vec_pretty(&file)?;
     tokio::task::spawn_blocking(move || db_common::atomic_file::replace(&path, &bytes))
-        .await.map_err(|error| AppError::internal(error.to_string()))??;
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))??;
     Ok(file.profiles.len())
 }
 
@@ -1405,6 +1406,36 @@ mod tests {
             Vec::new(),
         );
         (manager, secrets_path)
+    }
+
+    #[tokio::test]
+    async fn default_export_omits_extra_secrets_and_explicit_export_resolves_them() {
+        let (manager, secrets_path) = manager();
+        let mut connection =
+            ConnectionProfile::builder(DataSourceKind::Elasticsearch, "export secret")
+                .host("localhost")
+                .build()
+                .unwrap();
+        connection.set_extra_param("es_api_key", "fixture-api-secret");
+        manager
+            .create_profile(connection, PasswordUpdate::Clear)
+            .await
+            .unwrap();
+        let path =
+            std::env::temp_dir().join(format!("orvyn-secret-export-{}.json", ConnectionId::new()));
+        export_connections_to_file(manager.clone(), path.clone(), None, false)
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("fixture-api-secret"));
+        assert!(!text.contains("extra_secret_refs"));
+        export_connections_to_file(manager, path.clone(), None, true)
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("fixture-api-secret"));
+        std::fs::remove_file(path).unwrap();
+        let _ = std::fs::remove_file(secrets_path);
     }
 
     #[test]

@@ -478,6 +478,37 @@ mod tests {
     use db_common::DataSourceKind;
 
     #[tokio::test]
+    async fn separate_file_store_instances_do_not_lose_concurrent_updates() {
+        let directory =
+            std::env::temp_dir().join(format!("orvyn-store-test-{}", ConnectionId::new()));
+        let path = directory.join("profiles.json");
+        let mut jobs = Vec::new();
+        for index in 0..32 {
+            let store = FileConnectionProfileStore::new(&path);
+            jobs.push(tokio::spawn(async move {
+                let profile =
+                    ConnectionProfile::builder(DataSourceKind::Redis, format!("Profile {index}"))
+                        .host("localhost")
+                        .build()
+                        .unwrap();
+                store.upsert(profile).await.unwrap();
+            }));
+        }
+        for job in jobs {
+            job.await.unwrap();
+        }
+        assert_eq!(
+            FileConnectionProfileStore::new(path)
+                .list()
+                .await
+                .unwrap()
+                .len(),
+            32
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn upserts_and_lists_profile() {
         let store = MemoryConnectionProfileStore::default();
         let profile = ConnectionProfile::builder(DataSourceKind::Redis, "redis")

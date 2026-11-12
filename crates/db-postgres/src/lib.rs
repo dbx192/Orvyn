@@ -572,12 +572,12 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
     ) -> Result<Vec<QueryResult>> {
         let pool = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return Err(AppError::validation("Query cancelled before connection acquisition")),
+            _ = cancellation.cancelled() => return Err(AppError::new(db_common::ErrorKind::Cancelled, "Query cancelled before connection acquisition")),
             pool = self.pool_for(profile, password, pool_config) => pool?,
         };
         let pooled = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return Err(AppError::validation("Query cancelled before execution")),
+            _ = cancellation.cancelled() => return Err(AppError::new(db_common::ErrorKind::Cancelled, "Query cancelled before execution")),
             pooled = pool.acquire() => pooled?,
         };
         let result = {
@@ -596,13 +596,13 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
                     };
                     let sent = tokio::time::timeout(std::time::Duration::from_secs(5), cancel).await;
                     if !matches!(sent, Ok(Ok(()))) {
-                        return Err(AppError::validation("Client cancelled; PostgreSQL server cancellation unconfirmed; connection discarded"));
+                        return Err(AppError::new(db_common::ErrorKind::Cancelled, "Client cancelled; PostgreSQL server cancellation unconfirmed; connection discarded"));
                     }
                     // Keep the connection reserved until the server finishes the cancelled request.
                     if tokio::time::timeout(std::time::Duration::from_secs(10), &mut execution).await.is_err() {
-                        return Err(AppError::validation("Client cancelled; PostgreSQL completion unconfirmed; connection discarded"));
+                        return Err(AppError::new(db_common::ErrorKind::Cancelled, "Client cancelled; PostgreSQL completion unconfirmed; connection discarded"));
                     }
-                    Err(AppError::validation("Query cancelled; PostgreSQL request completed"))
+                    Err(AppError::new(db_common::ErrorKind::Cancelled, "Query cancelled; PostgreSQL request completed"))
                 }
             };
             result

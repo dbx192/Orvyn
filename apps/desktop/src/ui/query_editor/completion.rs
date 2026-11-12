@@ -1,6 +1,61 @@
 //! SQL completion context, metadata selection and popup interaction.
 use super::*;
 
+fn keyword_suggestions(kind: DataSourceKind) -> impl Iterator<Item = &'static str> {
+    let dialect: &[&str] = match kind.protocol_family() {
+        db_common::ProtocolFamily::PostgreSql => &[
+            "RETURNING",
+            "ILIKE",
+            "DISTINCT ON",
+            "ON CONFLICT",
+            "JSONB_BUILD_OBJECT",
+        ],
+        db_common::ProtocolFamily::MySql => &[
+            "SHOW TABLES",
+            "SHOW CREATE TABLE",
+            "ON DUPLICATE KEY UPDATE",
+            "IFNULL",
+            "GROUP_CONCAT",
+        ],
+        db_common::ProtocolFamily::SqlServer => &[
+            "TOP",
+            "OUTPUT",
+            "CROSS APPLY",
+            "ISNULL",
+            "OFFSET",
+            "FETCH NEXT",
+        ],
+        db_common::ProtocolFamily::Sqlite => &["PRAGMA", "ON CONFLICT", "RETURNING", "IFNULL"],
+        db_common::ProtocolFamily::DuckDb => &["QUALIFY", "EXCLUDE", "UNNEST", "PIVOT", "READ_CSV"],
+        db_common::ProtocolFamily::ClickHouse => {
+            &["PREWHERE", "ARRAY JOIN", "FINAL", "FORMAT", "LIMIT BY"]
+        }
+        _ => &[],
+    };
+    SQL_KEYWORD_SUGGESTIONS
+        .iter()
+        .copied()
+        .chain(dialect.iter().copied())
+}
+
+fn completion_statement(tab: &QueryEditorTab) -> &str {
+    let cursor = tab.cursor_offset.min(tab.sql.len());
+    let mut start = 0;
+    let mut end = tab.sql.len();
+    for token in db_common::highlight_sql(&tab.sql) {
+        if &tab.sql[token.range.start..token.range.end] != ";" {
+            continue;
+        }
+        if token.range.end <= cursor {
+            start = token.range.end;
+        } else {
+            end = token.range.start;
+            break;
+        }
+    }
+    &tab.sql[start..end]
+}
+
 pub(super) fn update_completion_for_tab(tab: &mut QueryEditorTab) {
     if tab.sql.is_empty() {
         tab.completion = CompletionState::default();
@@ -30,7 +85,7 @@ pub(super) fn update_completion_for_tab(tab: &mut QueryEditorTab) {
     match &context {
         CompletionContext::None => {}
         CompletionContext::Keyword => {
-            for keyword in SQL_KEYWORD_SUGGESTIONS {
+            for keyword in keyword_suggestions(tab.kind) {
                 if matches_prefix(keyword, prefix) {
                     items.push(CompletionItem {
                         label: keyword.to_string(),
@@ -54,7 +109,7 @@ pub(super) fn update_completion_for_tab(tab: &mut QueryEditorTab) {
             }
         }
         CompletionContext::Column { qualifier } => {
-            let references = referenced_tables(before);
+            let references = referenced_tables(completion_statement(tab));
             let table_names = completion_column_tables(&references, qualifier.as_deref());
             let mut seen = BTreeSet::new();
             for table_name in table_names {
@@ -83,7 +138,7 @@ pub(super) fn update_completion_for_tab(tab: &mut QueryEditorTab) {
             CompletionContext::Keyword | CompletionContext::Table
         )
     {
-        for keyword in SQL_KEYWORD_SUGGESTIONS {
+        for keyword in keyword_suggestions(tab.kind) {
             if matches_prefix(keyword, prefix)
                 && !items
                     .iter()
@@ -249,6 +304,7 @@ pub(super) fn referenced_tables(sql: &str) -> Vec<CompletionTableRef> {
 
         if !references.iter().any(|reference: &CompletionTableRef| {
             normalize_identifier(&reference.table) == normalize_identifier(&table)
+                && reference.alias == alias
         }) {
             references.push(CompletionTableRef { table, alias });
         }
@@ -280,13 +336,13 @@ pub(super) fn completion_column_tables(
 
 pub(super) fn missing_completion_columns_for_context(
     tab: &QueryEditorTab,
-    before: &str,
+    _before: &str,
     context: &CompletionContext,
 ) -> Vec<String> {
     let CompletionContext::Column { qualifier } = context else {
         return Vec::new();
     };
-    let references = referenced_tables(before);
+    let references = referenced_tables(completion_statement(tab));
     completion_column_tables(&references, qualifier.as_deref())
         .into_iter()
         .filter(|table| {
@@ -559,6 +615,36 @@ mod completion_tests {
             .map(|(index, _)| index)
             .unwrap_or(sql.len());
         completion_context(sql, word_start, &sql[word_start..])
+    }
+
+    #[test]
+    fn select_list_uses_following_from_and_excludes_other_statements() {
+        let profile = ConnectionProfile::builder(DataSourceKind::Sqlite, "completion")
+            .file_path(":memory:")
+            .build()
+            .unwrap();
+        let mut tab = QueryEditorTab::new(&profile);
+        tab.sql = "SELECT * FROM unrelated; SELECT b.na FROM books b".into();
+        tab.cursor_offset = tab.sql.find("b.na").unwrap() + 4;
+        tab.columns_by_table.insert(
+            "books".into(),
+            vec![TableColumn {
+                name: "name".into(),
+                database_type: "TEXT".into(),
+                nullable: true,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            }],
+        );
+        update_completion_for_tab(&mut tab);
+        assert!(tab.completion.items.iter().any(|item| item.label == "name"));
+        assert_eq!(
+            referenced_tables(completion_statement(&tab))[0].table,
+            "books"
+        );
+        assert!(keyword_suggestions(DataSourceKind::PostgreSql).any(|word| word == "ILIKE"));
+        assert!(!keyword_suggestions(DataSourceKind::MySql).any(|word| word == "ILIKE"));
     }
 
     #[test]

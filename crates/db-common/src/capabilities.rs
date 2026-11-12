@@ -213,7 +213,6 @@ impl ConnectorCapabilities {
             notes: Some(notes),
         }
     }
-
 }
 
 /// Metadata actually exposed by the registered connector, not server feature claims.
@@ -233,11 +232,22 @@ impl DataSourceKind {
         let analytic = matches!(self, Self::Doris | Self::SelectDb | Self::StarRocks);
         MetadataCapabilities {
             views: self.is_relational() && !matches!(self, Self::TDengine),
-            indexes: self.is_relational() && !matches!(self, Self::ClickHouse | Self::TDengine) && !analytic,
-            foreign_keys: matches!(family, ProtocolFamily::PostgreSql | ProtocolFamily::Sqlite | ProtocolFamily::DuckDb | ProtocolFamily::Odbc) || (matches!(family, ProtocolFamily::MySql) && !analytic),
-            triggers: matches!(family, ProtocolFamily::PostgreSql | ProtocolFamily::Sqlite) || (matches!(family, ProtocolFamily::MySql) && !analytic),
-            routines: matches!(family, ProtocolFamily::PostgreSql | ProtocolFamily::DuckDb) || (matches!(family, ProtocolFamily::MySql) && !analytic),
-            routine_definitions: matches!(family, ProtocolFamily::PostgreSql) || (matches!(family, ProtocolFamily::MySql) && !analytic),
+            indexes: self.is_relational()
+                && !matches!(self, Self::ClickHouse | Self::TDengine)
+                && !analytic,
+            foreign_keys: matches!(
+                family,
+                ProtocolFamily::PostgreSql
+                    | ProtocolFamily::Sqlite
+                    | ProtocolFamily::DuckDb
+                    | ProtocolFamily::Odbc
+            ) || (matches!(family, ProtocolFamily::MySql) && !analytic),
+            triggers: matches!(family, ProtocolFamily::PostgreSql | ProtocolFamily::Sqlite)
+                || (matches!(family, ProtocolFamily::MySql) && !analytic),
+            routines: matches!(family, ProtocolFamily::PostgreSql | ProtocolFamily::DuckDb)
+                || (matches!(family, ProtocolFamily::MySql) && !analytic),
+            routine_definitions: matches!(family, ProtocolFamily::PostgreSql)
+                || (matches!(family, ProtocolFamily::MySql) && !analytic),
         }
     }
 
@@ -302,7 +312,9 @@ impl DataSourceKind {
             Self::TDengine => ConnectorCapabilities {
                 support: SupportLevel::Restricted,
                 transactions: false,
-                notes: Some("TDengine REST SQL and table/stable metadata; no transactions or views"),
+                notes: Some(
+                    "TDengine REST SQL and table/stable metadata; no transactions or views",
+                ),
                 ..ConnectorCapabilities::full_relational(ProtocolFamily::Tdengine)
             },
 
@@ -354,14 +366,12 @@ impl DataSourceKind {
                 "via ODBC; requires an Oracle Instant Client ODBC driver",
                 true,
             ),
-            Self::Dm => ConnectorCapabilities::odbc_bridge(
-                "via ODBC; requires the DM ODBC DRIVER",
-                true,
-            ),
-            Self::XuguDb => ConnectorCapabilities::odbc_bridge(
-                "via ODBC; requires the Xugu ODBC driver",
-                true,
-            ),
+            Self::Dm => {
+                ConnectorCapabilities::odbc_bridge("via ODBC; requires the DM ODBC DRIVER", true)
+            }
+            Self::XuguDb => {
+                ConnectorCapabilities::odbc_bridge("via ODBC; requires the Xugu ODBC driver", true)
+            }
         }
     }
 }

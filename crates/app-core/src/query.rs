@@ -480,13 +480,35 @@ impl QueryService {
         let transaction_id = execution_id;
         let pool_config = self.pool_config;
 
-        executor
-            .begin_transaction(&profile, password.as_deref(), transaction_id, pool_config)
-            .await?;
-
-        let execute_result = executor
-            .execute_in_transaction(transaction_id, &execution_plan.execution_statements)
-            .await;
+        let cancellation = db_common::QueryCancellation::default();
+        {
+            let mut state = self.state.lock().await;
+            if state.running.contains_key(&request.tab_id) {
+                return Err(AppError::validation(
+                    "query tab already has a running execution",
+                ));
+            }
+            state.running.insert(request.tab_id, cancellation.clone());
+        }
+        let execute_result = async {
+            executor.begin_transaction(&profile, password.as_deref(), transaction_id, pool_config).await?;
+            let operation = executor.execute_in_transaction_cancellable(transaction_id, &execution_plan.execution_statements, cancellation.clone());
+            tokio::pin!(operation);
+            tokio::select! {
+                result = &mut operation => result,
+                _ = tokio::time::sleep(request.timeout()) => {
+                    cancellation.cancel();
+                    let _ = operation.await;
+                    Err(AppError::new(ErrorKind::Timeout, "Transactional query timed out; cancellation requested"))
+                }
+            }
+        }.await;
+        self.state.lock().await.running.remove(&request.tab_id);
+        let execute_result = if cancellation.is_cancelled() && execute_result.is_ok() {
+            Err(cancellation.error())
+        } else {
+            execute_result
+        };
 
         let results = match execute_result {
             Ok(results) => {
@@ -1119,7 +1141,43 @@ fn push_history(history: &mut VecDeque<QueryHistoryEntry>, entry: QueryHistoryEn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use db_common::QueryExecutionRequest;
+    use db_common::{QueryExecutionRequest, ConnectionProfile};
+
+    #[tokio::test]
+    async fn read_only_validation_covers_regular_and_transactional_execution() {
+        let profile = ConnectionProfile::builder(DataSourceKind::Sqlite, "read-only test")
+            .file_path(":memory:")
+            .read_only(true)
+            .build()
+            .unwrap();
+        let manager = ConnectionManager::new(
+            Arc::new(crate::storage::MemoryConnectionProfileStore::default()),
+            Arc::new(secure_store::EncryptedFileStore::new(
+                std::env::temp_dir().join(format!("orvyn-readonly-{}", QueryId::new())),
+                "test-only",
+            )),
+            vec![],
+        );
+        let profile = manager
+            .create_profile(profile, db_common::PasswordUpdate::Clear)
+            .await
+            .unwrap();
+        let service = QueryService::with_default_executors(manager);
+        for sql in [
+            "WITH x AS (SELECT 1) DELETE FROM t",
+            "EXPLAIN ANALYZE DELETE FROM t",
+            "PRAGMA query_only=OFF",
+        ] {
+            let request = QueryExecutionRequest::all(QueryId::new(), profile.id, sql);
+            let error = service.execute(request.clone(), None).await.unwrap_err();
+            assert!(error.message.contains("read-only"));
+            let error = service
+                .execute_transactional(request, None)
+                .await
+                .unwrap_err();
+            assert!(error.message.contains("read-only"));
+        }
+    }
 
     #[test]
     fn selects_current_statement() {

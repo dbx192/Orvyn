@@ -123,6 +123,7 @@ enum QuerySideTab {
 }
 
 struct QueryEditorTab {
+    kind: DataSourceKind,
     id: QueryId,
     title: String,
     sql: String,
@@ -157,6 +158,7 @@ impl QueryEditorTab {
         Self {
             id: QueryId::new(),
             title: next_tab_title(&profile.name),
+            kind: profile.kind,
             sql: String::new(),
             cursor_offset: 0,
             selection: None,

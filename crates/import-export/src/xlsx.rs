@@ -78,7 +78,19 @@ impl XlsxWriter {
         Ok(())
     }
     pub fn finish(&mut self) -> Result<()> {
-        self.workbook.save(&self.path).map_err(error)
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        self.workbook.save(temporary.path()).map_err(error)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&self.path).map_err(|e| e.error)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
     }
 }
 

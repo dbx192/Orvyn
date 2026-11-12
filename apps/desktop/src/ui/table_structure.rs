@@ -11,7 +11,7 @@ use eframe::egui::{
     self, vec2, Align, Button, Color32, ComboBox, Frame, Grid, Layout, Margin, RichText,
     ScrollArea, TextEdit, TextStyle, Ui, Window,
 };
-use std::{env, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct CreateIndexRequest {
@@ -170,21 +170,7 @@ impl AlterTableRequest {
 }
 
 fn local_ddl_dir() -> PathBuf {
-    env::var_os("ORVYN_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            #[cfg(windows)]
-            {
-                env::var_os("APPDATA").map(|path| PathBuf::from(path).join("Orvyn"))
-            }
-            #[cfg(not(windows))]
-            {
-                None
-            }
-        })
-        .or_else(|| env::var_os("XDG_CONFIG_HOME").map(|path| PathBuf::from(path).join("orvyn")))
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join("ddl")
+    crate::config::data_dir().join("ddl")
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -208,9 +194,20 @@ fn parse_ddl_object(sql: &str) -> Option<(ObjectKind, String)> {
     {
         kind_index += 2;
     }
+    // SHOW CREATE in MySQL can include a DEFINER before the routine kind.
+    if tokens
+        .get(kind_index)?
+        .to_ascii_lowercase()
+        .starts_with("definer")
+    {
+        kind_index += 1;
+        if tokens.get(kind_index) == Some(&"=") {
+            kind_index += 2;
+        }
+    }
     let kind = match tokens.get(kind_index)?.to_ascii_lowercase().as_str() {
         "trigger" => ObjectKind::Trigger,
-        "function" => ObjectKind::Function,
+        "function" | "procedure" => ObjectKind::Function,
         _ => return None,
     };
     let name = tokens
@@ -1135,7 +1132,9 @@ impl TableStructureView {
                 ui.separator();
                 if ui
                     .add_enabled(
-                        self.details_loaded && !self.columns.is_empty() && self.kind.metadata_capabilities().indexes,
+                        self.details_loaded
+                            && !self.columns.is_empty()
+                            && self.kind.metadata_capabilities().indexes,
                         Button::new(tr("Add Index")),
                     )
                     .clicked()
@@ -1144,7 +1143,9 @@ impl TableStructureView {
                 }
                 if ui
                     .add_enabled(
-                        self.details_loaded && !self.columns.is_empty() && self.kind.metadata_capabilities().foreign_keys,
+                        self.details_loaded
+                            && !self.columns.is_empty()
+                            && self.kind.metadata_capabilities().foreign_keys,
                         Button::new(tr("Add FK")),
                     )
                     .clicked()
@@ -1224,17 +1225,44 @@ impl TableStructureView {
     fn tabs(&mut self, ui: &mut Ui) {
         let support = self.kind.metadata_capabilities();
         let tabs = [
-            (StructureTab::Columns, true, format!("{} {}", tr("Columns"), self.columns.len())),
-            (StructureTab::Indexes, support.indexes, format!("{} {}", tr("Indexes"), self.indexes.len())),
-            (StructureTab::ForeignKeys, support.foreign_keys, format!("{} {}", tr("Foreign Keys"), self.foreign_keys.len())),
-            (StructureTab::Triggers, support.triggers, format!("{} {}", tr("Triggers"), self.triggers.len())),
-            (StructureTab::Functions, support.routines, format!("{} {}", tr("Functions"), self.functions.len())),
+            (
+                StructureTab::Columns,
+                true,
+                format!("{} {}", tr("Columns"), self.columns.len()),
+            ),
+            (
+                StructureTab::Indexes,
+                support.indexes,
+                format!("{} {}", tr("Indexes"), self.indexes.len()),
+            ),
+            (
+                StructureTab::ForeignKeys,
+                support.foreign_keys,
+                format!("{} {}", tr("Foreign Keys"), self.foreign_keys.len()),
+            ),
+            (
+                StructureTab::Triggers,
+                support.triggers,
+                format!("{} {}", tr("Triggers"), self.triggers.len()),
+            ),
+            (
+                StructureTab::Functions,
+                support.routines,
+                format!("{} {}", tr("Functions"), self.functions.len()),
+            ),
             (StructureTab::Ddl, true, tr("DDL")),
         ];
-        if tabs.iter().any(|(tab, enabled, _)| *tab == self.active_tab && !enabled) { self.active_tab = StructureTab::Columns; }
+        if tabs
+            .iter()
+            .any(|(tab, enabled, _)| *tab == self.active_tab && !enabled)
+        {
+            self.active_tab = StructureTab::Columns;
+        }
         ui.horizontal_wrapped(|ui| {
             for (tab, enabled, label) in tabs {
-                ui.add_enabled_ui(enabled, |ui| { ui.selectable_value(&mut self.active_tab, tab, label); });
+                ui.add_enabled_ui(enabled, |ui| {
+                    ui.selectable_value(&mut self.active_tab, tab, label);
+                });
             }
         });
     }
@@ -3024,7 +3052,19 @@ impl TableStructureView {
             remove_local_ddl(&self.table, drop.kind, &drop.name);
             match drop.kind {
                 ObjectKind::Trigger => self.triggers.retain(|item| item.name != drop.name),
-                ObjectKind::Function => self.functions.retain(|item| item.name != drop.name),
+                ObjectKind::Function => {
+                    self.functions = self
+                        .functions
+                        .iter()
+                        .filter(|item| {
+                            drop.sql.as_ref().map_or_else(
+                                || item.name != drop.name,
+                                |sql| self.routine_drop_sql(item) != *sql,
+                            )
+                        })
+                        .cloned()
+                        .collect();
+                }
             }
             let sql = drop
                 .sql
@@ -3373,6 +3413,44 @@ fn type_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_mysql_procedure_with_definer() {
+        assert_eq!(
+            parse_ddl_object("CREATE DEFINER=`root`@`localhost` PROCEDURE report() SELECT 1"),
+            Some((ObjectKind::Function, "report".into()))
+        );
+        assert_eq!(
+            parse_ddl_object("CREATE PROCEDURE report() SELECT 1"),
+            Some((ObjectKind::Function, "report".into()))
+        );
+    }
+
+    #[test]
+    fn routine_drop_preserves_postgres_identity_and_kind() {
+        let mut view = structure(Vec::new());
+        view.kind = DataSourceKind::PostgreSql;
+        view.schema = Some("public".into());
+        let mut routine = DatabaseFunction {
+            name: "report".into(),
+            return_type: None,
+            language: None,
+            kind: "FUNCTION".into(),
+            definition: None,
+            identity_arguments: Some("integer".into()),
+        };
+        assert_eq!(
+            view.routine_drop_sql(&routine),
+            "DROP FUNCTION IF EXISTS \"public\".\"report\"(integer)"
+        );
+        routine.kind = "PROCEDURE".into();
+        assert_eq!(
+            view.routine_drop_sql(&routine),
+            "DROP PROCEDURE IF EXISTS \"public\".\"report\"(integer)"
+        );
+        routine.identity_arguments = Some("text".into());
+        assert!(view.routine_drop_sql(&routine).ends_with("(text)"));
+    }
 
     fn column(name: &str) -> TableColumn {
         TableColumn {

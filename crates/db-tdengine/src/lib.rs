@@ -153,10 +153,22 @@ fn decode_result(sql: &str, json: &serde_json::Value) -> Result<QueryResult> {
             let name = column.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
                 AppError::new(ErrorKind::Serialization, "invalid TDengine column metadata")
             })?;
-            result.columns.push(Column::new(
+            let mut output = Column::new(
                 name,
                 column.get(1).map(ToString::to_string).unwrap_or_default(),
-            ));
+            );
+            output.logical_type = match column.get(1).and_then(|v| v.as_u64()) {
+                Some(1) => db_common::LogicalType::Bool,
+                Some(2..=5) => db_common::LogicalType::Int,
+                Some(6 | 7) => db_common::LogicalType::Float,
+                Some(8 | 10 | 16) => db_common::LogicalType::Text,
+                Some(9) => db_common::LogicalType::DateTime,
+                Some(11..=14) => db_common::LogicalType::UInt,
+                Some(15) => db_common::LogicalType::Json,
+                Some(17) => db_common::LogicalType::Bytes,
+                _ => db_common::LogicalType::Unknown,
+            };
+            result.columns.push(output);
         }
     } else if let Some(head) = json.get("head").and_then(|v| v.as_array()) {
         result.columns = head
@@ -191,10 +203,13 @@ fn decode_result(sql: &str, json: &serde_json::Value) -> Result<QueryResult> {
             ));
         }
     }
-    result.affected_rows = json
-        .get("rows")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(result.rows.len() as u64);
+    result.affected_rows = if result.columns.is_empty() {
+        json.get("rows")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default()
+    } else {
+        0
+    };
     Ok(result)
 }
 
@@ -416,6 +431,8 @@ mod tests {
             "data":[[18446744073709551615u64,"hello",null]],"rows":1});
         let result = decode_result("SELECT * FROM t", &json).unwrap();
         assert_eq!(result.columns[0].name, "n");
+        assert_eq!(result.columns[0].logical_type, db_common::LogicalType::UInt);
+        assert_eq!(result.affected_rows, 0);
         assert_eq!(result.rows[0].values[0], CellValue::UInt(u64::MAX));
         assert_eq!(result.rows[0].values[2], CellValue::Null);
     }
