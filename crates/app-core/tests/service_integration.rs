@@ -10,7 +10,6 @@ fn profile(kind: DataSourceKind, prefix: &str) -> ConnectionProfile {
         .expect("Set the integration service host explicitly");
     let mut profile = ConnectionProfile::builder(kind, "CI service integration")
         .host(host)
-        .username(std::env::var(format!("{prefix}_USER")).unwrap_or_else(|_| "ci".into()))
         .build()
         .unwrap();
     if let Ok(port) = std::env::var(format!("{prefix}_PORT")) {
