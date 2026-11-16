@@ -2145,7 +2145,7 @@ impl TableEditor {
                 ui.make_persistent_id(("temporal_picker_button", row, column_index)),
                 Sense::click(),
             )
-            .on_hover_text("Open date/time picker");
+            .on_hover_text(tr("Open date/time picker"));
         if button_response.hovered() {
             ui.painter()
                 .rect_filled(button_rect, 0.0, ui.visuals().widgets.hovered.bg_fill);
@@ -2208,7 +2208,7 @@ impl TableEditor {
                     ui.horizontal(|ui| {
                         if ui
                             .small_button("<")
-                            .on_hover_text("Previous month")
+                            .on_hover_text(tr("Previous month"))
                             .clicked()
                         {
                             picker.previous_month();
@@ -2219,7 +2219,7 @@ impl TableEditor {
                                 ui.strong(format!("{} - {:02}", picker.year, picker.month));
                             },
                         );
-                        if ui.small_button(">").on_hover_text("Next month").clicked() {
+                        if ui.small_button(">").on_hover_text(tr("Next month")).clicked() {
                             picker.next_month();
                         }
                     });
@@ -2232,7 +2232,7 @@ impl TableEditor {
                         ui.separator();
                     }
                     ui.horizontal(|ui| {
-                        ui.label("Time");
+                        ui.label(tr("Time"));
                         ui.add_sized(
                             [36.0, 22.0],
                             DragValue::new(&mut picker.hour)
@@ -2261,14 +2261,14 @@ impl TableEditor {
                 ui.horizontal(|ui| {
                     if ui
                         .button("Current")
-                        .on_hover_text("Use the current date and time")
+                        .on_hover_text(tr("Use the current date and time"))
                         .clicked()
                     {
                         picker.set_now();
                     }
                     if ui
                         .button("Clear")
-                        .on_hover_text("Set this value to NULL")
+                        .on_hover_text(tr("Set this value to NULL"))
                         .clicked()
                     {
                         set_null = true;

@@ -834,7 +834,7 @@ impl RedisBrowserUi {
                 ui.label(RichText::new("CLI").strong().color(style.text));
                 if self.cli_running {
                     ui.add(Spinner::new());
-                    ui.label(RichText::new("Running...").color(style.muted));
+                    ui.label(RichText::new(tr("Running...")).color(style.muted));
                 }
             });
             ui.add_space(6.0);
@@ -891,13 +891,13 @@ impl RedisBrowserUi {
                 } else if !self.status.is_empty() {
                     ui.label(RichText::new(&self.status).small().color(style.muted));
                 } else {
-                    ui.label(RichText::new("Ready").small().color(style.muted));
+                    ui.label(RichText::new(tr("Ready")).small().color(style.muted));
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new("None").small().color(style.muted));
+                    ui.label(RichText::new(tr("None")).small().color(style.muted));
                     ui.separator();
-                    ui.label(RichText::new("Raw").small().color(style.muted));
+                    ui.label(RichText::new(tr("Raw")).small().color(style.muted));
                 });
             });
         });
@@ -1134,7 +1134,7 @@ impl RedisBrowserUi {
         if self.is_loading {
             ui.horizontal(|ui| {
                 ui.add(Spinner::new());
-                ui.label(RichText::new("Loading...").color(style.muted));
+                ui.label(RichText::new(tr("Loading...")).color(style.muted));
             });
         } else if self.has_more {
             if ui.button(tr("Load More")).clicked() {
@@ -1151,7 +1151,7 @@ impl RedisBrowserUi {
                 if self.keys.is_empty() && !self.is_loading {
                     ui.add_space(16.0);
                     ui.centered_and_justified(|ui| {
-                        ui.label(RichText::new("No keys found").color(style.muted).italics());
+                        ui.label(RichText::new(tr("No keys found")).color(style.muted).italics());
                     });
                     return;
                 }
@@ -1168,7 +1168,7 @@ impl RedisBrowserUi {
                 if self.is_loading {
                     ui.horizontal(|ui| {
                         ui.add(Spinner::new());
-                        ui.label(RichText::new("Loading...").color(style.muted));
+                        ui.label(RichText::new(tr("Loading...")).color(style.muted));
                     });
                 } else if self.has_more {
                     if ui.button(tr("Load More")).clicked() {
@@ -1615,7 +1615,7 @@ impl RedisBrowserUi {
             ValueDisplay::Loading => {
                 ui.horizontal(|ui| {
                     ui.add(Spinner::new());
-                    ui.label(RichText::new("Loading value...").color(style.muted));
+                    ui.label(RichText::new(tr("Loading value...")).color(style.muted));
                 });
             }
             ValueDisplay::TooLarge {
@@ -1672,10 +1672,10 @@ impl RedisBrowserUi {
                 self.render_zset_value(ui, style, members);
             }
             RedisValue::Stream(_) => {
-                ui.label(RichText::new("(stream type not fully supported)").color(style.muted));
+                ui.label(RichText::new(tr("(stream type not fully supported)")).color(style.muted));
             }
             RedisValue::None => {
-                ui.label(RichText::new("(key does not exist)").color(style.muted));
+                ui.label(RichText::new(tr("(key does not exist)")).color(style.muted));
             }
         }
     }
@@ -1796,7 +1796,7 @@ impl RedisBrowserUi {
             .inner_margin(Margin::symmetric(8.0, 5.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Insert Row").strong().color(style.text));
+                    ui.label(RichText::new(tr("Insert Row")).strong().color(style.text));
                     ui.add(
                         TextEdit::singleline(&mut self.hash_new_field)
                             .desired_width(150.0)
@@ -2148,7 +2148,7 @@ impl RedisBrowserUi {
                             .desired_width(220.0)
                             .hint_text("Filter value"),
                     );
-                    ui.label(RichText::new("Full match").small().color(style.muted));
+                    ui.label(RichText::new(tr("Full match")).small().color(style.muted));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!("{total} {noun}"))
@@ -2356,10 +2356,10 @@ impl RedisBrowserUi {
                     key_name,
                     human_bytes(size as u64)
                 ));
-                ui.label("Loading large values may:");
-                ui.label("- Use significant memory");
-                ui.label("- Block the UI temporarily");
-                ui.label("- Display slowly");
+                ui.label(tr("Loading large values may:"));
+                ui.label(format!("- {}", tr("Use significant memory")));
+                ui.label(format!("- {}", tr("Block the UI temporarily")));
+                ui.label(format!("- {}", tr("Display slowly")));
                 ui.horizontal(|ui| {
                     if ui.button(tr("Load Anyway")).clicked() {
                         self.load_key_value_full(key_name.clone());

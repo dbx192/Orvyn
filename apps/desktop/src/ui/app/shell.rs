@@ -663,7 +663,7 @@ fn close_menu_item(
     let can_close = !targets.is_empty() && !targets.iter().any(|id| dirty_tabs.contains(id));
     let response = ui.add_enabled(can_close, Button::new(label));
     let response = if !targets.is_empty() && !can_close {
-        response.on_hover_text("Save or rollback changes before closing")
+        response.on_hover_text(tr("Save or rollback changes before closing"))
     } else {
         response
     };

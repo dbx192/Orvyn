@@ -1273,7 +1273,7 @@ impl QueryEditor {
                         });
                     export_request = Some((query_result, ExportFormat::Json));
                 }
-                if ui.button("Export XLSX").clicked() {
+                if ui.button(tr("Export XLSX")).clicked() {
                     let query_result = result
                         .grid
                         .as_ref()
@@ -2160,8 +2160,8 @@ impl QueryEditor {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("This will execute every statement in the current workspace.");
-                    ui.label("Default execution runs only the current statement.");
+                    ui.label(tr("This will execute every statement in the current workspace."));
+                    ui.label(tr("Default execution runs only the current statement."));
                     if let Some(tab) = self.active_tab.and_then(|id| self.tabs.get(&id)) {
                         ui.label(
                             RichText::new(format!(

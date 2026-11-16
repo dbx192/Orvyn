@@ -531,7 +531,7 @@ impl ObjectTree {
                         tree_message_row(ui, 1, &format!("Error: {}", error), true);
                         ui.horizontal(|ui| {
                             ui.add_space(TREE_INDENT + TREE_ARROW_WIDTH);
-                            if ui.small_button("Retry").clicked() {
+                            if ui.small_button(tr("Retry")).clicked() {
                                 self.refresh_connection(connection_id);
                             }
                         });
@@ -622,7 +622,7 @@ impl ObjectTree {
                         tree_message_row(ui, depth + 1, &format!("Error: {error}"), true);
                         ui.horizontal(|ui| {
                             ui.add_space(((depth + 1) as f32 * TREE_INDENT) + TREE_ARROW_WIDTH);
-                            if ui.small_button("Retry").clicked() {
+                            if ui.small_button(tr("Retry")).clicked() {
                                 self.load_children(node.clone());
                             }
                         });

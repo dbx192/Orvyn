@@ -557,7 +557,7 @@ impl ImportWizard {
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.stop_on_error, "Stop on first error");
+                ui.checkbox(&mut self.stop_on_error, tr("Stop on first error"));
                 ui.add_space(16.0);
                 ui.label(tr("Batch size:"));
                 ui.add(
@@ -641,14 +641,14 @@ impl ImportWizard {
                 progress.processed,
                 self.preview.as_ref().map_or(0, |p| p.estimated_total_rows)
             ));
-            if ui.button("Cancel import").clicked() {
+            if ui.button(tr("Cancel import")).clicked() {
                 self.cancellation.cancel();
             }
         } else {
             let preview = match &self.preview {
                 Some(p) => p,
                 None => {
-                    ui.label("No data to import.");
+                    ui.label(tr("No data to import."));
                     return;
                 }
             };

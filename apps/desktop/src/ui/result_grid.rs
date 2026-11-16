@@ -307,7 +307,7 @@ impl ResultSetGrid {
                     self.save_export(ExportFormat::Csv, action);
                     ui.close_menu();
                 }
-                if ui.button("Save XLSX").clicked() {
+                if ui.button(tr("Save XLSX")).clicked() {
                     self.save_export(ExportFormat::Xlsx, action);
                     ui.close_menu();
                 }

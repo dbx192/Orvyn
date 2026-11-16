@@ -509,7 +509,7 @@ impl SearchBrowser {
         ui.horizontal(|ui| {
             let pageable = self.kind.is_search() || self.kind.is_document();
             if pageable {
-                ui.label("Page size");
+                ui.label(tr("Page size"));
                 if ui
                     .add_enabled(
                         !self.running,
@@ -541,7 +541,7 @@ impl SearchBrowser {
             if ui
                 .add_enabled(
                     !self.running && !self.result_text.is_empty() && self.export_cell.is_none(),
-                    Button::new("Export current page JSON"),
+                    Button::new(tr("Export current page JSON")),
                 )
                 .clicked()
             {
@@ -571,13 +571,13 @@ impl SearchBrowser {
         });
         if self.kind.is_document() {
             ui.collapsing("MongoDB query syntax", |ui| {
-                ui.label("Use a filter object, or an envelope with operation: find / aggregate / insert / update / delete.");
+                ui.label(tr("Use a filter object, or an envelope with operation: find / aggregate / insert / update / delete."));
                 ui.code(r#"{"operation":"find","filter":{},"sort":{"_id":1},"projection":{"name":1}}"#);
                 ui.code(r#"{"operation":"aggregate","pipeline":[{"$match":{}}]}"#);
                 ui.code(r#"{"operation":"insert","document":{"name":"example"}}"#);
                 ui.code(r#"{"operation":"update","filter":{"name":"example"},"update":{"$set":{"active":true}}}"#);
                 ui.code(r#"{"operation":"delete","filter":{"_id":{"$oid":"507f1f77bcf86cd799439011"}}}"#);
-                ui.label("Update and delete affect one matching document; a non-empty filter is required.");
+                ui.label(tr("Update and delete affect one matching document; a non-empty filter is required."));
             });
         }
         ui.add_space(6.0);

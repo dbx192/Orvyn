@@ -32,19 +32,19 @@ impl DesktopApp {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label("Target table");
+                ui.label(tr("Target table"));
                 ui.add_space(6.0);
                 eframe::egui::Grid::new("connection_import_target_grid")
                     .num_columns(2)
                     .spacing(vec2(8.0, 6.0))
                     .show(ui, |ui| {
-                        ui.label("Database");
+                        ui.label(tr("Database"));
                         ui.add(TextEdit::singleline(&mut request.database).desired_width(220.0));
                         ui.end_row();
-                        ui.label("Schema");
+                        ui.label(tr("Schema"));
                         ui.add(TextEdit::singleline(&mut request.schema).desired_width(220.0));
                         ui.end_row();
-                        ui.label("Table");
+                        ui.label(tr("Table"));
                         ui.add(TextEdit::singleline(&mut request.table).desired_width(220.0));
                         ui.end_row();
                     });

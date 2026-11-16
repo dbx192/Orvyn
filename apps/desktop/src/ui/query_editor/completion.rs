@@ -504,7 +504,7 @@ pub(super) fn completion_panel(
             Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(260.0);
                 if tab.completion.waiting_for_metadata {
-                    ui.label("Loading column suggestions...");
+                    ui.label(tr("Loading column suggestions..."));
                 }
                 ScrollArea::vertical()
                     .max_height(220.0)

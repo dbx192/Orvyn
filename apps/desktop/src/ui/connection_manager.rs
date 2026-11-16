@@ -1339,7 +1339,7 @@ fn render_extra_param_field(
                     }),
             );
             if secret_refs.contains_key(field.key)
-                && ui.small_button("Clear saved secret").clicked()
+                && ui.small_button(tr("Clear saved secret")).clicked()
             {
                 secret_refs.remove(field.key);
                 entry.clear();
