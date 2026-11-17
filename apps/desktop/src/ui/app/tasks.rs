@@ -990,6 +990,9 @@ impl DesktopApp {
             AlterTableRequest::SetPrimaryKey { .. } => {
                 format!("update primary key on {table}")
             }
+            AlterTableRequest::ReorderColumn { column_name, .. } => {
+                format!("reorder column {column_name} on {table}")
+            }
             AlterTableRequest::DropIndex { index_name, .. } => {
                 format!("drop index {index_name} on {table}")
             }

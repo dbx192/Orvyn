@@ -113,6 +113,18 @@ pub enum AlterTableRequest {
         old_columns: Vec<String>,
         columns: Vec<String>,
     },
+    ReorderColumn {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        column_name: String,
+        column_type: String,
+        nullable: bool,
+        default_value: Option<String>,
+        comment: Option<String>,
+        after: Option<String>,
+    },
     DropIndex {
         connection_id: ConnectionId,
         database: Option<String>,
@@ -142,6 +154,7 @@ impl AlterTableRequest {
             | AlterTableRequest::ModifyColumn { connection_id, .. }
             | AlterTableRequest::RenameColumn { connection_id, .. }
             | AlterTableRequest::SetPrimaryKey { connection_id, .. }
+            | AlterTableRequest::ReorderColumn { connection_id, .. }
             | AlterTableRequest::DropIndex { connection_id, .. }
             | AlterTableRequest::AddForeignKey { connection_id, .. } => *connection_id,
         }
@@ -153,6 +166,7 @@ impl AlterTableRequest {
             | AlterTableRequest::ModifyColumn { table, .. }
             | AlterTableRequest::RenameColumn { table, .. }
             | AlterTableRequest::SetPrimaryKey { table, .. }
+            | AlterTableRequest::ReorderColumn { table, .. }
             | AlterTableRequest::DropIndex { table, .. }
             | AlterTableRequest::AddForeignKey { table, .. } => table,
         }
@@ -165,6 +179,7 @@ impl AlterTableRequest {
             | AlterTableRequest::ModifyColumn { database, .. }
             | AlterTableRequest::RenameColumn { database, .. }
             | AlterTableRequest::SetPrimaryKey { database, .. }
+            | AlterTableRequest::ReorderColumn { database, .. }
             | AlterTableRequest::DropIndex { database, .. }
             | AlterTableRequest::AddForeignKey { database, .. } => database.as_deref(),
         }
@@ -177,6 +192,7 @@ impl AlterTableRequest {
             | AlterTableRequest::ModifyColumn { schema, .. }
             | AlterTableRequest::RenameColumn { schema, .. }
             | AlterTableRequest::SetPrimaryKey { schema, .. }
+            | AlterTableRequest::ReorderColumn { schema, .. }
             | AlterTableRequest::DropIndex { schema, .. }
             | AlterTableRequest::AddForeignKey { schema, .. } => schema.as_deref(),
         }
@@ -589,6 +605,44 @@ pub fn build_alter_table_sql(
                 ));
             }
             Ok(statements.join("; "))
+        }
+        AlterTableRequest::ReorderColumn {
+            table,
+            column_name,
+            column_type,
+            nullable,
+            default_value,
+            comment,
+            after,
+            ..
+        } => {
+            if kind.protocol_family() != ProtocolFamily::MySql {
+                return Err(AppError::unsupported(
+                    "reordering columns is currently supported for MySQL/MariaDB only",
+                ));
+            }
+            let table_sql = qualified_table_sql(
+                dialect.as_ref(),
+                kind,
+                request.database(),
+                request.schema(),
+                table,
+            )?;
+            let definition = build_column_definition(
+                dialect.as_ref(),
+                column_name,
+                column_type,
+                *nullable,
+                default_value.as_deref(),
+            )?;
+            let comment_sql = sql_string_literal(comment.as_deref().unwrap_or(""));
+            let position = match after {
+                Some(previous) => format!(" AFTER {}", quote_id(dialect.as_ref(), previous)?),
+                None => " FIRST".to_string(),
+            };
+            Ok(format!(
+                "ALTER TABLE {table_sql} MODIFY COLUMN {definition} COMMENT {comment_sql}{position}"
+            ))
         }
         AlterTableRequest::DropIndex {
             table, index_name, ..
@@ -1173,6 +1227,59 @@ impl TableStructureView {
                 columns: current_primary_key,
             });
         }
+        let original_order = self
+            .original_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let current_order = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, _column)| {
+                self.col_original_name[index]
+                    .clone()
+                    .unwrap_or_else(|| format!("__new_{index}"))
+            })
+            .collect::<Vec<_>>();
+        if self.kind.protocol_family() == ProtocolFamily::MySql && original_order != current_order {
+            let mut simulated_order = original_order
+                .iter()
+                .filter(|identity| current_order.contains(identity))
+                .cloned()
+                .collect::<Vec<_>>();
+            for identity in &current_order {
+                if !simulated_order.contains(identity) {
+                    simulated_order.push(identity.clone());
+                }
+            }
+            for (target_index, identity) in current_order.iter().enumerate() {
+                if simulated_order.get(target_index) == Some(identity) {
+                    continue;
+                }
+                let Some(source_index) = simulated_order.iter().position(|item| item == identity)
+                else {
+                    continue;
+                };
+                simulated_order.remove(source_index);
+                simulated_order.insert(target_index, identity.clone());
+                let column = &self.columns[target_index];
+                changes.push(AlterTableRequest::ReorderColumn {
+                    connection_id: c,
+                    database: db.clone(),
+                    schema: sc.clone(),
+                    table: tbl.clone(),
+                    column_name: column.name.clone(),
+                    column_type: column.database_type.clone(),
+                    nullable: column.nullable,
+                    default_value: column.default_value.clone(),
+                    comment: column.comment.clone(),
+                    after: target_index
+                        .checked_sub(1)
+                        .map(|previous| self.columns[previous].name.clone()),
+                });
+            }
+        }
         for original in &self.original_columns {
             if !seen.contains(original.name.as_str()) {
                 drops.push(AlterTableRequest::DropColumn {
@@ -1585,10 +1692,17 @@ impl TableStructureView {
         } else if self.editing_name == Some(to as usize) {
             self.editing_name = Some(from);
         }
-        *message = Some(if delta < 0 {
+        let moved = if delta < 0 {
             "Moved column up".to_string()
         } else {
             "Moved column down".to_string()
+        };
+        *message = Some(if self.kind.protocol_family() == ProtocolFamily::MySql {
+            moved
+        } else {
+            format!(
+                "{moved}; column order persistence is currently supported for MySQL/MariaDB only"
+            )
         });
     }
 
@@ -3735,6 +3849,27 @@ mod tests {
         assert_eq!(
             sql,
             "ALTER TABLE `users` DROP PRIMARY KEY; ALTER TABLE `users` ADD PRIMARY KEY (`account_id`)"
+        );
+    }
+
+    #[test]
+    fn generates_mysql_column_reorder_sql() {
+        let req = AlterTableRequest::ReorderColumn {
+            connection_id: ConnectionId::new(),
+            database: None,
+            schema: None,
+            table: "users".to_string(),
+            column_name: "email".to_string(),
+            column_type: "VARCHAR(255)".to_string(),
+            nullable: true,
+            default_value: None,
+            comment: Some("contact".to_string()),
+            after: None,
+        };
+        let sql = build_alter_table_sql(&req, DataSourceKind::MySql).unwrap();
+        assert_eq!(
+            sql,
+            "ALTER TABLE `users` MODIFY COLUMN `email` VARCHAR(255) COMMENT 'contact' FIRST"
         );
     }
 
