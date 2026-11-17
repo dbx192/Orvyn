@@ -1,27 +1,34 @@
 //! Opt-in, read-only tests against disposable CI services. No local config is read.
 use db_common::{
     CellValue, ConnectionPoolConfig, ConnectionProfile, ConnectionTester, DataSourceKind,
-    RelationalQueryExecutor, SearchConnector,
+    RelationalQueryExecutor, SearchConnector, SslMode,
 };
 use std::time::Duration;
 
 fn profile(kind: DataSourceKind, prefix: &str) -> ConnectionProfile {
     let host = std::env::var(format!("{prefix}_HOST"))
         .expect("Set the integration service host explicitly");
-    let mut profile = ConnectionProfile::builder(kind, "CI service integration")
-        .host(host)
-        .build()
-        .unwrap();
+    let mut builder = ConnectionProfile::builder(kind, "CI service integration").host(host);
     if let Ok(port) = std::env::var(format!("{prefix}_PORT")) {
-        profile.port = Some(port.parse().unwrap());
+        builder = builder.port(port.parse().unwrap());
     }
     if let Ok(user) = std::env::var(format!("{prefix}_USER")) {
-        profile.username = Some(user);
+        builder = builder.username(user);
     }
     if let Ok(database) = std::env::var(format!("{prefix}_DATABASE")) {
-        profile.database = Some(database);
+        builder = builder.database(database);
     }
-    profile
+    if let Ok(mode) = std::env::var(format!("{prefix}_SSL_MODE")) {
+        builder = builder.ssl_mode(match mode.as_str() {
+            "disable" => SslMode::Disable,
+            "prefer" => SslMode::Prefer,
+            "require" => SslMode::Require,
+            "verify_ca" => SslMode::VerifyCa,
+            "verify_full" => SslMode::VerifyFull,
+            other => panic!("unsupported {prefix}_SSL_MODE: {other}"),
+        });
+    }
+    builder.build().unwrap()
 }
 fn password(prefix: &str) -> Option<String> {
     std::env::var(format!("{prefix}_PASSWORD")).ok()
