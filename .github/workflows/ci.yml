@@ -10,12 +10,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-latest]
+        os: [windows-latest, ubuntu-22.04, macos-13]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.88.0
           components: clippy
       - uses: actions/setup-python@v5
         with:
@@ -41,6 +42,7 @@ jobs:
         shell: pwsh
         run: |
           cargo build -p orvyn --release --locked
+          Copy-Item packaging/duckdb-download/local/1.5.4/duckdb.dll target/release/duckdb.dll
           New-Item -ItemType Directory -Force dist/windows
           Copy-Item target/release/orvyn.exe, target/release/duckdb.dll dist/windows/
       - uses: actions/upload-artifact@v4
@@ -87,6 +89,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: clippy
       - run: sudo apt-get update && sudo apt-get install -y pkg-config unixodbc-dev
       - run: python3 packaging/prepare-duckdb.py
       - run: cargo test -p app-core --test service_integration --locked -- --ignored
