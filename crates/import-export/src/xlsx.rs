@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 // Only U+FFFE/U+FFFF need filtering; removing C0 controls would lose data.
 fn sanitize_xml(text: &str) -> Cow<'_, str> {
     if text.contains(['\u{fffe}', '\u{ffff}']) {
-        Cow::Owned(text.chars().filter(|c| !matches!(c, '\u{fffe}' | '\u{ffff}')).collect())
+        Cow::Owned(
+            text.chars()
+                .filter(|c| !matches!(c, '\u{fffe}' | '\u{ffff}'))
+                .collect(),
+        )
     } else {
         Cow::Borrowed(text)
     }
@@ -52,11 +56,16 @@ impl XlsxWriter {
                 self.sheet += 1;
                 let worksheet = self.workbook.add_worksheet_with_constant_memory();
                 for (index, column) in self.columns.iter().enumerate() {
-                    worksheet.write_string(0, index as u16, &*sanitize_xml(column)).map_err(error)?;
+                    worksheet
+                        .write_string(0, index as u16, &*sanitize_xml(column))
+                        .map_err(error)?;
                 }
                 self.row = 1;
             }
-            let worksheet = self.workbook.worksheet_from_index(self.sheet).map_err(error)?;
+            let worksheet = self
+                .workbook
+                .worksheet_from_index(self.sheet)
+                .map_err(error)?;
             for (column, value) in row.values.iter().take(self.columns.len()).enumerate() {
                 let column = column as u16;
                 match value {
@@ -208,11 +217,19 @@ mod tests {
         writer.finish().unwrap();
         let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
         let mut first = String::new();
-        archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut first).unwrap();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut first)
+            .unwrap();
         assert!(first.contains("r=\"A1048576\""));
         assert!(first.contains("last row"));
         let mut second = String::new();
-        archive.by_name("xl/worksheets/sheet2.xml").unwrap().read_to_string(&mut second).unwrap();
+        archive
+            .by_name("xl/worksheets/sheet2.xml")
+            .unwrap()
+            .read_to_string(&mut second)
+            .unwrap();
         assert!(second.contains("r=\"A1\""));
         assert!(second.contains(">name<"));
         assert!(second.contains("r=\"A2\""));
@@ -226,7 +243,9 @@ mod tests {
         let path = directory.path().join("existing.xlsx");
         std::fs::write(&path, b"original").unwrap();
         let mut writer = XlsxWriter::create(&path, &["description".into()]).unwrap();
-        let error = writer.write_page(&single_text_page(&"a".repeat(32768))).unwrap_err();
+        let error = writer
+            .write_page(&single_text_page(&"a".repeat(32768)))
+            .unwrap_err();
         assert!(error.message.contains("row 2, column 1 (description)"));
         assert!(error.message.contains("32767"));
         assert_eq!(std::fs::read(path).unwrap(), b"original");
@@ -249,19 +268,29 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("large.xlsx");
         let started = std::time::Instant::now();
-        let mut writer = XlsxWriter::create(&path, &["id".into(), "title".into(), "price".into()]).unwrap();
+        let mut writer =
+            XlsxWriter::create(&path, &["id".into(), "title".into(), "price".into()]).unwrap();
         let mut page = QueryResult::empty("");
         const ROWS: usize = 3_864_170;
         for offset in (0..ROWS).step_by(5_000) {
-            page.rows = (offset..(offset + 5_000).min(ROWS)).map(|i| Row::new(vec![
-                CellValue::Int(i as i64), CellValue::Text(format!("Book {i}")), CellValue::Float(29.99)
-            ])).collect();
+            page.rows = (offset..(offset + 5_000).min(ROWS))
+                .map(|i| {
+                    Row::new(vec![
+                        CellValue::Int(i as i64),
+                        CellValue::Text(format!("Book {i}")),
+                        CellValue::Float(29.99),
+                    ])
+                })
+                .collect();
             writer.write_page(&page).unwrap();
         }
         let write_time = started.elapsed();
         writer.finish().unwrap();
         assert_eq!(writer.sheet + 1, 4);
-        eprintln!("rows={ROWS}, writing={write_time:?}, total={:?}, bytes={}", started.elapsed(), std::fs::metadata(path).unwrap().len());
+        eprintln!(
+            "rows={ROWS}, writing={write_time:?}, total={:?}, bytes={}",
+            started.elapsed(),
+            std::fs::metadata(path).unwrap().len()
+        );
     }
-
 }

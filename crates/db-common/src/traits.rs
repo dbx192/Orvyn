@@ -307,7 +307,9 @@ pub trait RelationalQueryExecutor: Send + Sync {
         _pool_config: ConnectionPoolConfig,
         _consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
     ) -> Result<()> {
-        Err(crate::AppError::unsupported("Streaming export is unavailable for this driver"))
+        Err(crate::AppError::unsupported(
+            "Streaming export is unavailable for this driver",
+        ))
     }
 
     async fn execute(

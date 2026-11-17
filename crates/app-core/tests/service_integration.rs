@@ -124,22 +124,42 @@ async fn elasticsearch_preserves_raw_response_and_aggregations() {
 
 /// Stream a result larger than two batches and verify that aborting a consumer
 /// releases a pool of size one for the next query.
-async fn check_export_stream(executor: &dyn RelationalQueryExecutor, profile: &ConnectionProfile, password: Option<&str>, sql: &str) {
-    let config = ConnectionPoolConfig { max_connections: 1, ..Default::default() };
+async fn check_export_stream(
+    executor: &dyn RelationalQueryExecutor,
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+    sql: &str,
+) {
+    let config = ConnectionPoolConfig {
+        max_connections: 1,
+        ..Default::default()
+    };
     let mut sizes = Vec::new();
     let mut count = 0;
-    executor.stream_export(profile, password, sql, config, &mut |batch| {
-        sizes.push(batch.rows.len());
-        count += batch.rows.len();
-        Ok(())
-    }).await.unwrap();
+    executor
+        .stream_export(profile, password, sql, config, &mut |batch| {
+            sizes.push(batch.rows.len());
+            count += batch.rows.len();
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert_eq!(sizes, [5000, 5000, 2005]);
     assert_eq!(count, 12005);
-    let error = executor.stream_export(profile, password, sql, config, &mut |_| {
-        Err(db_common::AppError::internal("consumer stopped"))
-    }).await.unwrap_err();
+    let error = executor
+        .stream_export(profile, password, sql, config, &mut |_| {
+            Err(db_common::AppError::internal("consumer stopped"))
+        })
+        .await
+        .unwrap_err();
     assert_eq!(error.message, "consumer stopped");
-    let result = tokio::time::timeout(Duration::from_secs(15), executor.execute(profile, password, &["SELECT 42".into()], config)).await.unwrap().unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        executor.execute(profile, password, &["SELECT 42".into()], config),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(result[0].rows[0].values[0], CellValue::Int(42));
 }
 
@@ -149,7 +169,13 @@ async fn mysql_streams_export_batches_and_recovers_after_write_failure() {
     let profile = profile(DataSourceKind::MySql, "ORVYN_TEST_MYSQL");
     let password = password("ORVYN_TEST_MYSQL");
     let sql = "WITH d AS (SELECT 0 n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) SELECT a.n + b.n*10 + c.n*100 + e.n*1000 + f.n*10000 AS n FROM d a CROSS JOIN d b CROSS JOIN d c CROSS JOIN d e CROSS JOIN d f LIMIT 12005";
-    check_export_stream(&db_mysql::MySqlQueryExecutor::new(), &profile, password.as_deref(), sql).await;
+    check_export_stream(
+        &db_mysql::MySqlQueryExecutor::new(),
+        &profile,
+        password.as_deref(),
+        sql,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -157,5 +183,11 @@ async fn mysql_streams_export_batches_and_recovers_after_write_failure() {
 async fn postgres_streams_export_batches_and_recovers_after_write_failure() {
     let profile = profile(DataSourceKind::PostgreSql, "ORVYN_TEST_PG");
     let password = password("ORVYN_TEST_PG");
-    check_export_stream(&db_postgres::PostgresQueryExecutor::new(), &profile, password.as_deref(), "SELECT generate_series(1, 12005)").await;
+    check_export_stream(
+        &db_postgres::PostgresQueryExecutor::new(),
+        &profile,
+        password.as_deref(),
+        "SELECT generate_series(1, 12005)",
+    )
+    .await;
 }

@@ -598,7 +598,10 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         while let Some(row) = stream.try_next().await.map_err(mysql_query_error)? {
             batch.push(row);
             if batch.len() == 5_000 {
-                consume(mysql_rows_to_query_result(sql, std::mem::replace(&mut batch, Vec::with_capacity(5_000))))?;
+                consume(mysql_rows_to_query_result(
+                    sql,
+                    std::mem::replace(&mut batch, Vec::with_capacity(5_000)),
+                ))?;
             }
         }
         if !batch.is_empty() {

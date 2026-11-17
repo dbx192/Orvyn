@@ -437,8 +437,7 @@ impl DesktopApp {
                     done = true;
                     match result {
                         Ok(payload) => {
-                            self.state
-                                .set_status(format!("Done: {}", payload.label));
+                            self.state.set_status(format!("Done: {}", payload.label));
                             self.spawn_structure_load(
                                 payload.connection_id,
                                 payload.database,
@@ -667,7 +666,8 @@ impl DesktopApp {
     pub(super) fn spawn_table_export(&mut self, request: TableExportRequest, path: PathBuf) {
         const EXPORT_PAGE_SIZE: u32 = 5_000;
         if self.pending_table_export.is_some() {
-            self.state.set_status("A table export is already in progress");
+            self.state
+                .set_status("A table export is already in progress");
             return;
         }
 
@@ -707,7 +707,8 @@ impl DesktopApp {
         // XLSX compression and filesystem writes must not block async workers.
         // Await the blocking job so a writer panic is also reported to the UI.
         let worker_runtime = runtime.clone();
-        let worker = runtime.spawn_blocking(move || worker_runtime.block_on(async move {
+        let worker = runtime.spawn_blocking(move || {
+            worker_runtime.block_on(async move {
                 let profile = connection_manager
                     .get_profile(request.connection_id)
                     .await?
@@ -736,70 +737,73 @@ impl DesktopApp {
                 let mut total_rows = None;
 
                 progress.lock().unwrap().phase = "Counting rows";
-                let streamed = query_service.stream_export(
-                    request.connection_id,
-                    request.database.as_deref(),
-                    &format!("SELECT * FROM {qualified}"),
-                    &mut |page| {
-                        total_rows = total_rows.or_else(|| page.metadata
-                            .get(db_common::QUERY_RESULT_METADATA_TOTAL_ROWS)
-                            .and_then(|value| value.parse::<u64>().ok()));
-                        progress.lock().unwrap().phase = "Writing rows";
-                        offset += writer.write_page(&page)? as u64;
-                        let mut current = progress.lock().unwrap();
-                        current.rows_done = offset;
-                        current.total_rows = total_rows;
-                        current.phase = "Reading table data";
-                        Ok(())
-                    },
-                ).await?;
+                let streamed = query_service
+                    .stream_export(
+                        request.connection_id,
+                        request.database.as_deref(),
+                        &format!("SELECT * FROM {qualified}"),
+                        &mut |page| {
+                            total_rows = total_rows.or_else(|| {
+                                page.metadata
+                                    .get(db_common::QUERY_RESULT_METADATA_TOTAL_ROWS)
+                                    .and_then(|value| value.parse::<u64>().ok())
+                            });
+                            progress.lock().unwrap().phase = "Writing rows";
+                            offset += writer.write_page(&page)? as u64;
+                            let mut current = progress.lock().unwrap();
+                            current.rows_done = offset;
+                            current.total_rows = total_rows;
+                            current.phase = "Reading table data";
+                            Ok(())
+                        },
+                    )
+                    .await?;
                 if !streamed {
-                loop {
-                    progress.lock().unwrap().phase = "Reading table data";
-                    let report = query_service
-                        .execute(
-                            QueryExecutionRequest {
-                                tab_id: QueryId::new(),
-                                connection_id: request.connection_id,
-                                database: request.database.clone(),
-                                schema: request.schema.clone(),
-                                sql: sql.clone(),
-                                mode: QueryExecutionMode::All,
-                                cursor_offset: 0,
-                                selection: None,
-                                timeout_ms: 300_000,
-                                result_limit: Some(EXPORT_PAGE_SIZE),
-                                result_offset: offset,
-                                result_total_rows: total_rows,
-                            },
-                            None,
-                        )
-                        .await?;
-                    let page = report
-                        .results
-                        .into_iter()
-                        .next()
-                        .unwrap_or_else(|| QueryResult::empty(""));
-                    total_rows = total_rows.or_else(|| {
-                        page.metadata
-                            .get(db_common::QUERY_RESULT_METADATA_TOTAL_ROWS)
-                            .and_then(|value| value.parse::<u64>().ok())
-                    });
-                    progress.lock().unwrap().phase = "Writing rows";
-                    let page_rows = writer.write_page(&page)?;
-                    offset = offset.saturating_add(page_rows as u64);
-                    {
-                        let mut guard = progress.lock().unwrap();
-                        guard.rows_done = offset;
-                        guard.total_rows = total_rows;
+                    loop {
+                        progress.lock().unwrap().phase = "Reading table data";
+                        let report = query_service
+                            .execute(
+                                QueryExecutionRequest {
+                                    tab_id: QueryId::new(),
+                                    connection_id: request.connection_id,
+                                    database: request.database.clone(),
+                                    schema: request.schema.clone(),
+                                    sql: sql.clone(),
+                                    mode: QueryExecutionMode::All,
+                                    cursor_offset: 0,
+                                    selection: None,
+                                    timeout_ms: 300_000,
+                                    result_limit: Some(EXPORT_PAGE_SIZE),
+                                    result_offset: offset,
+                                    result_total_rows: total_rows,
+                                },
+                                None,
+                            )
+                            .await?;
+                        let page = report
+                            .results
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| QueryResult::empty(""));
+                        total_rows = total_rows.or_else(|| {
+                            page.metadata
+                                .get(db_common::QUERY_RESULT_METADATA_TOTAL_ROWS)
+                                .and_then(|value| value.parse::<u64>().ok())
+                        });
+                        progress.lock().unwrap().phase = "Writing rows";
+                        let page_rows = writer.write_page(&page)?;
+                        offset = offset.saturating_add(page_rows as u64);
+                        {
+                            let mut guard = progress.lock().unwrap();
+                            guard.rows_done = offset;
+                            guard.total_rows = total_rows;
+                        }
+                        if page_rows < EXPORT_PAGE_SIZE as usize
+                            || total_rows.is_some_and(|total| offset >= total)
+                        {
+                            break;
+                        }
                     }
-                    if page_rows < EXPORT_PAGE_SIZE as usize
-                        || total_rows.is_some_and(|total| offset >= total)
-                    {
-                        break;
-                    }
-                }
-
                 }
                 progress.lock().unwrap().phase = "Saving file";
                 let row_count = writer.finish()?;
@@ -819,7 +823,8 @@ impl DesktopApp {
                     format: request.format,
                     row_count,
                 })
-        }));
+            })
+        });
         runtime.spawn(async move {
             let result = worker.await.unwrap_or_else(|error| {
                 Err(AppError::internal(format!("Export worker failed: {error}")))
@@ -1213,11 +1218,14 @@ impl DesktopApp {
     /// Record a failed background operation: status bar plus the persistent
     /// error window, which panels never overwrite.
     fn report_task_error(&mut self, title: &str, error: &AppError) {
-        self.state
-            .set_status(format!("{title}: {}", error.message));
+        self.state.set_status(format!("{title}: {}", error.message));
         let mut ui_error = UiError::new(title, error.message.clone());
         let mut detail = String::new();
-        if let Some(code) = error.code.as_deref().filter(|value| !value.trim().is_empty()) {
+        if let Some(code) = error
+            .code
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
             detail.push_str("Code: ");
             detail.push_str(code);
             detail.push('\n');
@@ -1242,7 +1250,12 @@ impl DesktopApp {
     /// Target table for the current open structure view, if any.
     fn structure_target_for_current(
         &self,
-    ) -> Option<(db_common::ConnectionId, Option<String>, Option<String>, String)> {
+    ) -> Option<(
+        db_common::ConnectionId,
+        Option<String>,
+        Option<String>,
+        String,
+    )> {
         self.active_structure
             .and_then(|id| self.table_structures.get(&id))
             .map(|v| {
@@ -1316,21 +1329,24 @@ mod tests {
 
     #[test]
     fn orders_table_reads_by_primary_key() {
-        let columns = vec![db_common::TableColumn {
-            name: "created_at".to_string(),
-            database_type: "TIMESTAMP".to_string(),
-            nullable: false,
-            default_value: None,
-            primary_key: false,
-            comment: None,
-        }, db_common::TableColumn {
-            name: "id".to_string(),
-            database_type: "INTEGER".to_string(),
-            nullable: false,
-            default_value: None,
-            primary_key: true,
-            comment: None,
-        }];
+        let columns = vec![
+            db_common::TableColumn {
+                name: "created_at".to_string(),
+                database_type: "TIMESTAMP".to_string(),
+                nullable: false,
+                default_value: None,
+                primary_key: false,
+                comment: None,
+            },
+            db_common::TableColumn {
+                name: "id".to_string(),
+                database_type: "INTEGER".to_string(),
+                nullable: false,
+                default_value: None,
+                primary_key: true,
+                comment: None,
+            },
+        ];
         assert_eq!(
             ordered_table_select_sql(&DoubleQuoteDialect, "\"main\".\"users\"", &columns).unwrap(),
             "SELECT * FROM \"main\".\"users\" ORDER BY \"id\""
@@ -1339,11 +1355,16 @@ mod tests {
     #[test]
     fn missing_primary_key_and_date_uses_first_column_without_error() {
         let columns = vec![db_common::TableColumn {
-            name: "title".into(), database_type: "TEXT".into(), nullable: true,
-            default_value: None, primary_key: false, comment: None,
+            name: "title".into(),
+            database_type: "TEXT".into(),
+            nullable: true,
+            default_value: None,
+            primary_key: false,
+            comment: None,
         }];
-        assert_eq!(ordered_table_select_sql(&DoubleQuoteDialect, "books", &columns).unwrap(),
-            r#"SELECT * FROM books ORDER BY "title""#);
+        assert_eq!(
+            ordered_table_select_sql(&DoubleQuoteDialect, "books", &columns).unwrap(),
+            r#"SELECT * FROM books ORDER BY "title""#
+        );
     }
-
 }

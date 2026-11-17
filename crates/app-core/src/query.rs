@@ -305,7 +305,10 @@ impl QueryService {
         if !db_common::is_read_only_statement(sql) {
             return Err(AppError::validation("Export requires a read-only query"));
         }
-        let (mut profile, password) = self.connections.profile_with_password(connection_id, None).await?;
+        let (mut profile, password) = self
+            .connections
+            .profile_with_password(connection_id, None)
+            .await?;
         if let Some(database) = database.filter(|value| !value.trim().is_empty()) {
             profile.database = Some(database.to_string());
         }
@@ -315,12 +318,34 @@ impl QueryService {
         }
         let count_sql = count_result_page_statement(sql)
             .ok_or_else(|| AppError::validation("Export query cannot be counted"))?;
-        let counts = executor.execute(&profile, password.as_deref(), &[count_sql], self.pool_config).await?;
-        let total = query_count_from_result(counts.first().ok_or_else(|| AppError::internal("Export count returned no result"))?)?;
+        let counts = executor
+            .execute(
+                &profile,
+                password.as_deref(),
+                &[count_sql],
+                self.pool_config,
+            )
+            .await?;
+        let total = query_count_from_result(
+            counts
+                .first()
+                .ok_or_else(|| AppError::internal("Export count returned no result"))?,
+        )?;
         let mut initial = QueryResult::empty(sql);
-        initial.metadata.insert(QUERY_RESULT_METADATA_TOTAL_ROWS.to_string(), total.to_string());
+        initial.metadata.insert(
+            QUERY_RESULT_METADATA_TOTAL_ROWS.to_string(),
+            total.to_string(),
+        );
         consume(initial)?;
-        executor.stream_export(&profile, password.as_deref(), sql, self.pool_config, consume).await?;
+        executor
+            .stream_export(
+                &profile,
+                password.as_deref(),
+                sql,
+                self.pool_config,
+                consume,
+            )
+            .await?;
         Ok(true)
     }
 
@@ -1172,7 +1197,7 @@ fn push_history(history: &mut VecDeque<QueryHistoryEntry>, entry: QueryHistoryEn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use db_common::{QueryExecutionRequest, ConnectionProfile};
+    use db_common::{ConnectionProfile, QueryExecutionRequest};
 
     struct ExportExecutor {
         calls: std::sync::Mutex<Vec<String>>,
@@ -1180,34 +1205,76 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RelationalQueryExecutor for ExportExecutor {
-        fn kind(&self) -> DataSourceKind { DataSourceKind::MySql }
-        fn supports_streaming_export(&self, _: &ConnectionProfile) -> bool { true }
-        async fn execute(&self, profile: &ConnectionProfile, _: Option<&str>, statements: &[String], _: ConnectionPoolConfig) -> Result<Vec<QueryResult>> {
+        fn kind(&self) -> DataSourceKind {
+            DataSourceKind::MySql
+        }
+        fn supports_streaming_export(&self, _: &ConnectionProfile) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            profile: &ConnectionProfile,
+            _: Option<&str>,
+            statements: &[String],
+            _: ConnectionPoolConfig,
+        ) -> Result<Vec<QueryResult>> {
             assert_eq!(profile.database.as_deref(), Some("chosen_db"));
             assert_eq!(statements.len(), 1);
             assert!(statements[0].starts_with("SELECT COUNT(*)"));
             self.calls.lock().unwrap().push(statements[0].clone());
             let mut count = QueryResult::empty(&statements[0]);
-            count.rows.push(db_common::Row::new(vec![CellValue::Int(10001)]));
+            count
+                .rows
+                .push(db_common::Row::new(vec![CellValue::Int(10001)]));
             Ok(vec![count])
         }
-        async fn stream_export(&self, _: &ConnectionProfile, _: Option<&str>, sql: &str, _: ConnectionPoolConfig,
-            consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send)) -> Result<()> {
+        async fn stream_export(
+            &self,
+            _: &ConnectionProfile,
+            _: Option<&str>,
+            sql: &str,
+            _: ConnectionPoolConfig,
+            consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
+        ) -> Result<()> {
             assert_eq!(sql, "SELECT * FROM books");
             self.calls.lock().unwrap().push(sql.into());
             for size in [5000, 5000, 1] {
                 let mut batch = QueryResult::empty(sql);
-                batch.rows = (0..size).map(|_| db_common::Row::new(vec![CellValue::Int(1)])).collect();
+                batch.rows = (0..size)
+                    .map(|_| db_common::Row::new(vec![CellValue::Int(1)]))
+                    .collect();
                 consume(batch)?;
             }
             Ok(())
         }
-        async fn pool_stats(&self, _: ConnectionId) -> Result<Option<ConnectionPoolStats>> { Ok(None) }
-        async fn close_pool(&self, _: ConnectionId) -> Result<()> { Ok(()) }
-        async fn begin_transaction(&self, _: &ConnectionProfile, _: Option<&str>, _: QueryId, _: ConnectionPoolConfig) -> Result<()> { unreachable!() }
-        async fn execute_in_transaction(&self, _: QueryId, _: &[String]) -> Result<Vec<QueryResult>> { unreachable!() }
-        async fn commit_transaction(&self, _: QueryId) -> Result<()> { unreachable!() }
-        async fn rollback_transaction(&self, _: QueryId) -> Result<()> { unreachable!() }
+        async fn pool_stats(&self, _: ConnectionId) -> Result<Option<ConnectionPoolStats>> {
+            Ok(None)
+        }
+        async fn close_pool(&self, _: ConnectionId) -> Result<()> {
+            Ok(())
+        }
+        async fn begin_transaction(
+            &self,
+            _: &ConnectionProfile,
+            _: Option<&str>,
+            _: QueryId,
+            _: ConnectionPoolConfig,
+        ) -> Result<()> {
+            unreachable!()
+        }
+        async fn execute_in_transaction(
+            &self,
+            _: QueryId,
+            _: &[String],
+        ) -> Result<Vec<QueryResult>> {
+            unreachable!()
+        }
+        async fn commit_transaction(&self, _: QueryId) -> Result<()> {
+            unreachable!()
+        }
+        async fn rollback_transaction(&self, _: QueryId) -> Result<()> {
+            unreachable!()
+        }
     }
 
     #[tokio::test]
@@ -1215,31 +1282,71 @@ mod tests {
         let manager = ConnectionManager::new(
             Arc::new(crate::storage::MemoryConnectionProfileStore::default()),
             Arc::new(secure_store::EncryptedFileStore::new(
-                std::env::temp_dir().join(format!("orvyn-export-{}", QueryId::new())), "test-only")), vec![]);
+                std::env::temp_dir().join(format!("orvyn-export-{}", QueryId::new())),
+                "test-only",
+            )),
+            vec![],
+        );
         let profile = ConnectionProfile::builder(DataSourceKind::MySql, "export test")
-            .host("127.0.0.1").username("test").build().unwrap();
-        let profile = manager.create_profile(profile, db_common::PasswordUpdate::Clear).await.unwrap();
-        let executor = Arc::new(ExportExecutor { calls: Default::default() });
-        let service = QueryService::new(manager, vec![executor.clone()], Default::default(), Default::default(), None, None);
+            .host("127.0.0.1")
+            .username("test")
+            .build()
+            .unwrap();
+        let profile = manager
+            .create_profile(profile, db_common::PasswordUpdate::Clear)
+            .await
+            .unwrap();
+        let executor = Arc::new(ExportExecutor {
+            calls: Default::default(),
+        });
+        let service = QueryService::new(
+            manager,
+            vec![executor.clone()],
+            Default::default(),
+            Default::default(),
+            None,
+            None,
+        );
         let mut batches = Vec::new();
-        assert!(service.stream_export(profile.id, Some("chosen_db"), "SELECT * FROM books", &mut |batch| {
-            if batch.rows.is_empty() {
-                assert_eq!(batch.metadata[QUERY_RESULT_METADATA_TOTAL_ROWS], "10001");
-            } else {
-                batches.push(batch.rows.len());
-            }
-            Ok(())
-        }).await.unwrap());
+        assert!(service
+            .stream_export(
+                profile.id,
+                Some("chosen_db"),
+                "SELECT * FROM books",
+                &mut |batch| {
+                    if batch.rows.is_empty() {
+                        assert_eq!(batch.metadata[QUERY_RESULT_METADATA_TOTAL_ROWS], "10001");
+                    } else {
+                        batches.push(batch.rows.len());
+                    }
+                    Ok(())
+                }
+            )
+            .await
+            .unwrap());
         assert_eq!(batches, [5000, 5000, 1]);
         assert_eq!(executor.calls.lock().unwrap().len(), 2);
         assert!(service.history().await.is_empty());
-        let error = service.stream_export(profile.id, Some("chosen_db"), "SELECT * FROM books", &mut |batch| {
-            if !batch.rows.is_empty() { return Err(AppError::internal("disk full")); }
-            Ok(())
-        }).await.unwrap_err();
+        let error = service
+            .stream_export(
+                profile.id,
+                Some("chosen_db"),
+                "SELECT * FROM books",
+                &mut |batch| {
+                    if !batch.rows.is_empty() {
+                        return Err(AppError::internal("disk full"));
+                    }
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
         assert_eq!(error.message, "disk full");
         let before = executor.calls.lock().unwrap().len();
-        assert!(service.stream_export(profile.id, None, "DELETE FROM books", &mut |_| Ok(())).await.is_err());
+        assert!(service
+            .stream_export(profile.id, None, "DELETE FROM books", &mut |_| Ok(()))
+            .await
+            .is_err());
         assert_eq!(executor.calls.lock().unwrap().len(), before);
     }
 
