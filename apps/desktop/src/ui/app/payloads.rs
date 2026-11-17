@@ -59,6 +59,7 @@ pub(super) struct TableExportProgress {
     pub(super) table_name: String,
     pub(super) format_label: &'static str,
     pub(super) rows_done: u64,
+    pub(super) phase: &'static str,
     pub(super) total_rows: Option<u64>,
     /// Final result kept in the status bar after completion:
     /// (success, message, finished at).

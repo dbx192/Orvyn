@@ -249,6 +249,10 @@ impl DesktopApp {
                 } => {
                     let table_name =
                         qualified_table_label(schema.as_deref().or(database.as_deref()), &table);
+                    if self.pending_table_export.is_some() || self.export_file_dialog_open || self.export_request.is_some() {
+                        self.state.set_status("A table export is already in progress");
+                        continue;
+                    }
                     self.export_request = Some(TableExportRequest {
                         connection_id,
                         database,

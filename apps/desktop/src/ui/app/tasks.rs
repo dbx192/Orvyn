@@ -666,6 +666,10 @@ impl DesktopApp {
 
     pub(super) fn spawn_table_export(&mut self, request: TableExportRequest, path: PathBuf) {
         const EXPORT_PAGE_SIZE: u32 = 5_000;
+        if self.pending_table_export.is_some() {
+            self.state.set_status("A table export is already in progress");
+            return;
+        }
 
         let metadata_service = self.metadata_service.clone();
         let query_service = self.query_service.clone();
@@ -694,13 +698,16 @@ impl DesktopApp {
                 ExportFormat::ExcelCompatible => "TSV",
             },
             rows_done: 0,
+            phase: "Preparing export",
             total_rows: None,
             outcome: None,
         }));
         self.table_export_progress = Some(progress.clone());
 
-        runtime.spawn(async move {
-            let result = async {
+        // XLSX compression and filesystem writes must not block async workers.
+        // Await the blocking job so a writer panic is also reported to the UI.
+        let worker_runtime = runtime.clone();
+        let worker = runtime.spawn_blocking(move || worker_runtime.block_on(async move {
                 let profile = connection_manager
                     .get_profile(request.connection_id)
                     .await?
@@ -729,6 +736,7 @@ impl DesktopApp {
                 let mut total_rows = None;
 
                 loop {
+                    progress.lock().unwrap().phase = "Reading table data";
                     let report = query_service
                         .execute(
                             QueryExecutionRequest {
@@ -758,6 +766,7 @@ impl DesktopApp {
                             .get(db_common::QUERY_RESULT_METADATA_TOTAL_ROWS)
                             .and_then(|value| value.parse::<u64>().ok())
                     });
+                    progress.lock().unwrap().phase = "Writing rows";
                     let page_rows = writer.write_page(&page)?;
                     offset = offset.saturating_add(page_rows as u64);
                     {
@@ -772,6 +781,7 @@ impl DesktopApp {
                     }
                 }
 
+                progress.lock().unwrap().phase = "Saving file";
                 let row_count = writer.finish()?;
                 let qualifier = request
                     .schema
@@ -789,9 +799,11 @@ impl DesktopApp {
                     format: request.format,
                     row_count,
                 })
-            }
-            .await;
-
+        }));
+        runtime.spawn(async move {
+            let result = worker.await.unwrap_or_else(|error| {
+                Err(AppError::internal(format!("Export worker failed: {error}")))
+            });
             *cell.lock().unwrap() = Some(result);
         });
 

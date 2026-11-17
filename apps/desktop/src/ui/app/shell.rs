@@ -16,6 +16,7 @@ impl eframe::App for DesktopApp {
         if self.pending_table_load.is_some()
             || self.pending_structure_load.is_some()
             || self.pending_table_export.is_some()
+            || self.table_export_progress.is_some()
             || self.pending_database_export.is_some()
             || self.pending_index_create.is_some()
             || self.pending_table_drop.is_some()

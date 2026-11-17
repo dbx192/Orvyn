@@ -129,9 +129,17 @@ impl DesktopApp {
         // The async file dialog landed a save path: hand it to the export task.
         let pending_path = self.pending_table_export_path.lock().unwrap().take();
         if let Some(path) = pending_path {
-            if let Some(export_request) = self.export_request.take() {
-                self.spawn_table_export(export_request, path);
+            self.export_file_dialog_open = false;
+            let request = self.export_request.take();
+            if let (Some(request), Some(path)) = (request, path) {
+                self.spawn_table_export(request, path);
+            } else {
+                self.state.set_status("Table export canceled");
             }
+            ctx.request_repaint();
+            return;
+        }
+        if self.export_file_dialog_open {
             return;
         }
 
@@ -212,13 +220,15 @@ impl DesktopApp {
                 };
                 let dialog = rfd::AsyncFileDialog::new()
                     .set_title("Export Table Data")
-                    .set_file_name(format!("{}.{ext}", table_file_name))
+                    .set_file_name(format!("{}.{ext}", safe_export_file_stem(&table_file_name)))
                     .add_filter(label, &[ext]);
                 let pending_path = self.pending_table_export_path.clone();
+                self.export_file_dialog_open = true;
+                let repaint = ctx.clone();
                 self.runtime.spawn(async move {
-                    if let Some(file) = dialog.save_file().await {
-                        *pending_path.lock().unwrap() = Some(file.path().to_path_buf());
-                    }
+                    let path = dialog.save_file().await.map(|file| file.path().to_path_buf());
+                    *pending_path.lock().unwrap() = Some(path);
+                    repaint.request_repaint();
                 });
             }
 
@@ -402,6 +412,9 @@ impl DesktopApp {
                         } else {
                             self.render_export_running_progress(ui, palette, progress);
                         }
+                    } else {
+                        ui.label(RichText::new(&self.state.status).small().color(palette.fg_muted))
+                            .on_hover_text(&self.state.status);
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -466,7 +479,7 @@ impl DesktopApp {
         progress: &TableExportProgress,
     ) {
         ui.add(Spinner::new());
-        let progress_label = match progress.total_rows {
+        let progress_label = format!("{} - {}", progress.phase, match progress.total_rows {
             Some(total) if total > 0 => format!(
                 "{} export {}: {}/{} rows",
                 progress.format_label, progress.table_name, progress.rows_done, total
@@ -475,7 +488,7 @@ impl DesktopApp {
                 "{} export {}: {} rows",
                 progress.format_label, progress.table_name, progress.rows_done
             ),
-        };
+        });
         ui.label(RichText::new(&progress_label).small().color(palette.fg))
             .on_hover_text(&progress_label);
         if let Some(fraction) = progress
