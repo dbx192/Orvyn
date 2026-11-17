@@ -584,30 +584,81 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         password: Option<&str>,
         sql: &str,
         pool_config: ConnectionPoolConfig,
+        cancellation: db_common::QueryCancellation,
         consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
     ) -> Result<()> {
         use futures_util::TryStreamExt;
-        let pool = self.pool_for(profile, password, pool_config).await?;
+        let pool = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancellation.error()),
+            result = self.pool_for(profile, password, pool_config) => result?,
+        };
+        let mut connection = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancellation.error()),
+            result = pool.acquire() => result.map_err(mysql_connection_error)?,
+        };
+        // An interrupted stream must never be drained implicitly by the pool.
+        connection.close_on_drop();
         let statement = if brand_for(profile).is_some_and(MysqlBrand::uses_text_protocol) {
             doris::normalize_doris_identifiers(sql)
         } else {
             sql.to_owned()
         };
-        let mut stream = sqlx::raw_sql(&statement).fetch(&pool);
-        let mut batch = Vec::with_capacity(5_000);
-        while let Some(row) = stream.try_next().await.map_err(mysql_query_error)? {
-            batch.push(row);
-            if batch.len() == 5_000 {
-                consume(mysql_rows_to_query_result(
-                    sql,
-                    std::mem::replace(&mut batch, Vec::with_capacity(5_000)),
-                ))?;
+        let id: u64 = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancellation.error()),
+            result = sqlx::query_scalar("SELECT CONNECTION_ID()").fetch_one(&mut *connection) => result.map_err(mysql_query_error)?,
+        };
+        let execution = async {
+            let mut stream = sqlx::raw_sql(&statement).fetch(&mut *connection);
+            let mut batch = Vec::with_capacity(5_000);
+            while let Some(row) = stream.try_next().await.map_err(mysql_query_error)? {
+                if cancellation.is_cancelled() {
+                    return Err(cancellation.error());
+                }
+                batch.push(row);
+                if batch.len() == 5_000 {
+                    consume(mysql_rows_to_query_result(
+                        sql,
+                        std::mem::replace(&mut batch, Vec::with_capacity(5_000)),
+                    ))?;
+                }
+            }
+            if !batch.is_empty() {
+                consume(mysql_rows_to_query_result(sql, batch))?;
+            }
+            Ok(())
+        };
+        let result = {
+            tokio::pin!(execution);
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(cancellation.error()),
+                result = &mut execution => result,
+            }
+        };
+        // Also cancel on a synchronous consumer error: the server may still be
+        // producing unread rows even though the client future has completed.
+        if result.is_err() || cancellation.is_cancelled() {
+            let control = async {
+                use sqlx::Connection;
+                let mut control = MySqlConnection::connect_with(&pool.connect_options()).await?;
+                sqlx::query(&format!("KILL QUERY {id}"))
+                    .execute(&mut control)
+                    .await?;
+                Ok::<(), sqlx::Error>(())
+            };
+            let sent = tokio::time::timeout(std::time::Duration::from_secs(5), control).await;
+            if cancellation.is_cancelled() {
+                return if matches!(sent, Ok(Ok(()))) {
+                    Err(cancellation.error())
+                } else {
+                    Err(AppError::new(ErrorKind::Cancelled, "Export cancelled; MySQL server termination unconfirmed; connection discarded"))
+                };
             }
         }
-        if !batch.is_empty() {
-            consume(mysql_rows_to_query_result(sql, batch))?;
-        }
-        Ok(())
+        result
     }
 
     async fn execute(

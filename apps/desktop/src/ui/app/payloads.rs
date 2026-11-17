@@ -56,6 +56,7 @@ pub(super) struct TableExportPayload {
 
 /// Live progress of the in-flight table export, shared with the UI thread.
 pub(super) struct TableExportProgress {
+    pub(super) cancellation: db_common::QueryCancellation,
     pub(super) table_name: String,
     pub(super) format_label: &'static str,
     pub(super) rows_done: u64,

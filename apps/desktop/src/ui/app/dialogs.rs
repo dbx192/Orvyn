@@ -479,16 +479,36 @@ impl DesktopApp {
         progress: &TableExportProgress,
     ) {
         ui.add(Spinner::new());
-        let progress_label = format!("{} - {}", progress.phase, match progress.total_rows {
-            Some(total) if total > 0 => format!(
-                "{} export {}: {}/{} rows",
-                progress.format_label, progress.table_name, progress.rows_done, total
-            ),
-            _ => format!(
-                "{} export {}: {} rows",
-                progress.format_label, progress.table_name, progress.rows_done
-            ),
-        });
+        // Keep cancellation visible even when a long table name fills the bar.
+        if ui
+            .add_enabled(
+                !progress.cancellation.is_cancelled(),
+                eframe::egui::Button::new(tr("Cancel export")).small(),
+            )
+            .clicked()
+        {
+            progress.cancellation.cancel();
+            ui.ctx().request_repaint();
+        }
+        let phase = if progress.cancellation.is_cancelled() {
+            tr("Cancelling export...")
+        } else {
+            progress.phase.to_string()
+        };
+        let progress_label = format!(
+            "{} - {}",
+            phase,
+            match progress.total_rows {
+                Some(total) if total > 0 => format!(
+                    "{} export {}: {}/{} rows",
+                    progress.format_label, progress.table_name, progress.rows_done, total
+                ),
+                _ => format!(
+                    "{} export {}: {} rows",
+                    progress.format_label, progress.table_name, progress.rows_done
+                ),
+            }
+        );
         ui.label(RichText::new(&progress_label).small().color(palette.fg))
             .on_hover_text(&progress_label);
         if let Some(fraction) = progress
@@ -498,6 +518,7 @@ impl DesktopApp {
         {
             ui.add_sized([140.0, 16.0], ProgressBar::new(fraction));
         }
+
     }
 
     pub(super) fn error_window(&mut self, ctx: &Context) {

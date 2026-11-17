@@ -432,5 +432,8 @@
   "Loading large values may:": "Loading large values may:",
   "Use significant memory": "Use significant memory",
   "Block the UI temporarily": "Block the UI temporarily",
-  "Display slowly": "Display slowly"
+  "Display slowly": "Display slowly",
+  "Cancel export": "Cancel export",
+  "Cancelling export...": "Cancelling export...",
+  "Table export cancelled": "Table export cancelled"
 }

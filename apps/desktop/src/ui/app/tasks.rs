@@ -11,6 +11,7 @@ use super::{
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
+    i18n::text as tr,
     state::UiError,
     table_editor::TableEditor,
     table_structure::{
@@ -168,6 +169,12 @@ impl DesktopApp {
                                 payload.row_count,
                                 payload.path.display()
                             );
+                            self.state.set_status(message.clone());
+                            self.set_table_export_outcome(true, message);
+                        }
+                        Err(error) if error.kind == db_common::ErrorKind::Cancelled => {
+                            let message =
+                                format!("{}: {}", tr("Table export cancelled"), error.message);
                             self.state.set_status(message.clone());
                             self.set_table_export_outcome(true, message);
                         }
@@ -677,7 +684,9 @@ impl DesktopApp {
         let runtime = self.runtime.clone();
         let cell: PendingTask<TableExportPayload> = Arc::new(Mutex::new(None));
         self.pending_table_export = Some(cell.clone());
+        let cancellation = db_common::QueryCancellation::default();
         let progress: Arc<Mutex<TableExportProgress>> = Arc::new(Mutex::new(TableExportProgress {
+            cancellation: cancellation.clone(),
             table_name: {
                 let qualifier = request
                     .schema
@@ -721,7 +730,10 @@ impl DesktopApp {
                     request.schema.as_deref(),
                     &request.table,
                 )?;
-                let columns = metadata_service
+                let columns = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err(cancellation.error()),
+                    result = metadata_service
                     .table_columns(
                         request.connection_id,
                         request.database.as_deref(),
@@ -729,10 +741,12 @@ impl DesktopApp {
                         &request.table,
                         None,
                     )
-                    .await?;
+                    => result?,
+                };
                 let sql = ordered_table_select_sql(dialect.as_ref(), &qualified, &columns)?;
                 let headers = columns.iter().map(|column| column.name.clone()).collect();
-                let mut writer = QueryResultFileWriter::create(request.format, &path, headers)?;
+                let mut writer = QueryResultFileWriter::create(request.format, &path, headers)?
+                    .with_cancellation(cancellation.clone());
                 let mut offset = 0u64;
                 let mut total_rows = None;
 
@@ -742,7 +756,11 @@ impl DesktopApp {
                         request.connection_id,
                         request.database.as_deref(),
                         &format!("SELECT * FROM {qualified}"),
+                        cancellation.clone(),
                         &mut |page| {
+                            if cancellation.is_cancelled() {
+                                return Err(cancellation.error());
+                            }
                             total_rows = total_rows.or_else(|| {
                                 page.metadata
                                     .get(db_common::QUERY_RESULT_METADATA_TOTAL_ROWS)
@@ -762,7 +780,7 @@ impl DesktopApp {
                     loop {
                         progress.lock().unwrap().phase = "Reading table data";
                         let report = query_service
-                            .execute(
+                            .execute_cancellable(
                                 QueryExecutionRequest {
                                     tab_id: QueryId::new(),
                                     connection_id: request.connection_id,
@@ -778,6 +796,7 @@ impl DesktopApp {
                                     result_total_rows: total_rows,
                                 },
                                 None,
+                                cancellation.clone(),
                             )
                             .await?;
                         let page = report

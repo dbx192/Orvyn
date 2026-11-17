@@ -300,10 +300,16 @@ impl QueryService {
         connection_id: ConnectionId,
         database: Option<&str>,
         sql: &str,
+        cancellation: db_common::QueryCancellation,
         consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
     ) -> Result<bool> {
-        if !db_common::is_read_only_statement(sql) {
-            return Err(AppError::validation("Export requires a read-only query"));
+        if cancellation.is_cancelled() {
+            return Err(cancellation.error());
+        }
+        if split_statements(sql).len() != 1 || !db_common::is_read_only_statement(sql) {
+            return Err(AppError::validation(
+                "Export requires a single read-only query",
+            ));
         }
         let (mut profile, password) = self
             .connections
@@ -319,11 +325,12 @@ impl QueryService {
         let count_sql = count_result_page_statement(sql)
             .ok_or_else(|| AppError::validation("Export query cannot be counted"))?;
         let counts = executor
-            .execute(
+            .execute_cancellable(
                 &profile,
                 password.as_deref(),
                 &[count_sql],
                 self.pool_config,
+                cancellation.clone(),
             )
             .await?;
         let total = query_count_from_result(
@@ -343,6 +350,7 @@ impl QueryService {
                 password.as_deref(),
                 sql,
                 self.pool_config,
+                cancellation,
                 consume,
             )
             .await?;
@@ -1201,6 +1209,7 @@ mod tests {
 
     struct ExportExecutor {
         calls: std::sync::Mutex<Vec<String>>,
+        block_count: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -1222,6 +1231,9 @@ mod tests {
             assert_eq!(statements.len(), 1);
             assert!(statements[0].starts_with("SELECT COUNT(*)"));
             self.calls.lock().unwrap().push(statements[0].clone());
+            if self.block_count.load(std::sync::atomic::Ordering::Relaxed) {
+                std::future::pending::<()>().await;
+            }
             let mut count = QueryResult::empty(&statements[0]);
             count
                 .rows
@@ -1234,11 +1246,15 @@ mod tests {
             _: Option<&str>,
             sql: &str,
             _: ConnectionPoolConfig,
+            cancellation: db_common::QueryCancellation,
             consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
         ) -> Result<()> {
             assert_eq!(sql, "SELECT * FROM books");
             self.calls.lock().unwrap().push(sql.into());
             for size in [5000, 5000, 1] {
+                if cancellation.is_cancelled() {
+                    return Err(cancellation.error());
+                }
                 let mut batch = QueryResult::empty(sql);
                 batch.rows = (0..size)
                     .map(|_| db_common::Row::new(vec![CellValue::Int(1)]))
@@ -1298,6 +1314,7 @@ mod tests {
             .unwrap();
         let executor = Arc::new(ExportExecutor {
             calls: Default::default(),
+            block_count: Default::default(),
         });
         let service = QueryService::new(
             manager,
@@ -1313,6 +1330,7 @@ mod tests {
                 profile.id,
                 Some("chosen_db"),
                 "SELECT * FROM books",
+                Default::default(),
                 &mut |batch| {
                     if batch.rows.is_empty() {
                         assert_eq!(batch.metadata[QUERY_RESULT_METADATA_TOTAL_ROWS], "10001");
@@ -1332,6 +1350,7 @@ mod tests {
                 profile.id,
                 Some("chosen_db"),
                 "SELECT * FROM books",
+                Default::default(),
                 &mut |batch| {
                     if !batch.rows.is_empty() {
                         return Err(AppError::internal("disk full"));
@@ -1344,10 +1363,79 @@ mod tests {
         assert_eq!(error.message, "disk full");
         let before = executor.calls.lock().unwrap().len();
         assert!(service
-            .stream_export(profile.id, None, "DELETE FROM books", &mut |_| Ok(()))
+            .stream_export(
+                profile.id,
+                None,
+                "DELETE FROM books",
+                Default::default(),
+                &mut |_| Ok(())
+            )
             .await
             .is_err());
         assert_eq!(executor.calls.lock().unwrap().len(), before);
+
+        let cancellation = db_common::QueryCancellation::default();
+        cancellation.cancel();
+        let error = service
+            .stream_export(
+                profile.id,
+                Some("chosen_db"),
+                "SELECT * FROM books",
+                cancellation,
+                &mut |_| panic!("cancelled export consumed rows"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, db_common::ErrorKind::Cancelled);
+        assert_eq!(executor.calls.lock().unwrap().len(), before);
+
+        let cancellation = db_common::QueryCancellation::default();
+        let mut batches = 0;
+        let error = service
+            .stream_export(
+                profile.id,
+                Some("chosen_db"),
+                "SELECT * FROM books",
+                cancellation.clone(),
+                &mut |batch| {
+                    if !batch.rows.is_empty() {
+                        batches += 1;
+                        cancellation.cancel();
+                    }
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, db_common::ErrorKind::Cancelled);
+        assert_eq!(batches, 1);
+
+        // Cancellation must also wake a count query that never returns a row.
+        executor
+            .block_count
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancellation = db_common::QueryCancellation::default();
+        let cancel = async {
+            tokio::task::yield_now().await;
+            cancellation.cancel();
+        };
+        let query = async {
+            service
+                .stream_export(
+                    profile.id,
+                    Some("chosen_db"),
+                    "SELECT * FROM books",
+                    cancellation.clone(),
+                    &mut |_| panic!("blocked count consumed rows"),
+                )
+                .await
+        };
+        let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(cancel, query)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().kind, db_common::ErrorKind::Cancelled);
     }
 
     #[tokio::test]

@@ -432,5 +432,8 @@
   "Loading large values may:": "加载大值可能会：",
   "Use significant memory": "占用大量内存",
   "Block the UI temporarily": "暂时阻塞界面",
-  "Display slowly": "显示缓慢"
+  "Display slowly": "显示缓慢",
+  "Cancel export": "取消导出",
+  "Cancelling export...": "正在取消导出…",
+  "Table export cancelled": "表数据导出已取消"
 }

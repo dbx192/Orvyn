@@ -26,6 +26,7 @@ pub(crate) struct XlsxWriter {
     row: u32,
     columns: Vec<String>,
     sheet: usize,
+    pub(crate) cancellation: db_common::QueryCancellation,
 }
 fn error(error: rust_xlsxwriter::XlsxError) -> AppError {
     AppError::internal(error.to_string())
@@ -48,10 +49,14 @@ impl XlsxWriter {
             row: 1,
             columns: columns.to_vec(),
             sheet: 0,
+            cancellation: Default::default(),
         })
     }
     pub fn write_page(&mut self, result: &QueryResult) -> Result<()> {
         for row in &result.rows {
+            if self.cancellation.is_cancelled() {
+                return Err(self.cancellation.error());
+            }
             if self.row == SHEET_ROWS {
                 self.sheet += 1;
                 let worksheet = self.workbook.add_worksheet_with_constant_memory();
@@ -116,13 +121,57 @@ impl XlsxWriter {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
-        let temporary = tempfile::NamedTempFile::new_in(parent)?;
-        self.workbook.save(temporary.path()).map_err(error)?;
+        if self.cancellation.is_cancelled() {
+            return Err(self.cancellation.error());
+        }
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        let saved = self.workbook.save_to_writer(CancellableWriter {
+            inner: temporary.as_file_mut(),
+            cancellation: &self.cancellation,
+        });
+        if self.cancellation.is_cancelled() {
+            return Err(self.cancellation.error());
+        }
+        saved.map_err(error)?;
         temporary.as_file().sync_all()?;
+        if self.cancellation.is_cancelled() {
+            return Err(self.cancellation.error());
+        }
         temporary.persist(&self.path).map_err(|e| e.error)?;
         #[cfg(unix)]
         std::fs::File::open(parent)?.sync_all()?;
         Ok(())
+    }
+}
+
+// Check ZIP output operations so compression can be stopped as well as row reads.
+struct CancellableWriter<'a, W> {
+    inner: W,
+    cancellation: &'a db_common::QueryCancellation,
+}
+impl<W> CancellableWriter<'_, W> {
+    fn check(&self) -> std::io::Result<()> {
+        if self.cancellation.is_cancelled() {
+            Err(std::io::Error::other("Export cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+}
+impl<W: std::io::Write> std::io::Write for CancellableWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.check()?;
+        self.inner.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.check()?;
+        self.inner.flush()
+    }
+}
+impl<W: std::io::Seek> std::io::Seek for CancellableWriter<'_, W> {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.check()?;
+        self.inner.seek(position)
     }
 }
 
@@ -131,6 +180,49 @@ mod tests {
     use super::*;
     use db_common::Row;
     use std::io::Read;
+
+    #[test]
+    fn cancellation_interrupts_workbook_zip_output() {
+        // Trigger cancellation from the first ZIP write, deterministically,
+        // instead of relying on a thread racing a small workbook's compression.
+        struct CancelOnWrite {
+            file: std::io::Cursor<Vec<u8>>,
+            cancellation: db_common::QueryCancellation,
+        }
+        impl std::io::Write for CancelOnWrite {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let count = std::io::Write::write(&mut self.file, bytes)?;
+                self.cancellation.cancel();
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl std::io::Seek for CancelOnWrite {
+            fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+                std::io::Seek::seek(&mut self.file, from)
+            }
+        }
+        let cancellation = db_common::QueryCancellation::default();
+        let mut workbook = Workbook::new();
+        workbook
+            .add_worksheet_with_constant_memory()
+            .write_string(0, 0, "value")
+            .unwrap();
+        let mut output = CancelOnWrite {
+            file: std::io::Cursor::new(Vec::new()),
+            cancellation: cancellation.clone(),
+        };
+        assert!(workbook
+            .save_to_writer(CancellableWriter {
+                inner: &mut output,
+                cancellation: &cancellation,
+            })
+            .is_err());
+        assert!(cancellation.is_cancelled());
+        assert!(zip::ZipArchive::new(output.file).is_err());
+    }
 
     #[test]
     fn workbook_preserves_large_integers_and_never_promotes_text_to_formulas() {

@@ -137,22 +137,86 @@ async fn check_export_stream(
     let mut sizes = Vec::new();
     let mut count = 0;
     executor
-        .stream_export(profile, password, sql, config, &mut |batch| {
-            sizes.push(batch.rows.len());
-            count += batch.rows.len();
-            Ok(())
-        })
+        .stream_export(
+            profile,
+            password,
+            sql,
+            config,
+            Default::default(),
+            &mut |batch| {
+                sizes.push(batch.rows.len());
+                count += batch.rows.len();
+                Ok(())
+            },
+        )
         .await
         .unwrap();
     assert_eq!(sizes, [5000, 5000, 2005]);
     assert_eq!(count, 12005);
     let error = executor
-        .stream_export(profile, password, sql, config, &mut |_| {
-            Err(db_common::AppError::internal("consumer stopped"))
-        })
+        .stream_export(
+            profile,
+            password,
+            sql,
+            config,
+            Default::default(),
+            &mut |_| Err(db_common::AppError::internal("consumer stopped")),
+        )
         .await
         .unwrap_err();
     assert_eq!(error.message, "consumer stopped");
+    let cancellation = db_common::QueryCancellation::default();
+    let mut batches = 0;
+    let error = tokio::time::timeout(
+        Duration::from_secs(15),
+        executor.stream_export(
+            profile,
+            password,
+            sql,
+            config,
+            cancellation.clone(),
+            &mut |_| {
+                batches += 1;
+                cancellation.cancel();
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(error.kind, db_common::ErrorKind::Cancelled);
+    assert_eq!(batches, 1);
+
+    // Cancel while waiting for the server, before any batch is available.
+    let cancellation = db_common::QueryCancellation::default();
+    let slow_sql = match executor.kind() {
+        DataSourceKind::MySql => "SELECT SLEEP(30)",
+        DataSourceKind::PostgreSql => "SELECT pg_sleep(30)",
+        _ => unreachable!(),
+    };
+    let cancel = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancellation.cancel();
+    };
+    let stream = async {
+        executor
+            .stream_export(
+                profile,
+                password,
+                slow_sql,
+                config,
+                cancellation.clone(),
+                &mut |_| panic!("cancelled slow query produced a batch"),
+            )
+            .await
+    };
+    let (_, result) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(cancel, stream)
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.unwrap_err().kind, db_common::ErrorKind::Cancelled);
     let result = tokio::time::timeout(
         Duration::from_secs(15),
         executor.execute(profile, password, &["SELECT 42".into()], config),

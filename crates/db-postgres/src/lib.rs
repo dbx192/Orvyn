@@ -557,12 +557,22 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
         password: Option<&str>,
         sql: &str,
         pool_config: ConnectionPoolConfig,
+        cancellation: db_common::QueryCancellation,
         consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
     ) -> Result<()> {
         use futures_util::TryStreamExt;
-        let pool = self.pool_for(profile, password, pool_config).await?;
-        let pooled = pool.acquire().await?;
-        let result = async {
+        let pool = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancellation.error()),
+            result = self.pool_for(profile, password, pool_config) => result?,
+        };
+        let pooled = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(cancellation.error()),
+            result = pool.acquire() => result?,
+        };
+        let token = pooled.client()?.cancel_token();
+        let execution = async {
             let stream = pooled
                 .client()?
                 .query_raw(
@@ -574,6 +584,9 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
             tokio::pin!(stream);
             let mut batch = Vec::with_capacity(5_000);
             while let Some(row) = stream.try_next().await.map_err(query_error)? {
+                if cancellation.is_cancelled() {
+                    return Err(cancellation.error());
+                }
                 batch.push(row);
                 if batch.len() == 5_000 {
                     consume(postgres_rows_to_query_result(
@@ -586,8 +599,31 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
                 consume(postgres_rows_to_query_result(sql, batch))?;
             }
             Ok(())
+        };
+        let result = {
+            tokio::pin!(execution);
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(cancellation.error()),
+                result = &mut execution => result,
+            }
+        };
+        if result.is_err() || cancellation.is_cancelled() {
+            let cancel = async {
+                match pool.tls.clone() {
+                    Some(tls) => token.cancel_query(tls).await,
+                    None => token.cancel_query(NoTls).await,
+                }
+            };
+            let sent = tokio::time::timeout(std::time::Duration::from_secs(5), cancel).await;
+            if cancellation.is_cancelled() {
+                return if matches!(sent, Ok(Ok(()))) {
+                    Err(cancellation.error())
+                } else {
+                    Err(AppError::new(ErrorKind::Cancelled, "Export cancelled; PostgreSQL server termination unconfirmed; connection discarded"))
+                };
+            }
         }
-        .await;
         // A failed consumer leaves unread rows; drop this connection rather than
         // returning a busy session to the pool.
         if result.is_ok() {

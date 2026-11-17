@@ -305,6 +305,7 @@ pub trait RelationalQueryExecutor: Send + Sync {
         _password: Option<&str>,
         _sql: &str,
         _pool_config: ConnectionPoolConfig,
+        _cancellation: crate::QueryCancellation,
         _consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
     ) -> Result<()> {
         Err(crate::AppError::unsupported(

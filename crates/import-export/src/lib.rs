@@ -15,6 +15,8 @@ pub struct QueryResultFileWriter {
     output: ExportWriter,
     columns: Vec<String>,
     rows_written: usize,
+    cancellation: db_common::QueryCancellation,
+    staging: Option<(tempfile::NamedTempFile, std::path::PathBuf)>,
 }
 
 enum ExportWriter {
@@ -25,6 +27,19 @@ enum ExportWriter {
 
 impl QueryResultFileWriter {
     pub fn create(format: ExportFormat, path: &Path, columns: Vec<String>) -> Result<Self> {
+        let staging = if format == ExportFormat::Xlsx {
+            None
+        } else {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            Some((tempfile::NamedTempFile::new_in(parent)?, path.to_path_buf()))
+        };
+        let output_path = staging
+            .as_ref()
+            .map(|(file, _)| file.path())
+            .unwrap_or(path);
         let output = match format {
             ExportFormat::Xlsx => {
                 ExportWriter::Xlsx(Box::new(xlsx::XlsxWriter::create(path, &columns)?))
@@ -35,7 +50,7 @@ impl QueryResultFileWriter {
                 } else {
                     b'\t'
                 };
-                let mut file = File::create(path).map_err(db_common::AppError::from)?;
+                let mut file = File::create(output_path).map_err(db_common::AppError::from)?;
                 // Excel and many Windows tools otherwise interpret an UTF-8 CSV using the
                 // current ANSI code page, which corrupts Chinese text.
                 if format == ExportFormat::Csv {
@@ -51,7 +66,7 @@ impl QueryResultFileWriter {
                 ExportWriter::Delimited(Box::new(writer))
             }
             ExportFormat::Json => {
-                let file = File::create(path).map_err(db_common::AppError::from)?;
+                let file = File::create(output_path).map_err(db_common::AppError::from)?;
                 let mut writer = BufWriter::new(file);
                 writer
                     .write_all(b"[\n")
@@ -63,15 +78,31 @@ impl QueryResultFileWriter {
             output,
             columns,
             rows_written: 0,
+            cancellation: Default::default(),
+            staging,
         })
     }
 
+    pub fn with_cancellation(mut self, cancellation: db_common::QueryCancellation) -> Self {
+        if let ExportWriter::Xlsx(writer) = &mut self.output {
+            writer.cancellation = cancellation.clone();
+        }
+        self.cancellation = cancellation;
+        self
+    }
+
     pub fn write_page(&mut self, result: &QueryResult) -> Result<usize> {
+        if self.cancellation.is_cancelled() {
+            return Err(self.cancellation.error());
+        }
         let page_rows = result.rows.len();
         match &mut self.output {
             ExportWriter::Xlsx(writer) => writer.write_page(result)?,
             ExportWriter::Delimited(writer) => {
                 for row in &result.rows {
+                    if self.cancellation.is_cancelled() {
+                        return Err(self.cancellation.error());
+                    }
                     let record = (0..self.columns.len())
                         .map(|index| {
                             row.values
@@ -87,6 +118,9 @@ impl QueryResultFileWriter {
             }
             ExportWriter::Json(writer) => {
                 for row in &result.rows {
+                    if self.cancellation.is_cancelled() {
+                        return Err(self.cancellation.error());
+                    }
                     if self.rows_written > 0 {
                         writer
                             .write_all(b",\n")
@@ -113,6 +147,9 @@ impl QueryResultFileWriter {
     }
 
     pub fn finish(mut self) -> Result<usize> {
+        if self.cancellation.is_cancelled() {
+            return Err(self.cancellation.error());
+        }
         match &mut self.output {
             ExportWriter::Xlsx(writer) => writer.finish()?,
             ExportWriter::Delimited(writer) => writer.flush().map_err(db_common::AppError::from)?,
@@ -122,6 +159,18 @@ impl QueryResultFileWriter {
                     .map_err(db_common::AppError::from)?;
                 writer.flush().map_err(db_common::AppError::from)?;
             }
+        }
+        // Close the file handle before replacing the destination on Windows.
+        drop(self.output);
+        if let Some((temporary, target)) = self.staging {
+            if self.cancellation.is_cancelled() {
+                return Err(self.cancellation.error());
+            }
+            temporary.as_file().sync_all()?;
+            if self.cancellation.is_cancelled() {
+                return Err(self.cancellation.error());
+            }
+            temporary.persist(target).map_err(|e| e.error)?;
         }
         Ok(self.rows_written)
     }
@@ -405,6 +454,54 @@ mod tests {
             logical_type,
             nullable: true,
             primary_key: false,
+        }
+    }
+
+    #[test]
+    fn cancelled_exports_preserve_targets_clean_up_and_allow_retry() {
+        for format in [
+            ExportFormat::Csv,
+            ExportFormat::Json,
+            ExportFormat::ExcelCompatible,
+            ExportFormat::Xlsx,
+        ] {
+            for existing in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("export");
+                if existing {
+                    std::fs::write(&path, b"previous export").unwrap();
+                }
+                let cancellation = db_common::QueryCancellation::default();
+                let mut writer = QueryResultFileWriter::create(format, &path, vec!["id".into()])
+                    .unwrap()
+                    .with_cancellation(cancellation.clone());
+                let mut page = QueryResult::empty("SELECT 1");
+                page.rows.push(Row::new(vec![CellValue::Int(1)]));
+                writer.write_page(&page).unwrap();
+                cancellation.cancel();
+                assert_eq!(
+                    writer.write_page(&page).unwrap_err().kind,
+                    db_common::ErrorKind::Cancelled
+                );
+                assert_eq!(
+                    writer.finish().unwrap_err().kind,
+                    db_common::ErrorKind::Cancelled
+                );
+                if existing {
+                    assert_eq!(std::fs::read(&path).unwrap(), b"previous export");
+                } else {
+                    assert!(!path.exists());
+                }
+                assert_eq!(
+                    std::fs::read_dir(directory.path()).unwrap().count(),
+                    usize::from(existing)
+                );
+                let mut retry =
+                    QueryResultFileWriter::create(format, &path, vec!["id".into()]).unwrap();
+                retry.write_page(&page).unwrap();
+                assert_eq!(retry.finish().unwrap(), 1);
+                assert_ne!(std::fs::read(&path).unwrap(), b"previous export");
+            }
         }
     }
 }
