@@ -1,7 +1,7 @@
 use super::{
     export_sql::{database_export_mode_label, qualified_table_label},
-    payloads::ClearRequest,
-    style::current_palette,
+    payloads::{ClearRequest, TableExportProgress},
+    style::{current_palette, Palette},
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
@@ -12,8 +12,8 @@ use crate::ui::{
 };
 use db_common::ConnectionId;
 use eframe::egui::{
-    vec2, Align, Button, Color32, Context, Frame, Layout, Margin, RichText, Stroke, TextEdit,
-    TopBottomPanel, Window,
+    vec2, Align, Button, Color32, Context, Frame, Layout, Margin, ProgressBar, RichText, Spinner,
+    Stroke, TextEdit, TopBottomPanel, Window,
 };
 use import_export::ExportFormat;
 
@@ -381,12 +381,28 @@ impl DesktopApp {
                     );
                 }
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(&self.state.status)
-                            .small()
-                            .color(palette.fg_muted),
-                    )
-                    .on_hover_text(&self.state.status);
+                    // While a table export is running, replace the status text
+                    // with live row progress so it is not overwritten by panels.
+                    let export_progress = self
+                        .table_export_progress
+                        .as_ref()
+                        .and_then(|cell| cell.lock().ok());
+                    if let Some(progress) = export_progress.as_ref() {
+                        if let Some((ok, message, _)) = &progress.outcome {
+                            // Finished result: survives the panels' per-frame
+                            // status overwrites for a few seconds.
+                            let text = format!("{} {message}", if *ok { "✓" } else { "✗" });
+                            let color = if *ok {
+                                Color32::from_rgb(94, 200, 120)
+                            } else {
+                                palette.danger
+                            };
+                            ui.label(RichText::new(&text).small().color(color))
+                                .on_hover_text(&text);
+                        } else {
+                            self.render_export_running_progress(ui, palette, progress);
+                        }
+                    }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(selected_count) = self
@@ -439,6 +455,36 @@ impl DesktopApp {
                     });
                 });
             });
+    }
+
+    /// Spinner + live row counter (plus a bar once the total is known) for
+    /// a running table export.
+    fn render_export_running_progress(
+        &self,
+        ui: &mut eframe::egui::Ui,
+        palette: Palette,
+        progress: &TableExportProgress,
+    ) {
+        ui.add(Spinner::new());
+        let progress_label = match progress.total_rows {
+            Some(total) if total > 0 => format!(
+                "{} export {}: {}/{} rows",
+                progress.format_label, progress.table_name, progress.rows_done, total
+            ),
+            _ => format!(
+                "{} export {}: {} rows",
+                progress.format_label, progress.table_name, progress.rows_done
+            ),
+        };
+        ui.label(RichText::new(&progress_label).small().color(palette.fg))
+            .on_hover_text(&progress_label);
+        if let Some(fraction) = progress
+            .total_rows
+            .filter(|total| *total > 0)
+            .map(|total| (progress.rows_done as f32 / total as f32).min(1.0))
+        {
+            ui.add_sized([140.0, 16.0], ProgressBar::new(fraction));
+        }
     }
 
     pub(super) fn error_window(&mut self, ctx: &Context) {

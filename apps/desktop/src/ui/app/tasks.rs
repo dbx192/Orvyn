@@ -6,7 +6,7 @@ use super::{
     payloads::{
         AlterTablePayload, ClearPayload, ClearRequest, DatabaseExportPayload, DropTablePayload,
         DropTableRequest, IndexCreatePayload, PendingTask, StructDdlPayload, TableDataPayload,
-        TableExportPayload, TableExportRequest, TableStructurePayload,
+        TableExportPayload, TableExportProgress, TableExportRequest, TableStructurePayload,
     },
     ActivePanel, DesktopApp,
 };
@@ -26,6 +26,7 @@ use import_export::{ExportFormat, QueryResultFileWriter};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 impl DesktopApp {
@@ -156,27 +157,46 @@ impl DesktopApp {
                         Ok(payload) => {
                             let format_label = match payload.format {
                                 ExportFormat::Xlsx => "XLSX",
-                            ExportFormat::Csv => "CSV",
+                                ExportFormat::Csv => "CSV",
                                 ExportFormat::Json => "JSON",
                                 ExportFormat::ExcelCompatible => "TSV",
                             };
-                            self.state.set_status(format!(
+                            let message = format!(
                                 "{} export completed: {} ({} rows) -> {}",
                                 format_label,
                                 payload.table_name,
                                 payload.row_count,
                                 payload.path.display()
-                            ));
+                            );
+                            self.state.set_status(message.clone());
+                            self.set_table_export_outcome(true, message);
                         }
                         Err(error) => {
-                            self.state
-                                .set_status(format!("Export failed: {}", error.message));
+                            let message = error.message.clone();
+                            self.report_task_error("Table export failed", &error);
+                            self.set_table_export_outcome(
+                                false,
+                                format!("Table export failed: {message}"),
+                            );
                         }
                     }
                 }
             }
             if !done {
                 self.pending_table_export = Some(cell);
+            }
+        }
+
+        // Drop the finished outcome once it has had time to be read.
+        if let Some(progress_cell) = self.table_export_progress.clone() {
+            let expired = progress_cell.lock().ok().is_some_and(|progress| {
+                progress
+                    .outcome
+                    .as_ref()
+                    .is_some_and(|(_, _, at)| at.elapsed() > Duration::from_secs(10))
+            });
+            if expired {
+                self.table_export_progress = None;
             }
         }
 
@@ -198,8 +218,7 @@ impl DesktopApp {
                             ));
                         }
                         Err(error) => {
-                            self.state
-                                .set_status(format!("Database export failed: {}", error.message));
+                            self.report_task_error("Database export failed", &error);
                         }
                     }
                 }
@@ -399,7 +418,7 @@ impl DesktopApp {
                             self.active_panel = ActivePanel::TableStructure;
                         }
                         Err(error) => {
-                            self.report_structure_error("Alter table failed", &error);
+                            self.report_task_error("Alter table failed", &error);
                         }
                     }
                 }
@@ -429,7 +448,7 @@ impl DesktopApp {
                             self.active_panel = ActivePanel::TableStructure;
                         }
                         Err(error) => {
-                            self.report_structure_error("DDL failed", &error);
+                            self.report_task_error("DDL failed", &error);
                         }
                     }
                 }
@@ -654,6 +673,31 @@ impl DesktopApp {
         let runtime = self.runtime.clone();
         let cell: PendingTask<TableExportPayload> = Arc::new(Mutex::new(None));
         self.pending_table_export = Some(cell.clone());
+        let progress: Arc<Mutex<TableExportProgress>> = Arc::new(Mutex::new(TableExportProgress {
+            table_name: {
+                let qualifier = request
+                    .schema
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        request
+                            .database
+                            .as_deref()
+                            .filter(|value| !value.is_empty())
+                    });
+                qualified_table_label(qualifier, &request.table)
+            },
+            format_label: match request.format {
+                ExportFormat::Xlsx => "XLSX",
+                ExportFormat::Csv => "CSV",
+                ExportFormat::Json => "JSON",
+                ExportFormat::ExcelCompatible => "TSV",
+            },
+            rows_done: 0,
+            total_rows: None,
+            outcome: None,
+        }));
+        self.table_export_progress = Some(progress.clone());
 
         runtime.spawn(async move {
             let result = async {
@@ -716,6 +760,11 @@ impl DesktopApp {
                     });
                     let page_rows = writer.write_page(&page)?;
                     offset = offset.saturating_add(page_rows as u64);
+                    {
+                        let mut guard = progress.lock().unwrap();
+                        guard.rows_done = offset;
+                        guard.total_rows = total_rows;
+                    }
                     if page_rows < EXPORT_PAGE_SIZE as usize
                         || total_rows.is_some_and(|total| offset >= total)
                     {
@@ -1119,7 +1168,19 @@ impl DesktopApp {
         }
     }
 
-    fn report_structure_error(&mut self, title: &str, error: &AppError) {
+    /// Store the finished table-export result for the status bar, where the
+    /// panels' per-frame status messages cannot overwrite it.
+    fn set_table_export_outcome(&mut self, ok: bool, message: String) {
+        if let Some(cell) = self.table_export_progress.clone() {
+            if let Ok(mut progress) = cell.lock() {
+                progress.outcome = Some((ok, message, Instant::now()));
+            }
+        }
+    }
+
+    /// Record a failed background operation: status bar plus the persistent
+    /// error window, which panels never overwrite.
+    fn report_task_error(&mut self, title: &str, error: &AppError) {
         self.state
             .set_status(format!("{title}: {}", error.message));
         let mut ui_error = UiError::new(title, error.message.clone());

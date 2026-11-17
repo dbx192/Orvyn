@@ -1,6 +1,25 @@
 use db_common::{AppError, CellValue, QueryResult, Result};
 use rust_xlsxwriter::Workbook;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+
+/// XLSX cells are XML 1.0 text, which cannot carry most control characters.
+/// Real tables often contain them (e.g. SQL Server VARCHAR truncation, BEL),
+/// so drop the illegal ones instead of failing the whole export.
+fn sanitize_xml(text: &str) -> Cow<'_, str> {
+    if text.chars().all(is_xml_char) {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(text.chars().filter(|c| is_xml_char(*c)).collect())
+    }
+}
+
+fn is_xml_char(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
+}
 
 /// A native XLSX sheet written in row order with bounded memory.
 pub(crate) struct XlsxWriter {
@@ -21,7 +40,7 @@ impl XlsxWriter {
         let worksheet = workbook.add_worksheet_with_constant_memory();
         for (index, column) in columns.iter().enumerate() {
             worksheet
-                .write_string(0, index as u16, column)
+                .write_string(0, index as u16, &*sanitize_xml(column))
                 .map_err(error)?;
         }
         Ok(Self {
@@ -67,8 +86,10 @@ impl XlsxWriter {
                     // and DECIMAL values as literal text to avoid silent rounding.
                     // write_string also prevents user text from becoming a formula.
                     value => {
+                        let cell_text = super::export_cell_value(value);
+                        let text = sanitize_xml(&cell_text);
                         worksheet
-                            .write_string(self.row, column, super::export_cell_value(value))
+                            .write_string(self.row, column, &*text)
                             .map_err(error)?;
                     }
                 }
@@ -131,5 +152,38 @@ mod tests {
         assert!(sheet.contains("=1+1"));
         assert!(!sheet.contains("<f>"));
         assert!(sheet.contains("r=\"A3\""));
+    }
+
+    #[test]
+    fn strips_xml_illegal_control_characters_instead_of_failing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dirty.xlsx");
+        let mut writer = XlsxWriter::create(&path, &["id\u{1}".into(), "note".into()]).unwrap();
+        let page = QueryResult {
+            statement: String::new(),
+            columns: vec![],
+            rows: vec![Row::new(vec![
+                CellValue::Int(7),
+                CellValue::Text("a\u{0}b\u{2}c".into()),
+            ])],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            notices: vec![],
+            metadata: Default::default(),
+        };
+        writer.write_page(&page).unwrap();
+        writer.finish().unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        let mut sheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut sheet)
+            .unwrap();
+        // Inline strings hold the sanitized header and cell text.
+        assert!(!sheet.contains('\u{1}'));
+        assert!(!sheet.contains('\u{2}'));
+        assert!(!sheet.contains('\u{0}'));
+        assert!(sheet.contains(">abc<"));
     }
 }

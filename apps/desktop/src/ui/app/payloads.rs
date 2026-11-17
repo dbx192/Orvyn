@@ -7,6 +7,7 @@ use import_export::ExportFormat;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 pub(super) type PendingTask<T> = Arc<Mutex<Option<Result<T, AppError>>>>;
@@ -51,6 +52,17 @@ pub(super) struct TableExportPayload {
     pub(super) path: PathBuf,
     pub(super) format: ExportFormat,
     pub(super) row_count: usize,
+}
+
+/// Live progress of the in-flight table export, shared with the UI thread.
+pub(super) struct TableExportProgress {
+    pub(super) table_name: String,
+    pub(super) format_label: &'static str,
+    pub(super) rows_done: u64,
+    pub(super) total_rows: Option<u64>,
+    /// Final result kept in the status bar after completion:
+    /// (success, message, finished at).
+    pub(super) outcome: Option<(bool, String, Instant)>,
 }
 
 pub(super) struct DatabaseExportPayload {

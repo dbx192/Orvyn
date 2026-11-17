@@ -11,7 +11,8 @@ mod tree;
 use self::payloads::{
     AlterTablePayload, ClearPayload, ClearRequest, DatabaseExportPayload, DropTablePayload,
     DropTableRequest, ImportTableRequest, IndexCreatePayload, PendingTask, StructDdlPayload,
-    TableDataPayload, TableExportPayload, TableExportRequest, TableStructurePayload,
+    TableDataPayload, TableExportPayload, TableExportProgress, TableExportRequest,
+    TableStructurePayload,
 };
 use crate::ui::{
     connection_manager::ConnectionManagerUi,
@@ -60,6 +61,8 @@ pub struct DesktopApp {
     pending_structure_load: Option<PendingTask<TableStructurePayload>>,
     /// Pending async export query load and file write.
     pending_table_export: Option<PendingTask<TableExportPayload>>,
+    /// Live row progress of the in-flight table export.
+    table_export_progress: Option<Arc<Mutex<TableExportProgress>>>,
     pending_database_export: Option<PendingTask<DatabaseExportPayload>>,
     pending_index_create: Option<PendingTask<IndexCreatePayload>>,
     pending_table_drop: Option<PendingTask<DropTablePayload>>,
@@ -143,6 +146,7 @@ impl DesktopApp {
             pending_table_load: None,
             pending_structure_load: None,
             pending_table_export: None,
+            table_export_progress: None,
             pending_database_export: None,
             pending_index_create: None,
             pending_table_drop: None,
