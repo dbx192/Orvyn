@@ -77,6 +77,7 @@ pub enum AlterTableRequest {
         column_type: String,
         nullable: bool,
         default_value: Option<String>,
+        comment: Option<String>,
     },
     DropColumn {
         connection_id: ConnectionId,
@@ -94,6 +95,7 @@ pub enum AlterTableRequest {
         new_type: String,
         nullable: bool,
         default_value: Option<String>,
+        comment: Option<String>,
     },
     RenameColumn {
         connection_id: ConnectionId,
@@ -102,6 +104,14 @@ pub enum AlterTableRequest {
         table: String,
         old_name: String,
         new_name: String,
+    },
+    SetPrimaryKey {
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        old_columns: Vec<String>,
+        columns: Vec<String>,
     },
     DropIndex {
         connection_id: ConnectionId,
@@ -131,6 +141,7 @@ impl AlterTableRequest {
             | AlterTableRequest::DropColumn { connection_id, .. }
             | AlterTableRequest::ModifyColumn { connection_id, .. }
             | AlterTableRequest::RenameColumn { connection_id, .. }
+            | AlterTableRequest::SetPrimaryKey { connection_id, .. }
             | AlterTableRequest::DropIndex { connection_id, .. }
             | AlterTableRequest::AddForeignKey { connection_id, .. } => *connection_id,
         }
@@ -141,6 +152,7 @@ impl AlterTableRequest {
             | AlterTableRequest::DropColumn { table, .. }
             | AlterTableRequest::ModifyColumn { table, .. }
             | AlterTableRequest::RenameColumn { table, .. }
+            | AlterTableRequest::SetPrimaryKey { table, .. }
             | AlterTableRequest::DropIndex { table, .. }
             | AlterTableRequest::AddForeignKey { table, .. } => table,
         }
@@ -152,6 +164,7 @@ impl AlterTableRequest {
             | AlterTableRequest::DropColumn { database, .. }
             | AlterTableRequest::ModifyColumn { database, .. }
             | AlterTableRequest::RenameColumn { database, .. }
+            | AlterTableRequest::SetPrimaryKey { database, .. }
             | AlterTableRequest::DropIndex { database, .. }
             | AlterTableRequest::AddForeignKey { database, .. } => database.as_deref(),
         }
@@ -163,6 +176,7 @@ impl AlterTableRequest {
             | AlterTableRequest::DropColumn { schema, .. }
             | AlterTableRequest::ModifyColumn { schema, .. }
             | AlterTableRequest::RenameColumn { schema, .. }
+            | AlterTableRequest::SetPrimaryKey { schema, .. }
             | AlterTableRequest::DropIndex { schema, .. }
             | AlterTableRequest::AddForeignKey { schema, .. } => schema.as_deref(),
         }
@@ -351,6 +365,7 @@ pub fn build_alter_table_sql(
             column_type,
             nullable,
             default_value,
+            comment,
             ..
         } => {
             let table_sql = qualified_table_sql(
@@ -367,7 +382,29 @@ pub fn build_alter_table_sql(
                 *nullable,
                 default_value.as_deref(),
             )?;
-            Ok(format!("ALTER TABLE {table_sql} ADD COLUMN {column_sql}"))
+            let mut sql = format!("ALTER TABLE {table_sql} ADD COLUMN {column_sql}");
+            if let Some(comment) = comment {
+                match kind.protocol_family() {
+                    ProtocolFamily::MySql => {
+                        sql.push_str(" COMMENT ");
+                        sql.push_str(&sql_string_literal(comment));
+                    }
+                    ProtocolFamily::PostgreSql | ProtocolFamily::DuckDb => {
+                        sql.push_str("; ");
+                        sql.push_str(&column_comment_sql(
+                            dialect.as_ref(),
+                            kind,
+                            request.database(),
+                            request.schema(),
+                            table,
+                            column_name,
+                            Some(comment),
+                        )?);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(sql)
         }
         AlterTableRequest::DropColumn {
             table, column_name, ..
@@ -388,6 +425,7 @@ pub fn build_alter_table_sql(
             new_type,
             nullable,
             default_value,
+            comment,
             ..
         } => {
             let table_sql = qualified_table_sql(
@@ -408,7 +446,8 @@ pub fn build_alter_table_sql(
             // MySQL uses MODIFY COLUMN, PostgreSQL/SQLite/DuckDB use ALTER COLUMN ... TYPE
             match kind.protocol_family() {
                 ProtocolFamily::MySql => Ok(format!(
-                    "ALTER TABLE {table_sql} MODIFY COLUMN {column_def}"
+                    "ALTER TABLE {table_sql} MODIFY COLUMN {column_def} COMMENT {}",
+                    sql_string_literal(comment.as_deref().unwrap_or(""))
                 )),
                 ProtocolFamily::PostgreSql => {
                     let mut statements = vec![format!(
@@ -428,12 +467,36 @@ pub fn build_alter_table_sql(
                             "ALTER TABLE {table_sql} ALTER COLUMN {column_sql} SET DEFAULT {default}"
                         ));
                     }
+                    statements.push(column_comment_sql(
+                        dialect.as_ref(),
+                        kind,
+                        request.database(),
+                        request.schema(),
+                        table,
+                        column_name,
+                        comment.as_deref(),
+                    )?);
                     Ok(statements.join("; "))
                 }
-                ProtocolFamily::Sqlite | ProtocolFamily::DuckDb => {
+                ProtocolFamily::DuckDb => {
                     // SQLite < 3.35 doesn't support full ALTER COLUMN; DuckDB does.
-                    Ok(format!("ALTER TABLE {table_sql} ALTER COLUMN {column_sql} SET DATA TYPE {new_type}"))
+                    let alter = format!(
+                        "ALTER TABLE {table_sql} ALTER COLUMN {column_sql} SET DATA TYPE {new_type}"
+                    );
+                    let comment = column_comment_sql(
+                        dialect.as_ref(),
+                        kind,
+                        request.database(),
+                        request.schema(),
+                        table,
+                        column_name,
+                        comment.as_deref(),
+                    )?;
+                    Ok(format!("{alter}; {comment}"))
                 }
+                ProtocolFamily::Sqlite => Ok(format!(
+                    "ALTER TABLE {table_sql} ALTER COLUMN {column_sql} SET DATA TYPE {new_type}"
+                )),
                 ProtocolFamily::SqlServer
                 | ProtocolFamily::ClickHouse
                 | ProtocolFamily::Tdengine => Err(AppError::unsupported(
@@ -482,6 +545,50 @@ pub fn build_alter_table_sql(
                     "unsupported data source for RENAME COLUMN",
                 )),
             }
+        }
+        AlterTableRequest::SetPrimaryKey {
+            table,
+            old_columns,
+            columns,
+            ..
+        } => {
+            if !matches!(
+                kind.protocol_family(),
+                ProtocolFamily::MySql | ProtocolFamily::PostgreSql
+            ) {
+                return Err(AppError::unsupported(
+                    "changing primary keys is not available for this data source",
+                ));
+            }
+            let table_sql = qualified_table_sql(
+                dialect.as_ref(),
+                kind,
+                request.database(),
+                request.schema(),
+                table,
+            )?;
+            let mut statements = Vec::new();
+            if !old_columns.is_empty() {
+                statements.push(match kind.protocol_family() {
+                    ProtocolFamily::MySql => format!("ALTER TABLE {table_sql} DROP PRIMARY KEY"),
+                    ProtocolFamily::PostgreSql => format!(
+                        "ALTER TABLE {table_sql} DROP CONSTRAINT IF EXISTS {}",
+                        quote_id(dialect.as_ref(), &format!("{table}_pkey"))?
+                    ),
+                    _ => unreachable!(),
+                });
+            }
+            if !columns.is_empty() {
+                let quoted = columns
+                    .iter()
+                    .map(|column| quote_id(dialect.as_ref(), column))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ");
+                statements.push(format!(
+                    "ALTER TABLE {table_sql} ADD PRIMARY KEY ({quoted})"
+                ));
+            }
+            Ok(statements.join("; "))
         }
         AlterTableRequest::DropIndex {
             table, index_name, ..
@@ -594,6 +701,34 @@ fn build_column_definition(
         }
     }
     Ok(def)
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn column_comment_sql(
+    dialect: &dyn Dialect,
+    kind: DataSourceKind,
+    database: Option<&str>,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+    comment: Option<&str>,
+) -> Result<String, AppError> {
+    let table_sql = qualified_table_sql(dialect, kind, database, schema, table)?;
+    let column_sql = quote_id(dialect, column)?;
+    let value = comment
+        .map(sql_string_literal)
+        .unwrap_or_else(|| "NULL".to_string());
+    match kind.protocol_family() {
+        ProtocolFamily::PostgreSql | ProtocolFamily::DuckDb => Ok(format!(
+            "COMMENT ON COLUMN {table_sql}.{column_sql} IS {value}"
+        )),
+        _ => Err(AppError::unsupported(
+            "column comments are not supported for this data source",
+        )),
+    }
 }
 
 fn quote_id(dialect: &dyn Dialect, value: &str) -> Result<String, AppError> {
@@ -985,6 +1120,7 @@ impl TableStructureView {
                         if original.database_type != col.database_type
                             || original.nullable != col.nullable
                             || original.default_value != col.default_value
+                            || original.comment != col.comment
                         {
                             changes.push(AlterTableRequest::ModifyColumn {
                                 connection_id: c,
@@ -995,6 +1131,7 @@ impl TableStructureView {
                                 new_type: col.database_type.clone(),
                                 nullable: col.nullable,
                                 default_value: col.default_value.clone(),
+                                comment: col.comment.clone(),
                             });
                         }
                     }
@@ -1009,9 +1146,32 @@ impl TableStructureView {
                         column_type: col.database_type.clone(),
                         nullable: col.nullable,
                         default_value: col.default_value.clone(),
+                        comment: col.comment.clone(),
                     });
                 }
             }
+        }
+        let original_primary_key = self
+            .original_columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let current_primary_key = self
+            .columns
+            .iter()
+            .filter(|column| column.primary_key)
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        if original_primary_key != current_primary_key {
+            changes.push(AlterTableRequest::SetPrimaryKey {
+                connection_id: c,
+                database: db.clone(),
+                schema: sc.clone(),
+                table: tbl.clone(),
+                old_columns: original_primary_key,
+                columns: current_primary_key,
+            });
         }
         for original in &self.original_columns {
             if !seen.contains(original.name.as_str()) {
@@ -3485,6 +3645,7 @@ mod tests {
             column_type: "VARCHAR(255)".to_string(),
             nullable: false,
             default_value: Some("'unknown'".to_string()),
+            comment: None,
         };
         (req, conn)
     }
@@ -3533,9 +3694,48 @@ mod tests {
             new_type: "VARCHAR(512)".to_string(),
             nullable: true,
             default_value: None,
+            comment: None,
         };
         let sql = build_alter_table_sql(&req, DataSourceKind::MySql).unwrap();
         assert!(sql.contains("MODIFY COLUMN `email` VARCHAR(512)"));
+    }
+
+    #[test]
+    fn generates_column_comment_sql() {
+        let conn = ConnectionId::new();
+        let req = AlterTableRequest::ModifyColumn {
+            connection_id: conn,
+            database: Some("app".to_string()),
+            schema: None,
+            table: "users".to_string(),
+            column_name: "display_name".to_string(),
+            new_type: "VARCHAR(255)".to_string(),
+            nullable: true,
+            default_value: None,
+            comment: Some("用户's name".to_string()),
+        };
+        let mysql = build_alter_table_sql(&req, DataSourceKind::MySql).unwrap();
+        assert!(mysql.contains("COMMENT '用户''s name'"));
+        let postgres = build_alter_table_sql(&req, DataSourceKind::PostgreSql).unwrap();
+        assert!(postgres.contains("COMMENT ON COLUMN \"users\".\"display_name\" IS '用户''s name'"));
+    }
+
+    #[test]
+    fn generates_primary_key_change_sql() {
+        let conn = ConnectionId::new();
+        let req = AlterTableRequest::SetPrimaryKey {
+            connection_id: conn,
+            database: None,
+            schema: None,
+            table: "users".to_string(),
+            old_columns: vec!["id".to_string()],
+            columns: vec!["account_id".to_string()],
+        };
+        let sql = build_alter_table_sql(&req, DataSourceKind::MySql).unwrap();
+        assert_eq!(
+            sql,
+            "ALTER TABLE `users` DROP PRIMARY KEY; ALTER TABLE `users` ADD PRIMARY KEY (`account_id`)"
+        );
     }
 
     #[test]
@@ -3550,6 +3750,7 @@ mod tests {
             new_type: "VARCHAR(512)".to_string(),
             nullable: false,
             default_value: None,
+            comment: None,
         };
         let sql = build_alter_table_sql(&req, DataSourceKind::PostgreSql).unwrap();
         assert!(sql.contains("ALTER COLUMN \"email\" TYPE VARCHAR(512)"));

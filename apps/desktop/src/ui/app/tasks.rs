@@ -987,6 +987,9 @@ impl DesktopApp {
             } => {
                 format!("rename column {old_name} to {new_name} on {table}")
             }
+            AlterTableRequest::SetPrimaryKey { .. } => {
+                format!("update primary key on {table}")
+            }
             AlterTableRequest::DropIndex { index_name, .. } => {
                 format!("drop index {index_name} on {table}")
             }
