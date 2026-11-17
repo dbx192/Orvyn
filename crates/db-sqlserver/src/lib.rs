@@ -322,7 +322,7 @@ impl RelationalMetadataReader for SqlServerMetadataReader {
         if columns.is_empty() {
             return Err(AppError::new(
                 ErrorKind::NotFound,
-                format!("table {}.{} not found", schema, table),
+                format!("table {schema}.{table} not found"),
             ));
         }
 
@@ -330,7 +330,7 @@ impl RelationalMetadataReader for SqlServerMetadataReader {
         for column in &columns {
             let mut col = format!("    [{}] {}", column.name, column.database_type);
             if let Some(default_value) = &column.default_value {
-                col.push_str(&format!(" DEFAULT {}", default_value));
+                col.push_str(&format!(" DEFAULT {default_value}"));
             }
             if !column.nullable && !column.primary_key {
                 col.push_str(" NOT NULL");
@@ -338,7 +338,7 @@ impl RelationalMetadataReader for SqlServerMetadataReader {
             col_defs.push(col);
         }
 
-        let mut ddl = format!("CREATE TABLE [{}].[{}] (\n", schema, table);
+        let mut ddl = format!("CREATE TABLE [{schema}].[{table}] (\n");
         ddl.push_str(&col_defs.join(",\n"));
         ddl.push_str("\n);");
         Ok(ddl)

@@ -855,7 +855,7 @@ fn sqlite_create_table_sql(path: PathBuf, table: &str) -> Result<String> {
     } else {
         Err(AppError::new(
             ErrorKind::NotFound,
-            format!("table {} not found", table),
+            format!("table {table} not found"),
         ))
     }
 }

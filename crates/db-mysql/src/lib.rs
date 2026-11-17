@@ -551,7 +551,7 @@ impl RelationalMetadataReader for MySqlMetadataReader {
             )
         })?;
         let pool = self.pool_for(profile, password).await?;
-        let sql = format!("SHOW CREATE TABLE `{}`.`{}`", database, table);
+        let sql = format!("SHOW CREATE TABLE `{database}`.`{table}`");
         let row = if brand_for(profile).is_some_and(MysqlBrand::uses_text_protocol) {
             sqlx::raw_sql(&sql)
                 .fetch_one(&pool)

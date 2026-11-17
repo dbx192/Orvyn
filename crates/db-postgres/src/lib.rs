@@ -987,11 +987,11 @@ async fn pg_get_create_table(client: &Client, schema: &str, table: &str) -> Resu
     if col_rows.is_empty() {
         return Err(AppError::new(
             ErrorKind::NotFound,
-            format!("table {}.{} not found", schema, table),
+            format!("table {schema}.{table} not found"),
         ));
     }
 
-    ddl.push_str(&format!("CREATE TABLE \"{}\".\"{}\" (\n", schema, table));
+    ddl.push_str(&format!("CREATE TABLE \"{schema}\".\"{table}\" (\n"));
 
     let mut col_defs: Vec<String> = Vec::new();
     for row in &col_rows {
@@ -1000,9 +1000,9 @@ async fn pg_get_create_table(client: &Client, schema: &str, table: &str) -> Resu
         let is_nullable: String = row.get(2);
         let default: Option<String> = row.get(3);
 
-        let mut col_def = format!("    \"{}\" {}", col_name, data_type);
+        let mut col_def = format!("    \"{col_name}\" {data_type}");
         if let Some(default_value) = default {
-            col_def.push_str(&format!(" DEFAULT {}", default_value));
+            col_def.push_str(&format!(" DEFAULT {default_value}"));
         }
         if is_nullable == "NO" {
             col_def.push_str(" NOT NULL");
@@ -1064,11 +1064,11 @@ async fn pg_get_create_table(client: &Client, schema: &str, table: &str) -> Resu
 
     let fks = group_postgres_foreign_keys(fk_rows);
     for fk in &fks {
-        let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+        let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{c}\"")).collect();
         let ref_cols: Vec<String> = fk
             .referenced_columns
             .iter()
-            .map(|c| format!("\"{}\"", c))
+            .map(|c| format!("\"{c}\""))
             .collect();
         let mut fk_def = format!(
             "    CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
@@ -1078,10 +1078,10 @@ async fn pg_get_create_table(client: &Client, schema: &str, table: &str) -> Resu
             ref_cols.join(", ")
         );
         if let Some(on_del) = &fk.on_delete {
-            fk_def.push_str(&format!(" ON DELETE {}", on_del));
+            fk_def.push_str(&format!(" ON DELETE {on_del}"));
         }
         if let Some(on_upd) = &fk.on_update {
-            fk_def.push_str(&format!(" ON UPDATE {}", on_upd));
+            fk_def.push_str(&format!(" ON UPDATE {on_upd}"));
         }
         col_defs.push(fk_def);
     }
