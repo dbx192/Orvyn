@@ -547,6 +547,45 @@ impl RelationalQueryExecutor for PostgresQueryExecutor {
         DataSourceKind::PostgreSql
     }
 
+    fn supports_streaming_export(&self, _profile: &ConnectionProfile) -> bool {
+        true
+    }
+
+    async fn stream_export(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        sql: &str,
+        pool_config: ConnectionPoolConfig,
+        consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
+    ) -> Result<()> {
+        use futures_util::TryStreamExt;
+        let pool = self.pool_for(profile, password, pool_config).await?;
+        let pooled = pool.acquire().await?;
+        let result = async {
+            let stream = pooled.client()?.query_raw(sql, std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>())
+                .await.map_err(query_error)?;
+            tokio::pin!(stream);
+            let mut batch = Vec::with_capacity(5_000);
+            while let Some(row) = stream.try_next().await.map_err(query_error)? {
+                batch.push(row);
+                if batch.len() == 5_000 {
+                    consume(postgres_rows_to_query_result(sql, std::mem::replace(&mut batch, Vec::with_capacity(5_000))))?;
+                }
+            }
+            if !batch.is_empty() {
+                consume(postgres_rows_to_query_result(sql, batch))?;
+            }
+            Ok(())
+        }.await;
+        // A failed consumer leaves unread rows; drop this connection rather than
+        // returning a busy session to the pool.
+        if result.is_ok() {
+            pooled.release().await;
+        }
+        result
+    }
+
     async fn execute(
         &self,
         profile: &ConnectionProfile,

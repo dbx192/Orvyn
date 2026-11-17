@@ -293,6 +293,23 @@ pub trait RelationalMetadataReader: Send + Sync {
 pub trait RelationalQueryExecutor: Send + Sync {
     fn kind(&self) -> DataSourceKind;
 
+    /// Whether a single query can be delivered in bounded batches for export.
+    fn supports_streaming_export(&self, _profile: &ConnectionProfile) -> bool {
+        false
+    }
+
+    /// The caller supplies backpressure by consuming each batch before the next.
+    async fn stream_export(
+        &self,
+        _profile: &ConnectionProfile,
+        _password: Option<&str>,
+        _sql: &str,
+        _pool_config: ConnectionPoolConfig,
+        _consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
+    ) -> Result<()> {
+        Err(crate::AppError::unsupported("Streaming export is unavailable for this driver"))
+    }
+
     async fn execute(
         &self,
         profile: &ConnectionProfile,

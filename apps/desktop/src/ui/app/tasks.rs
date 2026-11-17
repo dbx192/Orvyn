@@ -735,6 +735,25 @@ impl DesktopApp {
                 let mut offset = 0u64;
                 let mut total_rows = None;
 
+                progress.lock().unwrap().phase = "Counting rows";
+                let streamed = query_service.stream_export(
+                    request.connection_id,
+                    request.database.as_deref(),
+                    &format!("SELECT * FROM {qualified}"),
+                    &mut |page| {
+                        total_rows = total_rows.or_else(|| page.metadata
+                            .get(db_common::QUERY_RESULT_METADATA_TOTAL_ROWS)
+                            .and_then(|value| value.parse::<u64>().ok()));
+                        progress.lock().unwrap().phase = "Writing rows";
+                        offset += writer.write_page(&page)? as u64;
+                        let mut current = progress.lock().unwrap();
+                        current.rows_done = offset;
+                        current.total_rows = total_rows;
+                        current.phase = "Reading table data";
+                        Ok(())
+                    },
+                ).await?;
+                if !streamed {
                 loop {
                     progress.lock().unwrap().phase = "Reading table data";
                     let report = query_service
@@ -781,6 +800,7 @@ impl DesktopApp {
                     }
                 }
 
+                }
                 progress.lock().unwrap().phase = "Saving file";
                 let row_count = writer.finish()?;
                 let qualifier = request
@@ -1250,17 +1270,6 @@ fn ordered_table_select_sql(
     table_sql: &str,
     columns: &[db_common::TableColumn],
 ) -> Result<String, AppError> {
-    let time_columns = columns
-        .iter()
-        .filter(|column| {
-            let ty = column.database_type.to_ascii_lowercase();
-            ty.contains("date") || ty.contains("time") || ty.contains("timestamp")
-        })
-        .map(|column| {
-            db_common::Identifier::new(&column.name)
-                .map(|identifier| dialect.quote_identifier(&identifier))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let primary_keys = columns
         .iter()
         .filter(|column| column.primary_key)
@@ -1269,9 +1278,7 @@ fn ordered_table_select_sql(
                 .map(|identifier| dialect.quote_identifier(&identifier))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let order = if !time_columns.is_empty() {
-        format!(" ORDER BY {}", time_columns.join(", "))
-    } else if !primary_keys.is_empty() {
+    let order = if !primary_keys.is_empty() {
         format!(" ORDER BY {}", primary_keys.join(", "))
     } else if let Some(first_column) = columns.first() {
         // Doris requires ORDER BY whenever OFFSET is used. A first-column
@@ -1310,6 +1317,13 @@ mod tests {
     #[test]
     fn orders_table_reads_by_primary_key() {
         let columns = vec![db_common::TableColumn {
+            name: "created_at".to_string(),
+            database_type: "TIMESTAMP".to_string(),
+            nullable: false,
+            default_value: None,
+            primary_key: false,
+            comment: None,
+        }, db_common::TableColumn {
             name: "id".to_string(),
             database_type: "INTEGER".to_string(),
             nullable: false,
@@ -1322,4 +1336,14 @@ mod tests {
             "SELECT * FROM \"main\".\"users\" ORDER BY \"id\""
         );
     }
+    #[test]
+    fn missing_primary_key_and_date_uses_first_column_without_error() {
+        let columns = vec![db_common::TableColumn {
+            name: "title".into(), database_type: "TEXT".into(), nullable: true,
+            default_value: None, primary_key: false, comment: None,
+        }];
+        assert_eq!(ordered_table_select_sql(&DoubleQuoteDialect, "books", &columns).unwrap(),
+            r#"SELECT * FROM books ORDER BY "title""#);
+    }
+
 }

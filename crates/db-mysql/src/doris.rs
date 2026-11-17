@@ -84,7 +84,7 @@ pub(super) fn group_indexes(rows: Vec<MySqlRow>) -> Result<Vec<TableIndex>> {
 /// string literals. The desktop UI may produce ANSI-quoted identifiers, so
 /// normalize only those quoted sections before sending literal SQL over
 /// COM_QUERY.
-fn normalize_doris_identifiers(sql: &str) -> String {
+pub(super) fn normalize_doris_identifiers(sql: &str) -> String {
     let mut output = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
     let mut single_quoted = false;

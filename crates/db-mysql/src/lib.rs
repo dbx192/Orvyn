@@ -574,6 +574,39 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
         DataSourceKind::MySql
     }
 
+    fn supports_streaming_export(&self, _profile: &ConnectionProfile) -> bool {
+        true
+    }
+
+    async fn stream_export(
+        &self,
+        profile: &ConnectionProfile,
+        password: Option<&str>,
+        sql: &str,
+        pool_config: ConnectionPoolConfig,
+        consume: &mut (dyn FnMut(QueryResult) -> Result<()> + Send),
+    ) -> Result<()> {
+        use futures_util::TryStreamExt;
+        let pool = self.pool_for(profile, password, pool_config).await?;
+        let statement = if brand_for(profile).is_some_and(MysqlBrand::uses_text_protocol) {
+            doris::normalize_doris_identifiers(sql)
+        } else {
+            sql.to_owned()
+        };
+        let mut stream = sqlx::raw_sql(&statement).fetch(&pool);
+        let mut batch = Vec::with_capacity(5_000);
+        while let Some(row) = stream.try_next().await.map_err(mysql_query_error)? {
+            batch.push(row);
+            if batch.len() == 5_000 {
+                consume(mysql_rows_to_query_result(sql, std::mem::replace(&mut batch, Vec::with_capacity(5_000))))?;
+            }
+        }
+        if !batch.is_empty() {
+            consume(mysql_rows_to_query_result(sql, batch))?;
+        }
+        Ok(())
+    }
+
     async fn execute(
         &self,
         profile: &ConnectionProfile,
