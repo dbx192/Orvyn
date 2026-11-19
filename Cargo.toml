@@ -61,3 +61,8 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 urlencoding = "2.1"
 uuid = { version = "1.8", features = ["serde", "v4"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
