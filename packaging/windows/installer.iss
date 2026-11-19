@@ -1,5 +1,7 @@
 #define MyAppName "Orvyn"
-#define MyAppVersion "1.0.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
 #define MyAppExeName "Orvyn.exe"
 #ifndef MyIconHash
   #define MyIconHash "dev"

@@ -16,7 +16,7 @@ use db_common::{
 };
 use sqlx::{
     mysql::{MySqlConnectOptions, MySqlConnection, MySqlPoolOptions, MySqlRow, MySqlSslMode},
-    pool::PoolConnection,
+    pool::PoolConnection, Executor,
     types::{
         chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc},
         Decimal,
@@ -792,10 +792,10 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
                 "transactions are not supported on this MySQL-family brand",
             ));
         }
-        sqlx::query("BEGIN")
-            .execute(&mut *conn)
-            .await
-            .map_err(mysql_query_error)?;
+        // Transaction control statements are not preparable in MySQL (error
+        // 1295). A bare `&str` query uses the text protocol, like sqlx's own
+        // `Connection::begin`.
+        conn.execute("BEGIN").await.map_err(mysql_query_error)?;
         self.transactions.lock().await.insert(transaction_id, conn);
         Ok(())
     }
@@ -819,10 +819,7 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
             .await
             .remove(&transaction_id)
             .ok_or_else(|| AppError::validation("transaction is not active"))?;
-        sqlx::query("COMMIT")
-            .execute(&mut *conn)
-            .await
-            .map_err(mysql_query_error)?;
+        conn.execute("COMMIT").await.map_err(mysql_query_error)?;
         Ok(())
     }
 
@@ -833,10 +830,7 @@ impl RelationalQueryExecutor for MySqlQueryExecutor {
             .await
             .remove(&transaction_id)
             .ok_or_else(|| AppError::validation("transaction is not active"))?;
-        sqlx::query("ROLLBACK")
-            .execute(&mut *conn)
-            .await
-            .map_err(mysql_query_error)?;
+        conn.execute("ROLLBACK").await.map_err(mysql_query_error)?;
         Ok(())
     }
 }
