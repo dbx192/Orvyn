@@ -50,8 +50,9 @@ jobs:
           echo "$PWD/packaging/duckdb-download/local/1.5.4" >> "$GITHUB_PATH"
           echo "LD_LIBRARY_PATH=$PWD/packaging/duckdb-download/local/1.5.4" >> "$GITHUB_ENV"
           echo "DYLD_LIBRARY_PATH=$PWD/packaging/duckdb-download/local/1.5.4" >> "$GITHUB_ENV"
-      - run: cargo test --workspace --locked
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test -p orvyn -p app-core --locked
+      - run: cargo test --workspace --all-features --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
   services:
     runs-on: ubuntu-22.04
     services:
@@ -128,18 +129,42 @@ jobs:
             os: windows-latest
             artifact: orvyn-windows-x86_64
             package: dist/windows/*-setup.exe
+            duckdb: false
+          - name: windows-x86_64-duckdb
+            os: windows-latest
+            artifact: orvyn-windows-x86_64-duckdb
+            package: dist/windows/*-setup.exe
+            duckdb: true
           - name: linux-x86_64
             os: ubuntu-22.04
             artifact: orvyn-linux-x86_64
             package: dist/linux/*.deb
+            duckdb: false
+          - name: linux-x86_64-duckdb
+            os: ubuntu-22.04
+            artifact: orvyn-linux-x86_64-duckdb
+            package: dist/linux/*.deb
+            duckdb: true
           - name: macos-x86_64
             os: macos-15-intel
             artifact: orvyn-macos-x86_64
             package: dist/macos/*-x86_64.dmg
+            duckdb: false
+          - name: macos-x86_64-duckdb
+            os: macos-15-intel
+            artifact: orvyn-macos-x86_64-duckdb
+            package: dist/macos/*-x86_64.dmg
+            duckdb: true
           - name: macos-aarch64
             os: macos-15
             artifact: orvyn-macos-aarch64
             package: dist/macos/*-arm64.dmg
+            duckdb: false
+          - name: macos-aarch64-duckdb
+            os: macos-15
+            artifact: orvyn-macos-aarch64-duckdb
+            package: dist/macos/*-arm64.dmg
+            duckdb: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -161,13 +186,14 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
       - name: Cache DuckDB
+        if: matrix.duckdb
         id: duckdb
         uses: actions/cache@v4
         with:
           path: packaging/duckdb-download/local
           key: duckdb-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/prepare-duckdb.py') }}
       - name: Prepare DuckDB
-        if: steps.duckdb.outputs.cache-hit != 'true'
+        if: matrix.duckdb && steps.duckdb.outputs.cache-hit != 'true'
         run: python packaging/prepare-duckdb.py
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -175,14 +201,14 @@ jobs:
           shared-key: desktop-release
       - name: Build Linux package
         if: runner.os == 'Linux'
-        run: bash packaging/linux/package.sh
+        run: bash packaging/linux/package.sh ${{ matrix.duckdb && '--with-duckdb' || '' }}
       - name: Build macOS package
         if: runner.os == 'macOS'
-        run: bash packaging/macos/package.sh
+        run: bash packaging/macos/package.sh ${{ matrix.duckdb && '--with-duckdb' || '' }}
       - name: Build Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./packaging/windows/build-installer.ps1
+        run: ./packaging/windows/build-installer.ps1 ${{ matrix.duckdb && '-WithDuckDB' || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

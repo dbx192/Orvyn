@@ -6,4 +6,4 @@ if (-not (Test-Path (Join-Path $DuckDbDir 'duckdb.dll'))) {
 }
 $env:PATH = "$DuckDbDir;$env:PATH"
 Set-Location $Root
-cargo test --workspace --locked --target x86_64-pc-windows-msvc
+cargo test --workspace --all-features --locked --target x86_64-pc-windows-msvc

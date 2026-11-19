@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=../../packaging/icons/icon.ico");
-    copy_duckdb_dll();
+    if std::env::var_os("CARGO_FEATURE_DUCKDB").is_some() {
+        copy_duckdb_dll();
+    }
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         let mut resources = winres::WindowsResource::new();
         let icon = Path::new(env!("CARGO_MANIFEST_DIR"))

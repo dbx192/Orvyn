@@ -136,6 +136,7 @@ impl DriverRegistry {
             DataSourceKind::Sqlite,
             Arc::new(db_sqlite::SqliteConnectionTester),
         );
+        #[cfg(feature = "duckdb")]
         testers.insert(
             DataSourceKind::DuckDb,
             Arc::new(db_duckdb::DuckDbConnectionTester),
@@ -144,6 +145,7 @@ impl DriverRegistry {
             DataSourceKind::Sqlite,
             Arc::new(db_sqlite::SqliteMetadataReader),
         );
+        #[cfg(feature = "duckdb")]
         relational_metadata.insert(
             DataSourceKind::DuckDb,
             Arc::new(db_duckdb::DuckDbMetadataReader),
@@ -152,6 +154,7 @@ impl DriverRegistry {
             DataSourceKind::Sqlite,
             Arc::new(db_sqlite::SqliteQueryExecutor::new()),
         );
+        #[cfg(feature = "duckdb")]
         relational_query.insert(
             DataSourceKind::DuckDb,
             Arc::new(db_duckdb::DuckDbQueryExecutor::new()),
@@ -202,8 +205,14 @@ impl DriverRegistry {
             DataSourceKind::TDengine,
             Arc::new(db_tdengine::TdengineConnectionTester),
         );
-        relational_query.insert(DataSourceKind::TDengine, Arc::new(db_tdengine::TdengineQueryExecutor));
-        relational_metadata.insert(DataSourceKind::TDengine, Arc::new(db_tdengine::TdengineMetadataReader));
+        relational_query.insert(
+            DataSourceKind::TDengine,
+            Arc::new(db_tdengine::TdengineQueryExecutor),
+        );
+        relational_metadata.insert(
+            DataSourceKind::TDengine,
+            Arc::new(db_tdengine::TdengineMetadataReader),
+        );
 
         // ---- Search services ----
         let es_tester: Arc<dyn ConnectionTester> = Arc::new(db_http::ElasticsearchConnectionTester);
@@ -261,14 +270,8 @@ impl DriverRegistry {
             DataSourceKind::Access,
         ] {
             testers.insert(kind, Arc::new(db_odbc::OdbcConnectionTester::new(kind)));
-            relational_metadata.insert(
-                kind,
-                Arc::new(db_odbc::OdbcMetadataReader::new(kind)),
-            );
-            relational_query.insert(
-                kind,
-                Arc::new(db_odbc::OdbcQueryExecutor::new(kind)),
-            );
+            relational_metadata.insert(kind, Arc::new(db_odbc::OdbcMetadataReader::new(kind)));
+            relational_query.insert(kind, Arc::new(db_odbc::OdbcQueryExecutor::new(kind)));
         }
 
         Self {
@@ -488,11 +491,29 @@ mod tests {
     fn default_registry_covers_all_kinds_for_testers() {
         let registry = DriverRegistry::default();
         for &kind in DataSourceKind::ALL {
+            if kind == DataSourceKind::DuckDb && !cfg!(feature = "duckdb") {
+                continue;
+            }
             assert!(
                 registry.tester(kind).is_ok(),
                 "{kind:?} has no registered tester"
             );
         }
+    }
+
+    #[test]
+    fn duckdb_registration_matches_build_feature() {
+        let registry = DriverRegistry::default();
+        let kind = DataSourceKind::DuckDb;
+        assert_eq!(registry.tester(kind).is_ok(), cfg!(feature = "duckdb"));
+        assert_eq!(
+            registry.relational_metadata(kind).is_ok(),
+            cfg!(feature = "duckdb")
+        );
+        assert_eq!(
+            registry.relational_query(kind).is_ok(),
+            cfg!(feature = "duckdb")
+        );
     }
 
     #[test]

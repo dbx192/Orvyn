@@ -24,7 +24,7 @@
 
 **Orvyn 是基于 Rust + egui 打造的高性能数据库工作台。** SQL 编写、数据编辑、结构设计、Redis 键管理、MongoDB 文档查询、搜索索引探索与大表导出，全部汇聚到一个原生桌面应用。
 
-从生产数据库到本地 DuckDB 分析，Orvyn 将广泛的数据生态收进专注的工作空间。通过原生协议驱动、HTTP 接口与厂商 ODBC 桥接，连接 35 种数据源。SQLite 随构建内置，桌面安装包随附 DuckDB 1.5.4。
+从生产数据库到本地 DuckDB 分析，Orvyn 将广泛的数据生态收进专注的工作空间。通过原生协议驱动、HTTP 接口与厂商 ODBC 桥接，连接 35 种数据源。SQLite 随构建内置。DuckDB 1.5.4 为可选功能：默认包不包含引擎，需要时选择文件名带 `-duckdb` 的安装包。
 
 **原生执行，虚拟化表格，流式导出，五种界面语言。让数据工作全速向前。**
 
@@ -139,11 +139,15 @@
 | 平台 | 发布工作流产物 |
 | --- | --- |
 | **Windows · x86_64** | Inno Setup 安装包，按用户安装，无需管理员提权。 |
-| **Linux · x86_64 / amd64** | `.deb` 包，内含 DuckDB 动态库。 |
-| **macOS · Intel x86_64** | `.dmg` 中的 `.app` 应用，内含 DuckDB。 |
-| **macOS · Apple Silicon aarch64** | `.dmg` 中的 `.app` 应用，内含 DuckDB。 |
+| **Linux · x86_64 / amd64** | `.deb` 包，仅 `-duckdb` 版本内含 DuckDB 动态库。 |
+| **macOS · Intel x86_64** | `.dmg` 中的 `.app` 应用，仅 `-duckdb` 版本内含 DuckDB。 |
+| **macOS · Apple Silicon aarch64** | `.dmg` 中的 `.app` 应用，仅 `-duckdb` 版本内含 DuckDB。 |
 
-Linux 打包与 DuckDB 准备脚本也可处理 ARM64 主机；当前发布工作流构建 Linux x86_64 安装包。
+Linux 打包与 ### DuckDB 可选版本
+
+打包脚本默认不包含 DuckDB。Windows 使用 `./packaging/windows/build-installer.ps1 -WithDuckDB`；Linux/macOS 向打包脚本传入 `--with-duckdb`。CI 为四个平台/架构组合同时生成默认版和 `-duckdb` 版本。默认版隐藏新建 DuckDB 连接入口，保留已有连接配置；需要使用时安装 DuckDB 版本，仅复制动态库不会启用该功能。全工作区检查需要先准备 DuckDB。
+
+DuckDB 准备脚本也可处理 ARM64 主机；当前发布工作流构建 Linux x86_64 安装包。
 
 1. 安装对应平台的软件包，启动 Orvyn。
 2. 创建连接，选择数据源类型，填写连接信息或本地数据库路径。
@@ -160,18 +164,25 @@ Linux 打包与 DuckDB 准备脚本也可处理 ARM64 主机；当前发布工�
 | Linux | `build-essential pkg-config unixodbc-dev libgtk-3-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev` |
 | macOS | Xcode 命令行工具与 `brew install unixodbc`。 |
 
-在仓库根目录准备 DuckDB，然后启动桌面应用：
+在仓库根目录启动默认版应用：
+
+```sh
+cargo run -p orvyn --release --locked
+```
+
+默认不启用 DuckDB，无需下载其动态库。需要 DuckDB 时：
 
 ```sh
 python packaging/prepare-duckdb.py
-cargo run -p orvyn --release --locked
+cargo run -p orvyn --release --locked --features duckdb
 ```
 
 运行工作区检查：
 
 ```sh
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test -p orvyn -p app-core --locked
+cargo test --workspace --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
 DuckDB 准备脚本默认通过 `https://gh-proxy.org/` 下载 **1.5.4**，将动态库放入 `packaging/duckdb-download/local/1.5.4/`。将 `ORVYN_GITHUB_PROXY` 设为空字符串可直连 GitHub，也可设为其他代理前缀。

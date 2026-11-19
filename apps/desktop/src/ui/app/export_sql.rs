@@ -408,7 +408,7 @@ pub(super) fn qualified_table_label(qualifier: Option<&str>, table: &str) -> Str
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "duckdb"))]
 mod tests {
     use super::*;
     use app_core::{storage::MemoryConnectionProfileStore, task::TaskManager};

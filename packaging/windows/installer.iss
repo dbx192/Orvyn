@@ -7,6 +7,12 @@
   #define MyIconHash "dev"
 #endif
 
+#ifdef WithDuckDB
+  #define PackageSuffix "-duckdb"
+#else
+  #define PackageSuffix ""
+#endif
+
 [Setup]
 AppId={{7E8D9E1F-38E0-4D79-908C-F5B5A7A74A31}
 AppName={#MyAppName}
@@ -17,7 +23,7 @@ AppPublisher=Orvyn
 DefaultDirName={localappdata}\Programs\Orvyn
 DefaultGroupName={#MyAppName}
 OutputDir=..\..\dist\windows
-OutputBaseFilename=orvyn-{#MyAppVersion}-windows-x86_64-{#MyIconHash}-setup
+OutputBaseFilename=orvyn-{#MyAppVersion}-windows-x86_64-{#MyIconHash}{#PackageSuffix}-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -29,8 +35,15 @@ UninstallDisplayIcon={app}\orvyn-icon-{#MyIconHash}.ico
 
 [Files]
 Source: "..\..\target\x86_64-pc-windows-msvc\release\orvyn.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
+#ifdef WithDuckDB
 Source: "..\..\target\x86_64-pc-windows-msvc\release\duckdb.dll"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 Source: "..\icons\icon.ico"; DestDir: "{app}"; DestName: "orvyn-icon-{#MyIconHash}.ico"; Flags: ignoreversion
+
+[InstallDelete]
+#ifndef WithDuckDB
+Type: files; Name: "{app}\duckdb.dll"
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\orvyn-icon-{#MyIconHash}.ico"

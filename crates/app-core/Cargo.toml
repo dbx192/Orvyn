@@ -5,11 +5,15 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+default = []
+duckdb = ["dep:db-duckdb"]
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
 db-common.workspace = true
-db-duckdb = { path = "../db-duckdb" }
+db-duckdb = { path = "../db-duckdb", optional = true }
 db-http = { path = "../db-http" }
 db-mysql = { path = "../db-mysql" }
 db-mongodb = { path = "../db-mongodb" }

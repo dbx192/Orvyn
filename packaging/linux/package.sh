@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+with_duckdb=false
+suffix=""
+build_args=()
+case "${1:-}" in
+    "") ;;
+    --with-duckdb) with_duckdb=true; suffix="-duckdb"; build_args=(--features duckdb) ;;
+    *) echo "Usage: $0 [--with-duckdb]" >&2; exit 2 ;;
+esac
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
 arch="$(dpkg --print-architecture)"
-pkg="dist/linux/orvyn_${version}_${arch}"
+pkg="dist/linux/orvyn_${version}_${arch}${suffix}"
 mkdir -p "$pkg/DEBIAN" "$pkg/usr/lib/orvyn" "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/usr/share/icons/hicolor/256x256/apps"
-cargo build -p orvyn --release --locked
+cargo build -p orvyn --release --locked "${build_args[@]}"
 install -m755 target/release/orvyn "$pkg/usr/lib/orvyn/orvyn"
-install -m755 packaging/duckdb-download/local/1.5.4/libduckdb.so "$pkg/usr/lib/orvyn/libduckdb.so"
+if "$with_duckdb"; then
+    install -m755 packaging/duckdb-download/local/1.5.4/libduckdb.so "$pkg/usr/lib/orvyn/libduckdb.so"
+else
+    rm -f "$pkg/usr/lib/orvyn/libduckdb.so"
+fi
 cat > "$pkg/usr/bin/orvyn" <<'EOF'
 #!/bin/sh
 exec env LD_LIBRARY_PATH="/usr/lib/orvyn${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" /usr/lib/orvyn/orvyn "$@"

@@ -1,3 +1,5 @@
+param([switch]$WithDuckDB)
+
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Target = Join-Path $Root 'target\x86_64-pc-windows-msvc\release\orvyn.exe'
@@ -19,13 +21,19 @@ $Version = (Get-Content (Join-Path $Root 'Cargo.toml') | Select-String '^version
 if ([string]::IsNullOrWhiteSpace($Version)) {
   throw 'Could not read workspace version from Cargo.toml.'
 }
-cargo build -p orvyn --release --locked --target x86_64-pc-windows-msvc
+$BuildArgs = @('build', '-p', 'orvyn', '--release', '--locked', '--target', 'x86_64-pc-windows-msvc')
+if ($WithDuckDB) { $BuildArgs += @('--features', 'duckdb') }
+cargo @BuildArgs
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
-if (-not (Test-Path $DuckDbSource)) { throw "DuckDB library not found: $DuckDbSource" }
-Copy-Item $DuckDbSource $DuckDb -Force
+if ($WithDuckDB) {
+  if (-not (Test-Path $DuckDbSource)) { throw "DuckDB library not found: $DuckDbSource" }
+  Copy-Item $DuckDbSource $DuckDb -Force
+}
 if (-not $Iscc) {
   throw 'Inno Setup 6 is required. Install it from https://jrsoftware.org/isinfo.php and rerun this script.'
 }
-& $Iscc "/DMyAppVersion=$Version" "/DMyIconHash=$IconHash" $Iss
+$InstallerArgs = @("/DMyAppVersion=$Version", "/DMyIconHash=$IconHash")
+if ($WithDuckDB) { $InstallerArgs += '/DWithDuckDB' }
+& $Iscc @InstallerArgs $Iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 Write-Host "Installer created in $Root\dist\windows"

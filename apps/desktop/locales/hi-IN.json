@@ -1,4 +1,5 @@
 {
+  "DuckDB requires the package with DuckDB support.": "DuckDB के लिए DuckDB समर्थन वाला पैकेज चाहिए।",
   "Views": "दृश्य",
   "Queries": "क्वेरी",
   "Apply": "लागू करें",

@@ -5,12 +5,17 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+default = []
+duckdb = ["dep:db-duckdb", "dep:duckdb", "app-core/duckdb"]
+
 [dependencies]
 app-core = { path = "../../crates/app-core" }
 arboard = { version = "3.6.1", default-features = false }
 chrono.workspace = true
 db-common.workspace = true
-db-duckdb = { path = "../../crates/db-duckdb" }
+duckdb = { workspace = true, optional = true }
+db-duckdb = { path = "../../crates/db-duckdb", optional = true }
 db-mysql = { path = "../../crates/db-mysql" }
 db-mongodb = { path = "../../crates/db-mongodb" }
 db-sqlserver = { path = "../../crates/db-sqlserver" }
@@ -30,9 +35,6 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-duckdb.workspace = true
 
 [build-dependencies]
 winres = "0.1"

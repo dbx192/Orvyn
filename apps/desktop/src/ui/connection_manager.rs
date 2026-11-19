@@ -449,6 +449,9 @@ impl ConnectionManagerUi {
                         // without scrolling a flat 35-item list.
                         let mut current_family: Option<ProtocolFamily> = None;
                         for &kind in DataSourceKind::ALL {
+                            if kind == DataSourceKind::DuckDb && !cfg!(feature = "duckdb") {
+                                continue;
+                            }
                             let family = kind.protocol_family();
                             if current_family != Some(family) {
                                 if current_family.is_some() {
@@ -485,6 +488,11 @@ impl ConnectionManagerUi {
 
                 // Capability hint line: tells users why certain operations may
                 // be disabled before they save and test.
+                if self.form.kind == DataSourceKind::DuckDb && !cfg!(feature = "duckdb") {
+                    ui.label("DuckDB");
+                    ui.label(tr("DuckDB requires the package with DuckDB support."));
+                    ui.end_row();
+                }
                 ui.label(tr("Support"));
                 let caps = self.form.kind.capabilities();
                 let color = support_level_color(caps.support, ui);

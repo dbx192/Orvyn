@@ -169,6 +169,7 @@ impl AppState {
             tasks: vec![TaskState::running("UI ready")],
             errors: Vec::new(),
             connection_tree: vec![
+                #[cfg(feature = "duckdb")]
                 ConnectionTreeNode {
                     label: "Local DuckDB".to_string(),
                     kind: DataSourceKind::DuckDb,
