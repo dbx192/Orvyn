@@ -153,6 +153,10 @@ pub enum ObjectTreeAction {
         title: String,
         sql: String,
     },
+    OpenSqlFile {
+        connection_id: ConnectionId,
+        database: Option<String>,
+    },
     ViewKey {
         connection_id: ConnectionId,
         database: Option<String>,
@@ -825,6 +829,41 @@ impl ObjectTree {
     ) {
         match node.kind {
             MetadataNodeKind::Database => {
+                if !node.leaf && !self.force_expanded(node) {
+                    let key = NodeKey::from(&node.path);
+                    let label = if self.expanded.contains(&node_key_id(&key)) {
+                        "Collapse Database"
+                    } else {
+                        "Expand Database"
+                    };
+                    if ui.button(tr(label)).clicked() {
+                        self.toggle_node(node.clone());
+                        ui.close_menu();
+                    }
+                }
+                if self
+                    .connection_kinds
+                    .get(&node.path.connection_id)
+                    .is_some_and(|kind| kind.is_relational())
+                {
+                    if ui.button(tr("New Query")).clicked() {
+                        actions.push(ObjectTreeAction::OpenQuery {
+                            connection_id: node.path.connection_id,
+                            database: node.path.database.clone(),
+                            schema: None,
+                            table: None,
+                        });
+                        ui.close_menu();
+                    }
+                    if ui.button(tr("Open SQL File...")).clicked() {
+                        actions.push(ObjectTreeAction::OpenSqlFile {
+                            connection_id: node.path.connection_id,
+                            database: node.path.database.clone(),
+                        });
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
                 ui.menu_button(tr("Export Database"), |ui| {
                     if ui.button(tr("Structure Only...")).clicked() {
                         actions.push(ObjectTreeAction::ExportDatabase {

@@ -444,6 +444,21 @@ impl QueryEditor {
         title: String,
         sql: String,
     ) {
+        self.status = if self.open_query_text(connection_id, database, schema, title, sql) {
+            "Saved query opened".to_string()
+        } else {
+            "Saved query connection is unavailable".to_string()
+        };
+    }
+
+    pub fn open_query_text(
+        &mut self,
+        connection_id: ConnectionId,
+        database: Option<String>,
+        schema: Option<String>,
+        title: String,
+        sql: String,
+    ) -> bool {
         let profile = self
             .connections
             .iter()
@@ -461,9 +476,9 @@ impl QueryEditor {
                 tab.dirty = false;
             }
             self.refresh_metadata_for_tab(tab_id);
-            self.status = "Saved query opened".to_string();
+            true
         } else {
-            self.status = "Saved query connection is unavailable".to_string();
+            false
         }
     }
 

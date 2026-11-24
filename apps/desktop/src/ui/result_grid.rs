@@ -2,6 +2,7 @@
 
 use crate::ui::format::{
     cell_rich_text, compare_cell_values, copy_cell_value, copy_to_clipboard, display_cell_value,
+    truncate_display,
 };
 use crate::ui::grid::{
     estimate_text_width, flat_scrollbar, grid_stroke, header_fill, label_cell, paint_cell_outline,
@@ -458,7 +459,7 @@ impl ResultSetGrid {
                         column: column_index,
                     });
 
-                let text = display_cell_value(value);
+                let (text, binary_preview) = result_cell_display(value);
                 let rich_text = cell_rich_text(value, text);
                 let cell = label_cell(
                     ui,
@@ -469,7 +470,11 @@ impl ResultSetGrid {
                     row_fill(ui, visible_row_index, selected),
                     grid_stroke(ui),
                 );
-                let response = cell.response;
+                let response = if binary_preview {
+                    cell.response.on_hover_text(display_cell_value(value))
+                } else {
+                    cell.response
+                };
 
                 if selected {
                     paint_cell_outline(
@@ -837,6 +842,17 @@ fn page_size_from_result(result: &QueryResult) -> usize {
         .unwrap_or(DEFAULT_PAGE_SIZE)
 }
 
+fn result_cell_display(value: &CellValue) -> (String, bool) {
+    if let CellValue::Bytes(bytes) = value {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            if !text.trim().is_empty() && !text.chars().any(char::is_control) {
+                return (truncate_display(text.to_owned()), true);
+            }
+        }
+    }
+    (display_cell_value(value), false)
+}
+
 fn estimate_column_widths(result: &QueryResult) -> Vec<f32> {
     let sampled_rows = sampled_row_indexes(result.rows.len(), COLUMN_WIDTH_SAMPLE_LIMIT);
     result
@@ -854,7 +870,7 @@ fn estimate_column_widths(result: &QueryResult) -> Vec<f32> {
                     .get(*row_index)
                     .and_then(|row| row.values.get(column_index))
                 {
-                    estimated = estimated.max(estimate_text_width(&display_cell_value(value)));
+                    estimated = estimated.max(estimate_text_width(&result_cell_display(value).0));
                 }
             }
 
@@ -896,6 +912,20 @@ fn sampled_row_indexes(row_count: usize, limit: usize) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn result_cells_preview_utf8_without_changing_binary_copy() {
+        let text = "\u{5317}\u{4eac}";
+        let value = super::CellValue::Bytes(text.as_bytes().to_vec());
+        assert_eq!(super::result_cell_display(&value), (text.to_owned(), true));
+        assert_eq!(super::copy_cell_value(&value), "5YyX5Lqs");
+
+        for bytes in [vec![0xff], b"abc\0".to_vec(), Vec::new()] {
+            let value = super::CellValue::Bytes(bytes);
+            let (display, preview) = super::result_cell_display(&value);
+            assert!(!preview);
+            assert!(display.starts_with("<binary:"));
+        }
+    }
     use super::*;
     use db_common::{Column, LogicalType, Row};
     use eframe::egui::{CentralPanel, Context, RawInput};

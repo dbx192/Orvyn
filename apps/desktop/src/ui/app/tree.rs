@@ -6,12 +6,15 @@ use super::{
     ActivePanel, DesktopApp,
 };
 use crate::ui::{
-    connection_manager::ConnectionChange, import_wizard::ImportWizard,
+    connection_manager::ConnectionChange, i18n::text as tr, import_wizard::ImportWizard,
     object_tree::ObjectTreeAction, redis_browser::RedisBrowserUi, search_browser::SearchBrowser,
 };
 use db_common::ConnectionId;
 use eframe::egui::{Context, CursorIcon, Id, Rect, Sense, SidePanel, Ui, pos2, vec2};
 use import_export::ExportFormat;
+use std::io::Read;
+
+const MAX_SQL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 // Splitter state. We deliberately do NOT rely on egui's built-in resizable
 // SidePanel: in egui 0.27.2 the stored width can snap back to the default when
@@ -166,6 +169,54 @@ impl DesktopApp {
                     self.active_panel = ActivePanel::SearchBrowser;
                     self.state
                         .set_status(format!("Browse {} on {}", object, connection_id));
+                }
+                ObjectTreeAction::OpenSqlFile {
+                    connection_id,
+                    database,
+                } => {
+                    let Some(path) = rfd::FileDialog::new()
+                        .set_title(tr("Open SQL File..."))
+                        .add_filter("SQL", &["sql"])
+                        .pick_file()
+                    else {
+                        continue;
+                    };
+                    let mut bytes = Vec::new();
+                    if let Err(error) = std::fs::File::open(&path).and_then(|file| {
+                        file.take(MAX_SQL_FILE_BYTES + 1).read_to_end(&mut bytes)
+                    }) {
+                        self.state
+                            .set_status(format!("{}: {error}", tr("Cannot read SQL file")));
+                        continue;
+                    }
+                    if bytes.len() as u64 > MAX_SQL_FILE_BYTES {
+                        self.state.set_status(tr("SQL file exceeds 4 MiB"));
+                        continue;
+                    }
+                    let sql = match String::from_utf8(bytes) {
+                        Ok(sql) => sql,
+                        Err(_) => {
+                            self.state.set_status(tr("SQL file must be UTF-8"));
+                            continue;
+                        }
+                    };
+                    let sql = match sql.strip_prefix('\u{feff}') {
+                        Some(stripped) => stripped.to_owned(),
+                        None => sql,
+                    };
+                    let title = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| tr("Query"));
+                    if self
+                        .query_editor
+                        .open_query_text(connection_id, database, None, title, sql)
+                    {
+                        self.active_panel = ActivePanel::QueryEditor;
+                        self.state.set_status(tr("SQL file opened"));
+                    } else {
+                        self.state.set_status(tr("Selected connection is unavailable"));
+                    }
                 }
                 ObjectTreeAction::OpenSavedQuery {
                     connection_id,
