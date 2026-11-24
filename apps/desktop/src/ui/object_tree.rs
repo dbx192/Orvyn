@@ -312,7 +312,7 @@ impl ObjectTree {
     }
 
     pub fn connection_transfer_menu(&mut self, ui: &mut Ui, actions: &mut Vec<ObjectTreeAction>) {
-        if ui.button(format!("{}...", tr("Import"))).clicked() {
+        if ui.button(tr("Import...")).clicked() {
             actions.push(ObjectTreeAction::ImportConnections);
             ui.close_menu();
         }

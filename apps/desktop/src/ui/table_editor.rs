@@ -1772,8 +1772,8 @@ impl TableEditor {
                 }
                 ui.close_menu();
             }
-            ui.menu_button(tr("Copy As"), |ui| {
-                if ui.button(tr("Insert Statement")).clicked() {
+            ui.menu_button(tr("Copy as"), |ui| {
+                if ui.button(tr("Insert statement")).clicked() {
                     if let Some(text) = self.copy_insert_statement(row_key) {
                         ui.output_mut(|output| output.copied_text = text);
                     }
@@ -1782,7 +1782,7 @@ impl TableEditor {
                 if ui
                     .add_enabled(
                         matches!(row_key, RowKey::Existing(_)),
-                        Button::new(tr("Update Statement")),
+                        Button::new(tr("Update statement")),
                     )
                     .clicked()
                 {
@@ -1792,18 +1792,18 @@ impl TableEditor {
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button(tr("Tab-Separated Values (Data)")).clicked() {
+                if ui.button(tr("Tab-separated values (data)")).clicked() {
                     ui.output_mut(|output| {
                         output.copied_text = self.copy_row_values(row_key).unwrap_or_default()
                     });
                     ui.close_menu();
                 }
-                if ui.button(tr("Tab-Separated Values (Fields)")).clicked() {
+                if ui.button(tr("Tab-separated values (fields)")).clicked() {
                     ui.output_mut(|output| output.copied_text = self.copy_headers());
                     ui.close_menu();
                 }
                 if ui
-                    .button(tr("Tab-Separated Values (Fields and Data)"))
+                    .button(tr("Tab-separated values (fields and data)"))
                     .clicked()
                 {
                     let mut text = self.copy_headers();
