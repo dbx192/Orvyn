@@ -4,7 +4,7 @@ pub mod import_csv;
 
 mod xlsx;
 
-use db_common::{base64_preview, human_bytes, CellValue, QueryResult, Result};
+use db_common::{base64_preview, byte_value_text, CellValue, QueryResult, Result};
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -273,11 +273,15 @@ fn json_cell_value(value: &CellValue) -> serde_json::Value {
         CellValue::Decimal(value) | CellValue::Text(value) => {
             serde_json::Value::String(value.clone())
         }
-        CellValue::Bytes(value) => serde_json::json!({
-            "type": "bytes",
-            "length": value.len(),
-            "base64_preview": base64_preview(value, 24),
-        }),
+        CellValue::Bytes(value) => byte_value_text(value)
+            .map(|text| serde_json::Value::String(text.to_owned()))
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "type": "bytes",
+                    "length": value.len(),
+                    "base64": base64_preview(value, value.len()),
+                })
+            }),
         CellValue::Date(value) => serde_json::Value::String(value.format("%Y-%m-%d").to_string()),
         CellValue::Time(value) => {
             serde_json::Value::String(value.format("%H:%M:%S%.3f").to_string())
@@ -298,11 +302,9 @@ fn export_cell_value(value: &CellValue) -> String {
         CellValue::UInt(value) => value.to_string(),
         CellValue::Float(value) => value.to_string(),
         CellValue::Decimal(value) | CellValue::Text(value) => value.clone(),
-        CellValue::Bytes(value) => format!(
-            "<binary: {}, base64 {}>",
-            human_bytes(value.len() as u64),
-            base64_preview(value, 24)
-        ),
+        CellValue::Bytes(value) => byte_value_text(value)
+            .map(str::to_owned)
+            .unwrap_or_else(|| base64_preview(value, value.len())),
         CellValue::Date(value) => value.format("%Y-%m-%d").to_string(),
         CellValue::Time(value) => value.format("%H:%M:%S%.3f").to_string(),
         CellValue::DateTime(value) => value.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
@@ -385,6 +387,61 @@ mod tests {
             export_query_result(&result, ExportFormat::Json).unwrap(),
             "[\n  {\n    \"value\": null\n  }\n]"
         );
+    }
+
+    #[test]
+    fn query_exports_decode_text_bytes_and_preserve_binary_bytes() {
+        let mut result = QueryResult::empty("SHOW DATABASES");
+        result.columns = vec![typed_column("Database", LogicalType::Bytes)];
+        let binary = vec![0xff; 30];
+        result.rows = vec![
+            Row::new(vec![CellValue::Bytes(b"pure_cms".to_vec())]),
+            Row::new(vec![CellValue::Bytes("数据库".as_bytes().to_vec())]),
+            Row::new(vec![CellValue::Bytes(binary.clone())]),
+        ];
+        let base64 = base64_preview(&binary, binary.len());
+        let expected_json = serde_json::json!([
+            {"Database": "pure_cms"},
+            {"Database": "数据库"},
+            {"Database": {"type": "bytes", "length": 30, "base64": base64}},
+        ]);
+        let json = export_query_result(&result, ExportFormat::Json).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            expected_json
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let json_path = directory.path().join("databases.json");
+        export_query_result_to_file(&result, ExportFormat::Json, &json_path).unwrap();
+        let json = std::fs::read_to_string(json_path).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            expected_json
+        );
+
+        let csv = export_query_result(&result, ExportFormat::Csv).unwrap();
+        assert_eq!(csv, format!("Database\npure_cms\n数据库\n{base64}\n"));
+        let csv_path = directory.path().join("databases.csv");
+        export_query_result_to_file(&result, ExportFormat::Csv, &csv_path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(csv_path).unwrap(),
+            format!("\u{feff}{csv}")
+        );
+
+        use std::io::Read;
+        let xlsx_path = directory.path().join("databases.xlsx");
+        export_query_result_to_file(&result, ExportFormat::Xlsx, &xlsx_path).unwrap();
+        let mut workbook = zip::ZipArchive::new(File::open(xlsx_path).unwrap()).unwrap();
+        let mut sheet = String::new();
+        workbook
+            .by_name("xl/worksheets/sheet1.xml")
+            .unwrap()
+            .read_to_string(&mut sheet)
+            .unwrap();
+        for value in ["pure_cms", "数据库", &base64] {
+            assert!(sheet.contains(value));
+        }
     }
 
     #[test]

@@ -1,1 +1,4 @@
-newline_style = "Native"
+# Keep formatting stable across Windows, macOS, and Linux contributors.
+edition = "2021"
+newline_style = "Unix"
+max_width = 100

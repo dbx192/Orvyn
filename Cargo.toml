@@ -23,7 +23,7 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 rust-version = "1.88"
-version = "1.0.6"
+version = "1.0.7"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -36,7 +36,9 @@ db-common = { path = "crates/db-common" }
 duckdb = { version = "~1.10504.0" }
 encoding_rs = "0.8"
 eframe = "0.27"
+futures = "0.3"
 redis = { version = "0.25", default-features = false, features = ["aio", "tokio-comp"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rfd = "0.14"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod app;
 pub mod connection_manager;
 pub mod fonts;

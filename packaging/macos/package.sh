@@ -3,16 +3,20 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 with_duckdb=false
 suffix=""
-build_args=()
+build_args=(build -p orvyn --release --locked)
 case "${1:-}" in
     "") ;;
-    --with-duckdb) with_duckdb=true; suffix="-duckdb"; build_args=(--features duckdb) ;;
+    --with-duckdb)
+        with_duckdb=true
+        suffix="-duckdb"
+        build_args+=(--features duckdb)
+        ;;
     *) echo "Usage: $0 [--with-duckdb]" >&2; exit 2 ;;
 esac
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
 app="dist/macos/staging${suffix}/Orvyn.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
-cargo build -p orvyn --release --locked "${build_args[@]}"
+cargo "${build_args[@]}"
 cp target/release/orvyn "$app/Contents/MacOS/Orvyn"
 if "$with_duckdb"; then
     cp packaging/duckdb-download/local/1.5.4/libduckdb.dylib "$app/Contents/Frameworks/"

@@ -23,7 +23,7 @@ pub mod time;
 pub mod traits;
 pub mod validation;
 
-pub use bytes::{base64_preview, human_bytes};
+pub use bytes::{base64_preview, byte_value_text, human_bytes};
 pub use cancellation::QueryCancellation;
 pub use capabilities::{
     ConnectorCapabilities, ExtraParamField, ExtraParamKind, MetadataCapabilities, SupportLevel,

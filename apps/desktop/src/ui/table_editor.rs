@@ -554,6 +554,14 @@ impl TableEditor {
         }
     }
 
+    pub fn ai_context(&self) -> Option<crate::ui::ai::AiEditorContext> {
+        Some(crate::ui::ai::AiEditorContext::for_table(
+            self.query_context()?,
+            self.data_source_kind?,
+            &self.columns,
+        ))
+    }
+
     pub fn query_context(&self) -> Option<(ConnectionId, Option<String>, Option<String>, String)> {
         Some((
             self.connection_id?,

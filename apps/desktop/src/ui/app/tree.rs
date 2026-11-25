@@ -170,6 +170,10 @@ impl DesktopApp {
                     self.state
                         .set_status(format!("Browse {} on {}", object, connection_id));
                 }
+                ObjectTreeAction::RunSqlFile {
+                    connection_id,
+                    database,
+                } => self.choose_sql_file(connection_id, database),
                 ObjectTreeAction::OpenSqlFile {
                     connection_id,
                     database,

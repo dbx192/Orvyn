@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "app-core"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "db-clickhouse"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "db-common"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "db-duckdb"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "db-http"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "db-mongodb"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1676,11 +1676,13 @@ dependencies = [
 
 [[package]]
 name = "db-mysql"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "db-common",
+ "encoding_rs",
  "futures-util",
+ "memchr",
  "sqlx",
  "sqlx-mysql",
  "tokio",
@@ -1690,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "db-odbc"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1701,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "db-postgres"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1718,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "db-redis"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1731,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "db-sqlite"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1741,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "db-sqlserver"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1753,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "db-tdengine"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "db-common",
@@ -2335,6 +2337,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
+name = "futures"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2349,6 +2366,17 @@ name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "031b47cf1a3c6cc8bc2fc76cd437f521619387907d469316e7c0bc278f1f5432"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
 
 [[package]]
 name = "futures-intrusive"
@@ -2424,6 +2452,7 @@ version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
+ "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
@@ -3049,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "import-export"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "csv",
  "db-common",
@@ -4273,7 +4302,7 @@ dependencies = [
 
 [[package]]
 name = "orvyn"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "app-core",
  "arboard",
@@ -4289,7 +4318,9 @@ dependencies = [
  "db-sqlserver",
  "duckdb",
  "eframe",
+ "futures",
  "import-export",
+ "reqwest",
  "rfd",
  "secure-store",
  "serde",
@@ -4960,12 +4991,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls 0.26.4",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.9",
 ]
@@ -5341,7 +5374,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "secure-store"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6819,6 +6852,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23939e44bb9a5d7576fa2b563dc2e136628f1224e88a8deed09e04858b77871f"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

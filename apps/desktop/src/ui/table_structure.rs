@@ -1079,6 +1079,14 @@ impl TableStructureView {
         !self.details_loaded
     }
 
+    pub fn ai_context(&self) -> crate::ui::ai::AiEditorContext {
+        crate::ui::ai::AiEditorContext::for_table(
+            self.load_target(),
+            self.kind,
+            &self.original_columns,
+        )
+    }
+
     pub fn load_target(&self) -> (ConnectionId, Option<String>, Option<String>, String) {
         (
             self.connection_id,

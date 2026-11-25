@@ -157,6 +157,10 @@ pub enum ObjectTreeAction {
         connection_id: ConnectionId,
         database: Option<String>,
     },
+    RunSqlFile {
+        connection_id: ConnectionId,
+        database: String,
+    },
     ViewKey {
         connection_id: ConnectionId,
         database: Option<String>,
@@ -249,6 +253,79 @@ pub struct ObjectTree {
 }
 
 impl ObjectTree {
+    pub fn ai_context(
+        &self,
+        target: Option<(ConnectionId, Option<String>, Option<String>)>,
+    ) -> Option<crate::ui::ai::AiEditorContext> {
+        use crate::ui::ai::{AiEditorContext, AiTableTarget};
+
+        let selected = self.selected_node.as_ref();
+        let (connection_id, database, schema) = target.or_else(|| {
+            let node = selected?;
+            Some((node.connection_id, node.database.clone(), node.schema.clone()))
+        })?;
+        let kind = self.connection_kinds.get(&connection_id).filter(|kind| kind.is_relational())?;
+        let preferred_table = selected
+            .filter(|node| {
+                node.connection_id == connection_id
+                    && node.database == database
+                    && (schema.is_none() || node.schema == schema)
+            })
+            .and_then(|node| node.object.clone());
+        let tables: Vec<_> = self.child_cache.iter()
+            .filter(|(key, _)| {
+                key.connection_id == connection_id
+                    && key.database == database
+                    && (schema.is_none() || key.schema == schema)
+            })
+            .flat_map(|(_, nodes)| nodes)
+            .filter(|node| matches!(node.kind, MetadataNodeKind::Table | MetadataNodeKind::View))
+            .map(|node| AiTableTarget {
+                name: node.path.object.clone().unwrap_or_else(|| node.label.clone()),
+                schema: node.path.schema.clone(),
+                is_view: node.kind == MetadataNodeKind::View,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let cached_tables = tables.iter().filter_map(|table| {
+            let key = NodeKey {
+                connection_id,
+                path_kind: MetadataNodeKind::ColumnsFolder,
+                database: database.clone(),
+                schema: table.schema.clone(),
+                object: Some(table.name.clone()),
+                extra: None,
+            };
+            let columns = self.child_cache.get(&key)?;
+            let columns: Vec<_> = columns.iter().filter_map(|node| {
+                let detail = node.detail.as_deref()?;
+                let database_type = detail.strip_suffix(" not null").unwrap_or(detail);
+                Some(db_common::TableColumn {
+                    name: node.label.clone(),
+                    database_type: database_type.to_owned(),
+                    nullable: database_type == detail,
+                    default_value: None,
+                    primary_key: false,
+                    comment: None,
+                })
+            }).collect();
+            Some(crate::ui::ai::prompts::AiSchemaTable::from_columns(
+                table.display_name(schema.as_deref()), table.is_view, &columns,
+            ))
+        }).collect();
+        Some(AiEditorContext {
+            connection_id: Some(connection_id),
+            db_type: Some(kind.as_str().to_owned()),
+            database,
+            schema,
+            tables,
+            cached_tables,
+            preferred_table,
+            ..Default::default()
+        })
+    }
+
     pub fn new(
         metadata_service: MetadataService,
         query_service: QueryService,
@@ -375,6 +452,17 @@ impl ObjectTree {
         self.loading_children
             .retain(|key| key.path_kind != MetadataNodeKind::QueriesFolder);
         self.load_favorites();
+    }
+
+    pub fn refresh_database(&mut self, connection_id: ConnectionId, database: &str) {
+        let node = self.connections.get(&connection_id)
+            .and_then(|(connection, _)| connection.children.as_ref())
+            .and_then(|nodes| nodes.iter().find(|node| node.kind == MetadataNodeKind::Database
+                && node.path.database.as_deref() == Some(database)))
+            .cloned();
+        if let Some(node) = node {
+            self.refresh_node(node);
+        }
     }
 
     pub fn mark_connected(&mut self, connection_id: ConnectionId) {
@@ -861,6 +949,17 @@ impl ObjectTree {
                             database: node.path.database.clone(),
                         });
                         ui.close_menu();
+                    }
+                    if let Some(database) = &node.path.database {
+                        if matches!(self.connection_kinds.get(&node.path.connection_id), Some(DataSourceKind::MySql | DataSourceKind::MariaDb))
+                            && ui.button(tr("Run SQL File...")).clicked()
+                        {
+                            actions.push(ObjectTreeAction::RunSqlFile {
+                                connection_id: node.path.connection_id,
+                                database: database.clone(),
+                            });
+                            ui.close_menu();
+                        }
                     }
                 }
                 ui.separator();

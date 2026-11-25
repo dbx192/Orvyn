@@ -4,6 +4,7 @@ mod dialogs;
 mod export_sql;
 mod payloads;
 mod shell;
+mod sql_file;
 pub mod style;
 mod tasks;
 mod tree;
@@ -38,6 +39,7 @@ use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
 
 pub struct DesktopApp {
+    ai_panel: crate::ui::ai::panel::AiPanel,
     connection_manager_ui: ConnectionManagerUi,
     object_tree: ObjectTree,
     query_editor: QueryEditor,
@@ -48,6 +50,7 @@ pub struct DesktopApp {
     table_structures: HashMap<Id, TableStructureView>,
     active_structure: Option<Id>,
     import_wizard: Option<ImportWizard>,
+    sql_file: Option<sql_file::SqlFileJob>,
     /// One Redis browser per open connection (multi-tab, like table editors).
     redis_browsers: BTreeMap<ConnectionId, RedisBrowserUi>,
     redis_tab_order: Vec<ConnectionId>,
@@ -132,6 +135,10 @@ impl DesktopApp {
                 metadata_service.clone(),
                 runtime,
             ),
+            ai_panel: crate::ui::ai::panel::AiPanel::new(
+                crate::config::data_dir(),
+                metadata_service.clone(),
+            ),
             state: AppState::default(),
             table_editors: HashMap::new(),
             table_tab_order: Vec::new(),
@@ -139,6 +146,7 @@ impl DesktopApp {
             table_structures: HashMap::new(),
             active_structure: None,
             import_wizard: None,
+            sql_file: None,
             redis_browsers: BTreeMap::new(),
             redis_tab_order: Vec::new(),
             active_redis_browser: None,

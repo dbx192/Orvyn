@@ -2,8 +2,10 @@
 
 mod brand;
 mod doris;
+mod script;
 
 pub use brand::MysqlBrand;
+pub use script::{run_sql_file, ScriptEncoding, ScriptProgress};
 
 use async_trait::async_trait;
 use db_common::{
@@ -951,6 +953,22 @@ async fn mysql_pool(
     password: Option<&str>,
     config: ConnectionPoolConfig,
 ) -> Result<MySqlPool> {
+    let connect_options = mysql_connect_options(profile, password)?;
+    MySqlPoolOptions::new()
+        .min_connections(config.min_connections)
+        .max_connections(config.max_connections.max(1))
+        .acquire_timeout(config.acquire_timeout())
+        .idle_timeout(config.idle_timeout())
+        .max_lifetime(config.max_lifetime())
+        .connect_with(connect_options)
+        .await
+        .map_err(mysql_connection_error)
+}
+
+fn mysql_connect_options(
+    profile: &ConnectionProfile,
+    password: Option<&str>,
+) -> Result<MySqlConnectOptions> {
     profile.validate()?;
     // Reject brands that cannot be reached over the MySQL wire protocol
     // before we even attempt to dial the server. OceanBase in Oracle mode is
@@ -986,15 +1004,7 @@ async fn mysql_pool(
         connect_options = connect_options.ssl_ca(ca_path);
     }
 
-    MySqlPoolOptions::new()
-        .min_connections(config.min_connections)
-        .max_connections(config.max_connections.max(1))
-        .acquire_timeout(config.acquire_timeout())
-        .idle_timeout(config.idle_timeout())
-        .max_lifetime(config.max_lifetime())
-        .connect_with(connect_options)
-        .await
-        .map_err(mysql_connection_error)
+    Ok(connect_options)
 }
 
 fn mysql_connection_error(error: sqlx::Error) -> AppError {

@@ -12,7 +12,7 @@ use db_common::{
 };
 use eframe::egui::{
     text::LayoutJob, vec2, Align, Area, Button, Color32, ComboBox, FontId, Frame, Key, Layout,
-    Margin, Order, Pos2, RichText, ScrollArea, Stroke, TextEdit, TextFormat, Ui, Window,
+    Margin, Order, Pos2, Rect, RichText, ScrollArea, Stroke, TextEdit, TextFormat, Ui, Window,
 };
 use import_export::{export_query_result_to_file, ExportFormat};
 use std::{
@@ -140,7 +140,6 @@ struct QueryEditorTab {
     pending_column_loads: BTreeSet<String>,
     results: Vec<QueryResultView>,
     selected_result: usize,
-    execution_report: Option<QueryExecutionReport>,
     execution_running: bool,
     execution_cancelling: bool,
     page_loading: Option<usize>,
@@ -173,7 +172,6 @@ impl QueryEditorTab {
             pending_column_loads: BTreeSet::new(),
             results: Vec::new(),
             selected_result: 0,
-            execution_report: None,
             execution_running: false,
             execution_cancelling: false,
             page_loading: None,
@@ -449,6 +447,32 @@ impl QueryEditor {
         } else {
             "Saved query connection is unavailable".to_string()
         };
+    }
+
+    pub fn ai_editor_context(&self) -> crate::ui::ai::AiEditorContext {
+        let Some(tab) = self.active_tab.and_then(|id| self.tabs.get(&id)) else {
+            return Default::default();
+        };
+        let sql = tab.selection
+            .and_then(|selection| tab.sql.get(selection.start..selection.end))
+            .unwrap_or(&tab.sql)
+            .trim();
+        let cached_tables = tab.available_tables.iter().filter_map(|name| {
+            let columns = tab.columns_by_table.get(&normalize_identifier(name))?;
+            Some(crate::ui::ai::prompts::AiSchemaTable::from_columns(
+                name.clone(), false, columns,
+            ))
+        }).collect();
+        crate::ui::ai::AiEditorContext {
+            connection_id: Some(tab.connection_id),
+            database: tab.database.clone(),
+            schema: tab.schema.clone(),
+            db_type: Some(tab.kind.as_str().to_owned()),
+            current_sql: (!sql.is_empty()).then(|| sql.chars().take(24_000).collect()),
+            last_error: tab.execution_error.as_ref().map(|error| error.chars().take(2_000).collect()),
+            cached_tables,
+            ..Default::default()
+        }
     }
 
     pub fn open_query_text(
@@ -731,18 +755,6 @@ impl QueryEditor {
                         .color(Color32::YELLOW)
                         .strong(),
                     );
-                } else if let Some(report) = &tab.execution_report {
-                    ui.label(
-                        RichText::new(format!("{} ms", report.elapsed_ms))
-                            .color(Color32::GREEN)
-                            .strong(),
-                    );
-                    ui.label(
-                        RichText::new(format!("{} rows affected", report.affected_rows))
-                            .color(Color32::from_rgb(70, 110, 190))
-                            .strong(),
-                    );
-                    ui.label(format!("{} result set(s)", report.results.len()));
                 }
             }
         });
@@ -886,7 +898,24 @@ impl QueryEditor {
         self.refresh_deferred_highlight(tab_id);
         self.tab_bar(ui);
         ui.separator();
-        let side_width = self.side_panel_width;
+        let mut bounds = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+        let compact_history = self.side_panel_open && bounds.width() < 540.0;
+        if compact_history {
+            let split = bounds.bottom() - bounds.height().max(0.0) * 0.46;
+            let history_rect = Rect::from_min_max(Pos2::new(bounds.left(), split), bounds.max);
+            bounds.set_bottom(split - ui.spacing().item_spacing.y);
+            ui.painter().hline(
+                history_rect.x_range(),
+                split,
+                ui.visuals().widgets.noninteractive.bg_stroke,
+            );
+            ui.allocate_ui_at_rect(history_rect, |ui| {
+                ui.set_clip_rect(history_rect.intersect(ui.clip_rect()));
+                ui.add_space(5.0);
+                self.history_panel(ui, tab_id);
+            });
+        }
+        let show_side = self.side_panel_open && !compact_history;
         let connections_snapshot = self.connections.clone();
         let mut column_loads = Vec::new();
         // Navicat-style shortcuts detected inside the SQL editor; dispatched
@@ -894,23 +923,29 @@ impl QueryEditor {
         let mut shortcut_run_current = false;
         let mut shortcut_run_all = false;
         let mut shortcut_format = false;
-        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
-            let main_width = if self.side_panel_open {
-                (ui.available_width() - side_width - 12.0).max(360.0)
+        ui.scope(|ui| {
+            let spacing = ui.spacing().item_spacing.x;
+            let divider_width = 8.0;
+            let split_width = divider_width + spacing * 2.0;
+            let side_width = self
+                .side_panel_width
+                .min((bounds.width() - 240.0 - split_width).max(0.0));
+            let main_width = if show_side {
+                bounds.width() - side_width - split_width
             } else {
-                ui.available_width()
+                bounds.width()
             };
-            // Pin the row to the full remaining height (down to the status
-            // bar) so the results area and the history/favorites side panel
-            // both stretch to the bottom. `Ui::horizontal` cannot be used
-            // here: it only allocates `interact_size.y` of height, so every
-            // `available_height()` below collapses to zero once the content
-            // overflows and the result grid renders an empty body.
-            let row_height = ui.available_height();
-            ui.set_min_height(row_height);
+            let row_height = bounds.height().max(0.0);
+            let editor_height = if compact_history {
+                SQL_EDITOR_VIEWPORT_HEIGHT.min((row_height * 0.55).max(0.0))
+            } else {
+                SQL_EDITOR_VIEWPORT_HEIGHT
+            };
 
-            ui.vertical(|ui| {
-                ui.set_width(main_width);
+            let main_rect =
+                Rect::from_min_size(bounds.min, vec2(main_width.max(0.0), row_height));
+            ui.allocate_ui_at_rect(main_rect, |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(main_rect));
                 let Some(tab) = self.tabs.get_mut(&tab_id) else {
                     return;
                 };
@@ -945,11 +980,11 @@ impl QueryEditor {
                         ui.separator();
                         ScrollArea::vertical()
                             .id_source("query_editor_sql_scroll")
-                            .min_scrolled_height(SQL_EDITOR_VIEWPORT_HEIGHT)
-                            .max_height(SQL_EDITOR_VIEWPORT_HEIGHT)
+                            .min_scrolled_height(editor_height)
+                            .max_height(editor_height)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                ui.set_min_height(SQL_EDITOR_VIEWPORT_HEIGHT);
+                                ui.set_min_height(editor_height);
                                 let tokens = tab.highlighted_sql.clone();
                                 let editor_id = ui.make_persistent_id(("sql_editor", tab.id));
                                 let editor_has_focus =
@@ -1119,11 +1154,16 @@ impl QueryEditor {
                 self.results_panel(ui, tab_id);
             });
 
-            if self.side_panel_open {
-                // Stretch the divider and the side panel down to the status
-                // bar; the row is pinned to full height via set_min_height.
-                let (divider_rect, divider_response) =
-                    ui.allocate_exact_size(vec2(8.0, row_height), eframe::egui::Sense::drag());
+            if show_side {
+                let divider_rect = Rect::from_min_size(
+                    Pos2::new(main_rect.right() + spacing, bounds.top()),
+                    vec2(divider_width, row_height),
+                );
+                let divider_response = ui.interact(
+                    divider_rect,
+                    ui.id().with("query_history_divider"),
+                    eframe::egui::Sense::drag(),
+                );
                 if divider_response.dragged() {
                     self.side_panel_width = (self.side_panel_width
                         - divider_response.drag_delta().x)
@@ -1134,8 +1174,12 @@ impl QueryEditor {
                     [divider_rect.center_top(), divider_rect.center_bottom()],
                     Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
                 );
-                ui.vertical(|ui| {
-                    ui.set_width(side_width);
+                let side_rect = Rect::from_min_max(
+                    Pos2::new(divider_rect.right() + spacing, bounds.top()),
+                    bounds.max,
+                );
+                ui.allocate_ui_at_rect(side_rect, |ui| {
+                    ui.set_clip_rect(ui.clip_rect().intersect(side_rect));
                     ui.set_min_height(row_height);
                     self.history_panel(ui, tab_id);
                 });
@@ -1413,7 +1457,6 @@ impl QueryEditor {
         tab.page_loading = None;
         tab.execution_error = None;
         tab.results.clear();
-        tab.execution_report = None;
 
         let tx = self.tx.clone();
         let service = self.query_service.clone();
@@ -1458,7 +1501,6 @@ impl QueryEditor {
         tab.page_loading = None;
         tab.execution_error = None;
         tab.results.clear();
-        tab.execution_report = None;
 
         let tx = self.tx.clone();
         let service = self.query_service.clone();
@@ -1674,7 +1716,6 @@ impl QueryEditor {
             tab.pending_column_loads.clear();
             tab.completion.visible = false;
             tab.results.clear();
-            tab.execution_report = None;
             tab.execution_error = None;
             self.status = format!("Connection changed to {}", profile.name);
         }
@@ -1699,7 +1740,6 @@ impl QueryEditor {
             tab.pending_column_loads.clear();
             tab.completion.visible = false;
             tab.results.clear();
-            tab.execution_report = None;
             self.status = "Database changed".to_string();
         }
         self.load_schemas_for_tab(tab_id);
@@ -1722,7 +1762,6 @@ impl QueryEditor {
             tab.pending_column_loads.clear();
             tab.completion.visible = false;
             tab.results.clear();
-            tab.execution_report = None;
             self.status = "Schema changed".to_string();
         }
         self.load_tables_for_tab(tab_id);
@@ -1913,7 +1952,6 @@ impl QueryEditor {
                                     })
                                     .collect::<Vec<_>>();
                                 tab.selected_result = 0;
-                                tab.execution_report = Some(report.clone());
                                 tab.results = results;
                                 for (index, view) in tab.results.iter().enumerate() {
                                     if let Some((table, schema)) =
@@ -1983,7 +2021,6 @@ impl QueryEditor {
                                             self.runtime.clone(),
                                         );
                                         tab.selected_result = result_index;
-                                        tab.execution_report = Some(report.clone());
                                         self.status = format!(
                                             "Loaded result page in {} ms",
                                             report.elapsed_ms

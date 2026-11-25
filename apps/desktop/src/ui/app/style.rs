@@ -4,7 +4,7 @@ use eframe::egui::{
     TextStyle, Ui, Visuals,
 };
 
-/// dbx-inspired semantic palette. Kept here so the shell, tree and grids can
+/// Semantic palette. Kept here so the shell, tree and grids can
 /// share one source of truth instead of hard-coding their own RGB values.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
@@ -85,7 +85,7 @@ pub(super) fn apply_app_style(ctx: &Context, theme: AppTheme) {
     visuals.override_text_color = Some(palette.fg);
     visuals.hyperlink_color = palette.info;
 
-    // ---- Widgets: subtle borders + quiet hover, matching dbx ----
+    // ---- Widgets: subtle borders + quiet hover ----
     visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.noninteractive.weak_bg_fill = palette.surface;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);

@@ -1,5 +1,5 @@
 use super::{
-    style::apply_app_style,
+    style::{apply_app_style, Palette},
     ActivePanel, DesktopApp,
 };
 use crate::ui::i18n::{self, text as tr, Locale};
@@ -39,10 +39,42 @@ impl eframe::App for DesktopApp {
         // Top/bottom panels must be laid out before CentralPanel. Otherwise the
         // status bar is painted over the result grid's horizontal scrollbar.
         self.bottom_status(ctx);
+        let editor = if self.ai_panel.open {
+            self.ai_context()
+        } else {
+            Default::default()
+        };
+        let suggestion = self.ai_panel.show_chat(
+            ctx,
+            &self.runtime,
+            &editor,
+            Palette::for_theme(self.state.theme),
+        );
         self.central_panel(ctx);
+        self.ai_panel.show_settings(ctx, &self.runtime);
+        if let Some(sql) = suggestion {
+            if let Some(connection_id) = editor.connection_id {
+                if self.query_editor.open_query_text(
+                    connection_id,
+                    editor.database,
+                    editor.schema,
+                    "AI SQL".into(),
+                    sql.clone(),
+                ) {
+                    self.active_panel = ActivePanel::QueryEditor;
+                } else {
+                    ctx.copy_text(sql);
+                    self.state.set_status(tr("Copied"));
+                }
+            } else {
+                ctx.copy_text(sql);
+                self.state.set_status(tr("Copied"));
+            }
+        }
         self.connection_windows(ctx);
         self.table_export_window(ctx);
         self.import_table_window(ctx);
+        self.sql_file_window(ctx);
         self.drop_table_window(ctx);
         self.clear_window(ctx);
         self.error_window(ctx);
@@ -302,11 +334,35 @@ impl DesktopApp {
         self.spawn_structure_load(connection_id, database, schema, table);
     }
 
+    fn ai_context(&self) -> crate::ui::ai::AiEditorContext {
+        let mut editor = match self.active_panel {
+            ActivePanel::QueryEditor => self.query_editor.ai_editor_context(),
+            ActivePanel::TableEditor => self.active_table_editor
+                .and_then(|id| self.table_editors.get(&id))
+                .and_then(|table| table.ai_context())
+                .unwrap_or_default(),
+            ActivePanel::TableStructure => self.active_structure
+                .and_then(|id| self.table_structures.get(&id))
+                .map(|table| table.ai_context())
+                .unwrap_or_default(),
+            _ => return Default::default(),
+        };
+        let target = editor.connection_id.map(|id| (id, editor.database.clone(), editor.schema.clone()));
+        if let Some(tree) = self.object_tree.ai_context(target) {
+            if editor.connection_id.is_none() {
+                return tree;
+            }
+            editor.tables = tree.tables;
+            editor.cached_tables.extend(tree.cached_tables);
+            editor.preferred_table = editor.preferred_table.or(tree.preferred_table);
+        }
+        editor
+    }
+
     pub(super) fn central_panel(&mut self, ctx: &Context) {
         CentralPanel::default()
             .frame(
                 Frame::default()
-                    .fill(ctx.style().visuals.panel_fill)
                     .inner_margin(Margin {
                         left: 5.0,
                         right: 0.0,
@@ -315,10 +371,11 @@ impl DesktopApp {
                     }),
             )
             .show(ctx, |ui| {
-                // Keep every central-panel painter (including scrolled grids)
-                // inside the area to the right of the T-layout divider.
                 let central_clip = ui.max_rect().intersect(ui.clip_rect());
                 ui.set_clip_rect(central_clip);
+                // Fill only the space assigned to the workspace. A frame fill
+                // would grow with wide children and paint over the AI dock.
+                ui.painter().rect_filled(central_clip, 0.0, ui.visuals().panel_fill);
                 // Content gets a small left inset so nothing (tabs, toolbar,
                 // empty-state) is flush against the T-layout divider.
                 if matches!(self.active_panel, ActivePanel::RedisBrowser)
@@ -598,6 +655,10 @@ impl DesktopApp {
                             .on_hover_text(tr("Toggle theme (Ctrl+T)"))
                             .clicked()
                             .then(|| self.state.toggle_theme());
+
+                        if ui.selectable_label(self.ai_panel.open, "AI").clicked() {
+                            self.ai_panel.open = !self.ai_panel.open;
+                        }
 
                         let error_count = self.state.errors.len();
                         if error_count > 0
