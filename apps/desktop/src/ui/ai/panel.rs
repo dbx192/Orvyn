@@ -10,9 +10,10 @@ use crate::ui::{
     i18n::{self, Locale},
 };
 use app_core::metadata::MetadataService;
+use eframe::egui::text::LayoutJob;
 use eframe::egui::{
-    self, Align, Button, ComboBox, Context, Frame, Label, Layout, Margin, RichText, ScrollArea,
-    SidePanel, Stroke, TextEdit, Ui,
+    self, Align, Button, ComboBox, Context, FontFamily, FontId, Frame, Label, Layout, Margin,
+    RichText, ScrollArea, SidePanel, Stroke, TextEdit, TextFormat, Ui,
 };
 use secure_store::{EncryptedFileStore, SecureStore};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -23,6 +24,134 @@ use tokio::{
 
 const MAX_CONTEXT_CHARS: usize = 24_000;
 const PROMPT_HEIGHT: f32 = 72.0;
+
+/// Render the subset of Markdown most commonly returned by chat models while
+/// keeping the transcript selectable and lightweight during streaming.
+fn markdown_code_block(ui: &mut Ui, code: &str, palette: Palette) {
+    Frame::none()
+        .fill(palette.bg_deep)
+        .stroke(Stroke::new(1.0, palette.border))
+        .rounding(6.0)
+        .inner_margin(Margin::symmetric(9.0, 7.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button(label("Copy", "复制")).clicked() {
+                    ui.output_mut(|output| output.copied_text = code.to_owned());
+                }
+            });
+            ui.add(
+                Label::new(RichText::new(code).monospace())
+                    .wrap(true)
+                    .selectable(true),
+            );
+        });
+}
+
+fn markdown_message(ui: &mut Ui, text: &str, palette: Palette) {
+    let mut in_code = false;
+    let mut code = String::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            if in_code {
+                markdown_code_block(ui, code.trim_end(), palette);
+                code.clear();
+                in_code = false;
+            } else {
+                in_code = true;
+            }
+            continue;
+        }
+        if in_code {
+            code.push_str(line);
+            code.push('\n');
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let (prefix, body, heading) = if let Some(rest) = trimmed.strip_prefix("### ") {
+            ("", rest, 3)
+        } else if let Some(rest) = trimmed.strip_prefix("## ") {
+            ("", rest, 2)
+        } else if let Some(rest) = trimmed.strip_prefix("# ") {
+            ("", rest, 1)
+        } else if let Some(rest) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            ("* ", rest, 0)
+        } else if let Some(rest) = trimmed.strip_prefix("> ") {
+            ("| ", rest, 0)
+        } else if trimmed
+            .split_once(". ")
+            .is_some_and(|(number, _)| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
+        {
+            ("", trimmed, 0)
+        } else {
+            ("", line, 0)
+        };
+        let mut job = markdown_job(&format!("{prefix}{body}"), palette);
+        if heading > 0 {
+            for section in &mut job.sections {
+                section.format.font_id = FontId::proportional(15.0 + (3 - heading) as f32);
+                section.format.color = palette.fg;
+            }
+        }
+        if prefix == "| " {
+            for section in &mut job.sections {
+                section.format.color = palette.fg_muted;
+            }
+        }
+        if !job.text.is_empty() {
+            ui.add(Label::new(job).wrap(true).selectable(true));
+        } else {
+            ui.add_space(4.0);
+        }
+    }
+    if in_code && !code.is_empty() {
+        markdown_code_block(ui, code.trim_end(), palette);
+    }
+}
+
+fn markdown_job(text: &str, palette: Palette) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let normal = TextFormat {
+        font_id: FontId::proportional(14.0),
+        color: palette.fg,
+        ..Default::default()
+    };
+    let code = TextFormat {
+        font_id: FontId::new(13.0, FontFamily::Monospace),
+        color: palette.accent_fg,
+        background: palette.accent,
+        ..Default::default()
+    };
+    let mut rest = text;
+    while !rest.is_empty() {
+        let next = ["**", "__", "`", "*", "_"]
+            .iter()
+            .filter_map(|marker| rest.find(marker).map(|i| (i, *marker)))
+            .min_by_key(|(i, _)| *i);
+        let Some((start, marker)) = next else {
+            job.append(rest, 0.0, normal.clone());
+            break;
+        };
+        if start > 0 {
+            job.append(&rest[..start], 0.0, normal.clone());
+        }
+        let after = &rest[start + marker.len()..];
+        if let Some(end) = after.find(marker) {
+            let mut format = if marker == "`" { code.clone() } else { normal.clone() };
+            if marker == "*" || marker == "_" {
+                format.italics = true;
+            }
+            job.append(&after[..end], 0.0, format);
+            rest = &after[end + marker.len()..];
+        } else {
+            job.append(&rest[start..], 0.0, normal.clone());
+            break;
+        }
+    }
+    job
+}
 
 enum Event {
     Delta(String, String),
@@ -487,7 +616,7 @@ impl AiPanel {
                     for message in &chat.messages {
                         if message.role == "assistant" {
                             ui.label(RichText::new("AI").small().strong().color(palette.info));
-                            ui.add(Label::new(&message.content).wrap(true).selectable(true));
+                            markdown_message(ui, &message.content, palette);
                             if self.request.is_none() {
                                 for sql in prompts::extract_sql(&message.content) {
                                     if ui
@@ -537,7 +666,7 @@ impl AiPanel {
                             ui.add(Label::new(&request.reasoning).wrap(true).selectable(true));
                         });
                     }
-                    ui.add(Label::new(&request.answer).wrap(true).selectable(true));
+                    markdown_message(ui, &request.answer, palette);
                 }
             });
         suggestion

@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "app-core"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "db-clickhouse"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "db-common"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1638,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "db-duckdb"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "db-http"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "db-mongodb"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "db-mysql"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1692,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "db-odbc"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "db-postgres"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "db-redis"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1733,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "db-sqlite"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "db-sqlserver"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "db-common",
@@ -1755,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "db-tdengine"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "db-common",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "import-export"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "csv",
  "db-common",
@@ -4302,7 +4302,7 @@ dependencies = [
 
 [[package]]
 name = "orvyn"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "app-core",
  "arboard",
@@ -5374,7 +5374,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "secure-store"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
